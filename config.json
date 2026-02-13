@@ -1,0 +1,20 @@
+{
+  "sar_drift_directory": "sample_day/",	
+  "sar_drift_filename": "input/SARIceDrift_EG125_2025350T0000_2025350T2359_gfilter1.txt",
+  "sar_geotiff_filename": "input/SARIceDrift_EG125_2025350T0000_2025350T2359_gfilter1.tif",
+  "netcdf_cdl_file": "meta/sar_drift_output.cdl",
+  "output_dir": "output/",
+  "batch_process": true,
+  "delimiter": ",",
+  "skip_rows_before_header": 0,
+  "detect_outliers": true,
+  "ignore_vector_threshold": 10,
+  "use_geotiff": false,
+  "create_region_plot": false,
+  "vector_stride": 1,
+  "inlier_vector_stride": 10,
+  "quiver_scale_small_area": 1.0,
+  "quiver_scale_large_area": 0.1,
+  "precision": 3,
+  "verbose": true
+}

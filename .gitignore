@@ -1,0 +1,26 @@
+# Data files
+**/*.txt
+!requirements.txt
+**/*.csv
+**/*.xml
+**/*.xlsx
+**/*.bkp
+
+# Jupyter Notebook Checkpoints
+.ipynb_checkpoints/
+**/*.ipynb
+
+# Python cache
+__pycache__
+
+# Output files
+output
+overlays
+**/*.gpkg
+**/*.nc
+**/*.png
+
+# Ignored folders
+input
+misc
+sample_day
