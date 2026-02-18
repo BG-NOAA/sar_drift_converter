@@ -2,8 +2,8 @@
 """
 ******************************************************************************
 
- Project:    SAR Drift Output Generator
- Purpose:    Utility functions for sar_drift_output
+ Project:    SAR Drift Data converter
+ Purpose:    Converter SAR drift data into visually interactive output
  Author:     Brendon Gory, brendon.gory@noaa.gov
                            brendon.gory@colostate.edu
              Data Science Application Specialist (Research Associate II)
@@ -190,12 +190,12 @@ def _set_metadata(config):
     )
         
     rc = subprocess.call(myCmd1, shell=True)
-    if config['verbose']:
-        print(f'  {myCmd1}')
-        print(f'  ncgen return code: {rc}')
-    
     if rc != 0:
-        error_msg('Error in `ncgen` call. Cannot continue.', 16)
+        error_msg(
+            'Error in `ncgen` call. Cannot continue.\n'
+            f'Command: {myCmd1}\nError Code: {rc}', 
+            25
+        )
         
     return xr.open_dataset(ncgen_ofile_nc, decode_times=False)
 
@@ -463,7 +463,7 @@ def create_shape_package(df, base_name, config):
     # Save as a single GeoPackage file (supports mixed geometries)
     geopackage_file = f"{base_name}.gpkg"
     output_file_path = os.path.join(
-        config['output_dir'], f"{geopackage_file}"
+        config['gpkg_dir'], f"{geopackage_file}"
     )
     
     gdf_start = gdf_start.rename(
@@ -487,9 +487,7 @@ def create_shape_package(df, base_name, config):
     
     gdf_start = gdf_start['geometry']
     gdf_line = gdf_line['geometry']
-    
-    if config['verbose']:
-        print("  GeoPackage created")
+
     
     return gdf_start, gdf_line
 
@@ -568,21 +566,19 @@ def create_netcdf(df, base_name, config):
     
 
     # reduce data frame to needed features   
-    cols = [
-        'Date1', 'X1', 'Y1', 'X2', 'Y2', 'dx', 'dy', 'Speed_kmdy', 'Bear_deg'
-    ]
-    df_reduced = df[cols].copy()
-    df_reduced['Date1'] = pd.to_datetime(df_reduced['Date1'])
+    df_copy = df.copy()
+    df_copy['Date1'] = pd.to_datetime(df_copy['Date1'])
+    df_copy['Date2'] = pd.to_datetime(df_copy['Date2'])
     
     
     # Get the absolute minimum and maximum for lat (Y) and lon (X)
     min_x, max_x = (
-        df_reduced[['X1', 'X2']].min().min(),
-        df_reduced[['X1', 'X2']].max().max()
+        df_copy[['X1', 'X2']].min().min(),
+        df_copy[['X1', 'X2']].max().max()
     )
     min_y, max_y = (
-        df_reduced[['Y1', 'Y2']].min().min(),
-        df_reduced[['Y1', 'Y2']].max().max()
+        df_copy[['Y1', 'Y2']].min().min(),
+        df_copy[['Y1', 'Y2']].max().max()
     )
     
     
@@ -594,13 +590,14 @@ def create_netcdf(df, base_name, config):
     try:
         # Create an empty grid
         # (time, y, x)
-        grid_shape = (1, len(y_coords), len(x_coords))  
+        grid_shape = (1, len(y_coords), len(x_coords))
+        print(grid_shape)
         
         # time defaults
         epoch = datetime(1970, 1, 1)
-        mean_time = df_reduced['Date1'].mean()
-        min_time = df_reduced['Date1'].min()
-        max_time = df_reduced['Date1'].max()
+        mean_time = pd.concat([df_copy['Date1'], df_copy['Date2']]).mean()
+        min_time = df_copy['Date1'].min()
+        max_time = df_copy['Date2'].max()
         
         # convert to "seconds since 1970-01-01 00:00:00"
         time_sec = (mean_time - epoch).total_seconds()
@@ -701,7 +698,7 @@ def create_netcdf(df, base_name, config):
                     'time_origin': '01-Jan-1970 0:00:00',
                     'units': "seconds since 1970-01-01 00:00:00 UTC"
                 })
-            }
+            },           
         )
         
         
@@ -721,11 +718,37 @@ def create_netcdf(df, base_name, config):
             max_time.strftime('%Y-%m-%dT%H:%M:%SZ')
             )
         
+        # add spatial ref
+        spatial_ref_attrs = {
+            "grid_mapping_name": "polar_stereographic",
+            "latitude_of_projection_origin": 90.0,
+            "straight_vertical_longitude_from_pole": -45.0,
+            "standard_parallel": 70.0,
+            "false_easting": 0.0,
+            "false_northing": 0.0,
+            "semi_major_axis": 6378137.0,
+            "inverse_flattening": 298.257223563,
+            "spatial_ref": "EPSG:3413" ,
+            "crs": (
+                'PROJCS["WGS 84 / NSIDC Sea Ice Polar Stereographic North",'
+                'GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",'
+                '6378137,298.257223563]],PRIMEM["Greenwich",0],UNIT["degree",'
+                '0.0174532925199433]],PROJECTION["Polar_Stereographic"],'
+                'PARAMETER["latitude_of_origin",70],'
+                'PARAMETER["central_meridian",-45],'
+                'PARAMETER["scale_factor",1],PARAMETER["false_easting",0],'
+                'PARAMETER["false_northing",0],'
+                'UNIT["metre",1,AUTHORITY["EPSG","9001"]]]'
+            )
+        }
+        netcdf_grid['spatial_ref'] = xr.DataArray(
+            0, attrs=spatial_ref_attrs
+        )
         
         
         # Mapping data to the grid
         index_mapping = {}
-        for _, row in df_reduced.iterrows():
+        for _, row in df_copy.iterrows():
             # To get the i, j indices, we
             x_idx = np.argmin(np.abs(x_coords - row['X1']))
             y_idx = np.argmin(np.abs(y_coords - row['Y1']))
@@ -748,18 +771,21 @@ def create_netcdf(df, base_name, config):
         # Save to NetCDF with compression level 4
         
         output_file_path = os.path.join(
-            config['output_dir'], f"{base_name}.nc"
+            config['nc_dir'], f"{base_name}.nc"
         )
     
         # Save to NetCDF with compression level 4
-        netcdf_grid.to_netcdf(output_file_path, mode='w', encoding={
-            'Speed_kmdy': {'zlib': True, 'complevel': 4},
-            'dx': {'zlib': True, 'complevel': 4},
-            'dy': {'zlib': True, 'complevel': 4},
-            'Bear_deg': {'zlib': True, 'complevel': 4}
-        })
+        netcdf_grid.to_netcdf(
+            output_file_path, mode='w',
+            encoding={
+                'Speed_kmdy': {'zlib': True, 'complevel': 4},
+                'dx': {'zlib': True, 'complevel': 4},
+                'dy': {'zlib': True, 'complevel': 4},
+                'Bear_deg': {'zlib': True, 'complevel': 4},
+                'spatial_ref': {'dtype': 'int32'}
+            }
+        )
     
-        
         
         
     finally:
@@ -767,9 +793,7 @@ def create_netcdf(df, base_name, config):
         netcdf_grid.close()
         del netcdf_grid
         
-        print('  NetCDF file created')
         
-
 def overlay_sar_drift_on_geotiff(config, gdf_lines, df_sar, base_name):
     """
     Create a two-panel visualization of SAR sea-ice drift data overlaid 
@@ -848,6 +872,14 @@ def overlay_sar_drift_on_geotiff(config, gdf_lines, df_sar, base_name):
         ymin - buffer_deg,
         ymax + buffer_deg
     ]
+    
+    map_width = xmax - xmin
+    map_height = ymax - ymin
+    map_span = np.round(max(map_height, map_width), 0)
+    if map_span > 2_000_000:
+        quiver_scale = config['quiver_scale_large_area']
+    else:
+        quiver_scale = config['quiver_scale_small_area']
     
 
     # initialize plot
@@ -972,7 +1004,6 @@ def overlay_sar_drift_on_geotiff(config, gdf_lines, df_sar, base_name):
             lat_start.append(y0)
             dx.append(x1 - x0)
             dy.append(y1 - y0)
-            
     
     # Plot drift vectors as quivers
     stride = config['vector_stride']
@@ -980,16 +1011,16 @@ def overlay_sar_drift_on_geotiff(config, gdf_lines, df_sar, base_name):
     Y = lat_start[::stride]
     u = dx[::stride]
     v = dy[::stride]
-    mag = np.hypot(dx, dy) / 1000  # magnitude in km
+    mag = np.hypot(u, v) / 1000  # magnitude in km
     Q = ax.quiver(
         X, Y, u, v, mag,
         angles='xy',
         scale_units='xy',
-        # scale=config['quiver_scale_small_area'],
-        scale=0.5,
-        width=0.003,
-        cmap='viridis',
-        alpha=0.8
+        scale=quiver_scale,
+        # scale=0.25,
+        width=0.001,
+        pivot="tail",
+        cmap='viridis'
     )
     
     
@@ -1024,7 +1055,7 @@ def overlay_sar_drift_on_geotiff(config, gdf_lines, df_sar, base_name):
     
    
     # titles
-    ax.set_title('dX, dY Vectors with Magnitude', fontsize=12)
+    ax.set_title('Velocity Vectors (u, v)', fontsize=12)
     fig.suptitle(
         f"Vector Overlay on GeoTiff:\n{base_name}",
         fontsize=14
@@ -1574,6 +1605,14 @@ def detect_outliers(config, outlier_type='sd'):
         xmax = np.round(outlier_df["X1"].max() + pad, 3)
         ymin = np.round(outlier_df["Y1"].min() - pad, 3)
         ymax = np.round(outlier_df["Y1"].max() + pad, 3)
+        
+        map_width = xmax - xmin
+        map_height = ymax - ymin
+        map_span = np.round(max(map_height, map_width), 0)
+        if map_span > 2_000_000:
+            quiver_scale = config['quiver_scale_large_area']
+        else:
+            quiver_scale = config['quiver_scale_small_area']
 
         ax.set_extent([xmin, xmax, ymin, ymax], crs=crs_3413)
     
@@ -1604,7 +1643,7 @@ def detect_outliers(config, outlier_type='sd'):
             inlier_X, inlier_Y, inlier_u, inlier_v,
             transform=crs_3413,
             angles="xy", scale_units="xy",
-            scale=config['quiver_scale_small_area'],
+            scale=quiver_scale,
             width=0.002, pivot="tail",
             color="green", zorder=2, label="inliers"
         )
@@ -1613,7 +1652,7 @@ def detect_outliers(config, outlier_type='sd'):
             outlier_X, outlier_Y, outlier_u, outlier_v,
             transform=crs_3413,
             angles="xy", scale_units="xy",
-            scale=config['quiver_scale_small_area'],
+            scale=quiver_scale,
             width=0.002, pivot="tail",
             color="red", zorder=2, label="outliers"
         )

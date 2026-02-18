@@ -236,6 +236,16 @@ def read_json_config():
             f"Cannot find output directory `{output_dir}`",
             10
         )
+    else:
+        # create subfolders
+        formatted_data_dir = os.path.join(output_dir, 'formatted_data')
+        os.makedirs(formatted_data_dir, exist_ok=True)
+        gpkg_dir = os.path.join(output_dir, 'gpkg')
+        os.makedirs(gpkg_dir, exist_ok=True)
+        nc_dir = os.path.join(output_dir, 'nc')
+        os.makedirs(nc_dir, exist_ok=True)
+        png_dir = os.path.join(output_dir, 'png')
+        os.makedirs(png_dir, exist_ok=True)
 
 
     # delimiter character (encode().decode handles \t)
@@ -374,6 +384,10 @@ def read_json_config():
         'sar_geotiff_file': sar_geotiff_file,
         'netcdf_cdl_file': netcdf_cdl_file,
         'output_dir': output_dir,
+        'formatted_data_dir': formatted_data_dir,
+        'gpkg_dir': gpkg_dir,
+        'nc_dir':nc_dir,
+        'png_dir': png_dir,
         'batch_process': batch_process,
         'delimiter': delimiter,
         'skip_rows_before_header': skip_rows_before_header,
@@ -454,77 +468,103 @@ def main():
     # import sar_drift as sd
     import util
     import os
+    from glob import glob
+    from tqdm import tqdm
     from datetime import datetime
     
     # parse user arguments
     config = read_json_config()
 
-    
-    # set base name for output files
-    sar_drift_file_basename = os.path.splitext(
-        os.path.basename(config['sar_drift_file'])
-    )[0]
-
-       
-    # Read SAR drift data file
-    df_sar = util.read_sar_drift_data_file(
-        input_file=config['sar_drift_file'],
-        config=config
-    )
-
-    output_path = os.path.join(
-        config['output_dir'],
-        f"formatted_{os.path.basename(config['sar_drift_file'])}"
-    )
-    output_path = f"{os.path.splitext(output_path)[0]}.csv"
-    df_sar.to_csv(output_path, index=False)
-    
-
-    # Per OSI SAF, the dates in file names that have motion data
-    # the dates in the file typically is the end date of the observation period
-    # https://osisaf-hl.met.no/sites/osisaf-hl/files/user_manuals/osisaf_pum_sea-ice-drift-lr_v1p9.pdf
-    # Page 25
-    
-    # Version `0` indicates first process wihtout cleaned data
-    end_date = df_sar['Date2'].max()
-    end_date_formatted = datetime.strptime(
-        end_date, "%Y-%m-%d %H:%M:%S"
-    ).strftime("%Y%m%d")
-    
-    output_basename = f"SIVelocity_SAR_{end_date_formatted}_v0"
-
-    # Create shape file package for QGIS    
-    gdf_points, gdf_lines = util.create_shape_package(
-        df=df_sar,
-        base_name=output_basename,
-        config=config
-    )
+    files= []
+    if config['batch_process']:
+        all_files = glob(os.path.join(config['sar_drift_directory'], '*'))
+        for file in all_files:
+            if ('.txt' in file) or ('.csv' in file):
+                files.append(file)
+    else:
+        files = [config['sar_drift_file']]
     
     
-    # Create NetCDF file for QGIS    
-    util.create_netcdf(
-        df=df_sar,
-        base_name=output_basename,
-        config=config
-    )
+    for data_file in tqdm(files, desc='Processing data files...'):
+        # set base name for output files
+        data_file_basename = os.path.splitext(
+            os.path.basename(data_file)
+        )[0]
     
-    
-    # Overlay SAR drift data vectors on geotiff image
-    util.overlay_sar_drift_on_geotiff(
-        config=config,
-        gdf_lines=gdf_lines,
-        df_sar=df_sar,
-        base_name=output_basename
-    )
-    
-    exit()
-    
-    # Detect outliers
-    if config['detect_outliers']:
-        util.detect_outliers(
-            config=config,
-            outlier_type='sd'
+           
+        # Read SAR drift data file
+        df_sar = util.read_sar_drift_data_file(
+            input_file=data_file,
+            config=config
         )
+    
+        output_path = os.path.join(
+            config['formatted_data_dir'],
+            f"formatted_{data_file_basename}.csv"
+        )
+        df_sar.to_csv(output_path, index=False)
+        
+    
+        """
+        Per OSI SAF, the dates in file names that have motion data
+        the dates in the file typically is the end date of the observation period
+        https://osisaf-hl.met.no/sites/osisaf-hl/files/user_manuals/
+        osisaf_pum_sea-ice-drift-lr_v1p9.pdf
+        (Page 25)
+        
+        Version `0` indicates first process wihtout cleaned data
+        
+        For multiple pairs in one period, have included start/end date/time
+        """
+        start_min = df_sar['Date1'].min()
+        start_date_time = datetime.strptime(
+            start_min, "%Y-%m-%d %H:%M:%S"
+        ).strftime("%Y%m%d_%H%M%S")
+
+        end_max = df_sar['Date2'].max()
+        end_date_time = datetime.strptime(
+            end_max, "%Y-%m-%d %H:%M:%S"
+        ).strftime("%Y%m%d_%H%M%S")
+        
+        output_basename = (
+            f"SIVelocity_SAR_{start_date_time}_{end_date_time}_v0"
+        )
+    
+    
+        # Create shape file package for QGIS    
+        gdf_points, gdf_lines = util.create_shape_package(
+            df=df_sar,
+            base_name=output_basename,
+            config=config
+        )
+        
+        
+        # Create NetCDF file for QGIS    
+        util.create_netcdf(
+            df=df_sar,
+            base_name=output_basename,
+            config=config
+        )
+        
+        continue
+        
+        
+        # Overlay SAR drift data vectors on geotiff image
+        util.overlay_sar_drift_on_geotiff(
+            config=config,
+            gdf_lines=gdf_lines,
+            df_sar=df_sar,
+            base_name=output_basename
+        )
+        
+        exit()
+        
+        # Detect outliers
+        if config['detect_outliers']:
+            util.detect_outliers(
+                config=config,
+                outlier_type='sd'
+            )
     
     
     
