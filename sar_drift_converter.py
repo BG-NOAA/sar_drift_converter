@@ -517,24 +517,20 @@ def main():
         For multiple pairs in one period, have included start/end date/time
         """
         start_min = df_sar['Date1'].min()
-        start_date_time = datetime.strptime(
+        start_date = datetime.strptime(
             start_min, "%Y-%m-%d %H:%M:%S"
-        ).strftime("%Y%m%d_%H%M%S")
+        ).strftime("%Y%m%d")
 
         end_max = df_sar['Date2'].max()
-        end_date_time = datetime.strptime(
+        end_date = datetime.strptime(
             end_max, "%Y-%m-%d %H:%M:%S"
-        ).strftime("%Y%m%d_%H%M%S")
-        
-        output_basename = (
-            f"SIVelocity_SAR_{start_date_time}_{end_date_time}_v0"
-        )
+        ).strftime("%Y%m%d")
     
     
         # Create shape file package for QGIS    
         gdf_points, gdf_lines = util.create_shape_package(
             df=df_sar,
-            base_name=output_basename,
+            base_name=data_file_basename,
             config=config
         )
         
@@ -542,12 +538,17 @@ def main():
         # Create NetCDF file for QGIS    
         util.create_netcdf(
             df=df_sar,
-            base_name=output_basename,
+            base_name=data_file_basename,
             config=config
         )
+        continue
+        # combine all created netcdf files into one
+        output_basename = (
+            f"SIVelocity_SAR_{start_date}_{end_date}_12km_NH_v00"
+        )
+        util.concat_nc_files()
         
         continue
-        
         
         # Overlay SAR drift data vectors on geotiff image
         util.overlay_sar_drift_on_geotiff(

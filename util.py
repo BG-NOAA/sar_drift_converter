@@ -119,13 +119,13 @@ def _set_transformer():
         "no_defs": True
     }
     
-    transformer['4326_3413'] = Transformer.from_crs(
+    transformer['4326_to_3413'] = Transformer.from_crs(
         transformer['crs_string_4326'],
         transformer['crs_string_3413'],
         always_xy=True
     )
 
-    transformer['3413_4326'] = Transformer.from_crs(
+    transformer['3413_to_4326'] = Transformer.from_crs(
         transformer['crs_string_3413'],
         transformer['crs_string_4326'],
         always_xy=True
@@ -211,6 +211,156 @@ def _parse_pair_times(name):
     t1 = datetime.strptime(parts[0], "%Y_%m_%d_%H_%M_%S")
     t2 = datetime.strptime(parts[1], "%Y_%m_%d_%H_%M_%S")
     return t1, t2
+
+
+def _create_arctic_grid(nc_file_path, run_date, config):
+    """
+    Creates a NaN-filled Arctic grid NetCDF in EPSG:3413 at resolution_km.
+    Uses NASA EASE Grid 12.5
+    """
+    import numpy as np
+    import xarray as xr
+    from datetime import datetime
+    
+    # Arctic region in lon/lat degrees
+    lon_min = -180.0
+    lon_max = 180.0
+    lat_min = 60.0
+    lat_max = 90.0
+
+    # Transform the lat/lon bounding box corners into EPSG:3413
+    transformer = _set_transformer()
+    corners_lon = np.array([lon_min, lon_max, lon_max, lon_min])
+    corners_lat = np.array([lat_min, lat_min, lat_max, lat_max])
+    cx, cy = transformer['4326_to_3413'].transform(corners_lon, corners_lat)
+
+    # Derive projected bounds (meters)
+    xmin, xmax = float(np.min(cx)), float(np.max(cx))
+    ymin, ymax = float(np.min(cy)), float(np.max(cy))
+
+    # Build x/y vectors at 1 km resolution (meters)
+    res_m = 1000.0
+
+    # create default NaN grid (y, x)
+    x = np.arange(xmin, xmax + res_m, res_m, dtype=np.float64)
+    y = np.arange(ymin, ymax + res_m, res_m, dtype=np.float64)
+    data = np.full((y.size, x.size), np.nan, dtype=np.float32)
+    x2d, y2d = np.meshgrid(x, y)
+
+
+
+    ds = xr.Dataset(
+        data_vars={
+            "arctic_region": (("time", "y", "x"), data[None, :, :]),
+            "lon": (("y", "x"), x2d),
+            "lat": (("y", "x"), y2d)
+        },
+        coords={
+            "time": ("time", [run_date]),
+            "x": ("x", x),
+            "y": ("y", y)
+        },
+        attrs={
+            "title": "Arctic base grid",
+            "crs": "EPSG:3413",
+            "grid_resolution_km": res_m / 1000,
+            "lat_lon_bounds": (
+                f"lon[{lon_min},{lon_max}], lat[{lat_min},{lat_max}]"
+            )
+        },
+    )
+
+
+    # Set NetCDF standard attributes
+    metadata_nc = _set_metadata(config)
+    
+    
+    # Replace placeholders with real values
+    ds.attrs.update(metadata_nc.attrs)
+    ds.attrs['date_created'] = (
+        datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+    )
+    ds.attrs['time_coverage_start'] = (
+        f'{datetime.strptime(run_date, "%Y%m%d").strftime("%Y-%m-%d")}'
+        '00:00:00'
+    )
+    ds.attrs['time_coverage_end'] = (
+        f'{datetime.strptime(run_date, "%Y%m%d").strftime("%Y-%m-%d")}'
+        '23:59:59'
+    )
+    
+    # add spatial ref
+    spatial_ref_attrs = {
+        "grid_mapping_name": "polar_stereographic",
+        "latitude_of_projection_origin": 90.0,
+        "straight_vertical_longitude_from_pole": -45.0,
+        "standard_parallel": 70.0,
+        "false_easting": 0.0,
+        "false_northing": 0.0,
+        "semi_major_axis": 6378137.0,
+        "inverse_flattening": 298.257223563,
+        "spatial_ref": "EPSG:3413" ,
+        "crs": (
+            'PROJCS["WGS 84 / NSIDC Sea Ice Polar Stereographic North",'
+            'GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",'
+            '6378137,298.257223563]],PRIMEM["Greenwich",0],UNIT["degree",'
+            '0.0174532925199433]],PROJECTION["Polar_Stereographic"],'
+            'PARAMETER["latitude_of_origin",70],'
+            'PARAMETER["central_meridian",-45],'
+            'PARAMETER["scale_factor",1],PARAMETER["false_easting",0],'
+            'PARAMETER["false_northing",0],'
+            'UNIT["metre",1,AUTHORITY["EPSG","9001"]]]'
+        )
+    }
+    ds['spatial_ref'] = xr.DataArray(
+        0, attrs=spatial_ref_attrs
+    )
+
+    # Save to NetCDF with compression level 4
+    ds.to_netcdf(
+        nc_file_path, mode='w',
+        encoding={
+            "arctic_region": {"zlib": True, "complevel": 4, "dtype": "float32"},
+            "lon": {"zlib": True, "complevel": 4, "dtype": "float32"},
+            "lat": {"zlib": True, "complevel": 4, "dtype": "float32"},
+            'spatial_ref': {'dtype': 'int32'}
+        }
+    )
+
+    ds.close()
+    del ds
+       
+        
+def _nearest_idx_1d(coord_1d, values):
+    """
+    Find nearest indices of coordinates based on each value
+    Coordinates must be sorted
+
+    Parameters
+    ----------
+    coord_1d (np.ndarray): coordinates of grids
+    values (np.ndarray): values to map on coordinates' i,j
+
+    Returns
+    -------
+    np.ndarray
+
+    """
+    import numpy as np
+    
+    values = np.asarray(values)
+    # If 'left', the index of the first suitable location found is given.
+    idx = np.searchsorted(coord_1d, values, side='left')
+    
+    # faster alternative to np.minimum
+    idx = np.clip(idx, 1, len(coord_1d) - 1) 
+    left, right = coord_1d[idx - 1], coord_1d[idx]
+    
+    # default to left if in the middle
+    # `choose_left` is True|False then passed to np.where condition
+    choose_left = (values - left) <= (right - values) 
+    
+    return np.where(choose_left, idx - 1, idx).astype(np.int64)
 
 
 #=========
@@ -312,10 +462,10 @@ def read_sar_drift_data_file(input_file, config):
     # transform lon/lat to polarstereographic meters
     transformer = _set_transformer()
     
-    df['X1'], df['Y1'] = transformer['4326_3413'].transform(
+    df['X1'], df['Y1'] = transformer['4326_to_3413'].transform(
         df['Lon1'].values, df['Lat1'].values
     )
-    df['X2'], df['Y2'] = transformer['4326_3413'].transform(
+    df['X2'], df['Y2'] = transformer['4326_to_3413'].transform(
         df['Lon2'].values, df['Lat2'].values
     )
     
@@ -405,10 +555,10 @@ def create_shape_package(df, base_name, config):
     transformer = _set_transformer()
     
     # transform projection
-    df_local['X1'], df_local['Y1'] = transformer['4326_3413'].transform(
+    df_local['X1'], df_local['Y1'] = transformer['4326_to_3413'].transform(
         df_local['Lon1'].values, df_local['Lat1'].values
     )
-    df_local['X2'], df_local['Y2'] = transformer['4326_3413'].transform(
+    df_local['X2'], df_local['Y2'] = transformer['4326_to_3413'].transform(
         df_local['Lon2'].values, df_local['Lat2'].values
     )
 
@@ -564,7 +714,7 @@ def create_netcdf(df, base_name, config):
     # Define grid resolution and bounds
     resolution_km = 1  # Resolution in km
     
-
+    
     # reduce data frame to needed features   
     df_copy = df.copy()
     df_copy['Date1'] = pd.to_datetime(df_copy['Date1'])
@@ -587,11 +737,11 @@ def create_netcdf(df, base_name, config):
     x_coords = np.arange(min_x, max_x, resolution_km * 1000)
     y_coords = np.arange(min_y, max_y, resolution_km * 1000)
     
+    
     try:
         # Create an empty grid
         # (time, y, x)
         grid_shape = (1, len(y_coords), len(x_coords))
-        print(grid_shape)
         
         # time defaults
         epoch = datetime(1970, 1, 1)
@@ -604,6 +754,7 @@ def create_netcdf(df, base_name, config):
         
         # time array for NetCDF
         time_array = np.array([time_sec], dtype='float64')
+        
         
         # shell of NetCDF
         netcdf_grid = xr.Dataset(
@@ -698,7 +849,7 @@ def create_netcdf(df, base_name, config):
                     'time_origin': '01-Jan-1970 0:00:00',
                     'units': "seconds since 1970-01-01 00:00:00 UTC"
                 })
-            },           
+            }        
         )
         
         
@@ -766,15 +917,12 @@ def create_netcdf(df, base_name, config):
                 netcdf_grid['dx'][0, y_idx, x_idx] = row['dx']
                 netcdf_grid['dy'][0, y_idx, x_idx] = row['dy']
                 netcdf_grid['Bear_deg'][0, y_idx, x_idx] = row['Bear_deg']
-        
+
         
         # Save to NetCDF with compression level 4
-        
         output_file_path = os.path.join(
             config['nc_dir'], f"{base_name}.nc"
         )
-    
-        # Save to NetCDF with compression level 4
         netcdf_grid.to_netcdf(
             output_file_path, mode='w',
             encoding={
@@ -851,7 +999,6 @@ def overlay_sar_drift_on_geotiff(config, gdf_lines, df_sar, base_name):
     import numpy as np
     import matplotlib.pyplot as plt
     from shapely.geometry import LineString, Polygon
-    from pyproj import Transformer
     import cartopy.crs as ccrs
     import cartopy.feature as cfeature
     from mpl_toolkits.axes_grid1.inset_locator import inset_axes
@@ -881,6 +1028,8 @@ def overlay_sar_drift_on_geotiff(config, gdf_lines, df_sar, base_name):
     else:
         quiver_scale = config['quiver_scale_small_area']
     
+    
+    transformer = _set_transformer()
 
     # initialize plot
     fig = plt.figure(figsize=(18, 10))
@@ -891,10 +1040,7 @@ def overlay_sar_drift_on_geotiff(config, gdf_lines, df_sar, base_name):
         # -------------------------------
         
         # --- overview map with land and coastlines---
-        # transform 3413 to 4326 to draw True North arrow
-        to_lonlat = Transformer.from_crs(
-            "EPSG:3413", "EPSG:4326", always_xy=True
-        )
+
         
         # Convert all 4 corners of the SAR extent
         corner_coords = [
@@ -905,8 +1051,10 @@ def overlay_sar_drift_on_geotiff(config, gdf_lines, df_sar, base_name):
             (xmin, ymin)  # close the loop
         ]
         
-        # transform meters to degrees
-        corner_lonlat = [to_lonlat.transform(x, y) for x, y in corner_coords]
+        # transform 3413 to 4326 to draw True North arrow
+        corner_lonlat = []
+        for x, y in corner_coords:
+            corner_lonlat.append(transformer['3413_to_4326'].transform(x, y))
         
         # Create a shapely Polygon and extract x/y separately
         poly = Polygon(corner_lonlat)
@@ -1067,10 +1215,7 @@ def overlay_sar_drift_on_geotiff(config, gdf_lines, df_sar, base_name):
         config['output_dir'], f"{base_name}.png"
     )
     fig.savefig(png_file, bbox_inches='tight', dpi=300)
-    
-    if config['verbose']:
-        print('  Overlay plot created')
-    
+        
     
     return fig
         
@@ -1273,14 +1418,15 @@ def add_graticules(ax, map_extent):
     
     
     import numpy as np
-    from pyproj import Transformer
     
-    # Transformer from EPSG:3413 to EPSG:4326
-    to_lonlat = Transformer.from_crs("EPSG:3413", "EPSG:4326", always_xy=True)
-    
-    # Corners in degrees
-    lon_min, lat_min = to_lonlat.transform(map_extent[0], map_extent[2])
-    lon_max, lat_max = to_lonlat.transform(map_extent[1], map_extent[3])
+    # Corners in degrees transform from EPSG:3413 to EPSG:4326
+    transformer = _set_transformer()
+    lon_min, lat_min = (
+        transformer['3413_to_4326'].transform(map_extent[0], map_extent[2])
+    )
+    lon_max, lat_max = (
+        transformer['3413_to_4326'].transform(map_extent[1], map_extent[3])
+    )
     
     # Fix inverted bounds
     lon_min, lon_max = sorted([lon_min, lon_max])
@@ -1301,8 +1447,6 @@ def add_graticules(ax, map_extent):
         5
     )
 
-
-    to_3413 = Transformer.from_crs("EPSG:4326", "EPSG:3413", always_xy=True)
     
     # Extend the longitude/latitude range slightly (e.g., 10%) 
     # to ensure full coverage
@@ -1320,13 +1464,15 @@ def add_graticules(ax, map_extent):
     # Vertical lines for longitude
     for lon in lon_labels:
         lats = np.linspace(lat_min_ext, lat_max_ext, 200)
-        points = [to_3413.transform(lon, lat) for lat in lats]
+        points = []
+        for lat in lats:
+            points.append(transformer['4326_to_3413'].transform(lon, lat))
         xs, ys = zip(*points)
         ax.plot(xs, ys, color='lightgray', linestyle='--', linewidth=0.5)
         
     # longitude labels
     for lon in lon_labels:
-        x, y = to_3413.transform(lon, lat_min)
+        x, y = transformer['3413_to_4326'].transform(lon, lat_min)
         ax.text(
             x + 30000,
             y + 5000,
@@ -1340,13 +1486,15 @@ def add_graticules(ax, map_extent):
     # horizontal lines for latitude    
     for lat in lat_labels:
         lons = np.linspace(lon_min_ext, lon_max_ext, 200)
-        points = [to_3413.transform(lon, lat) for lon in lons]
+        points = []
+        for lon in lons:
+            points.append(transformer['4326_to_34123'].transform(lon, lat))
         xs, ys = zip(*points)
         ax.plot(xs, ys, color='lightgray', linestyle='--', linewidth=0.5)    
     
     # Label latitudes at right
     for lat in lat_labels:
-        x, y = to_3413.transform(lon_labels[-1], lat)
+        x, y = transformer['4326_to_3413'].transform(lon_labels[-1], lat)
         ax.text(
             x - 5000,
             y - 10000,
@@ -1447,14 +1595,14 @@ def add_true_north(ax, xmin, xmax, ymin, ymax):
     y_ref = ymin + 0.05 * (ymax - ymin)
     
     # convert meters to degrees
-    lon_ref, lat_ref = transformer['3413_4326'].transform(x_ref, y_ref)
+    lon_ref, lat_ref = transformer['3413_to_4326'].transform(x_ref, y_ref)
     
     # move a small distance north
     lat_north = lat_ref + 0.5
     lon_north = lon_ref
     
     # convert degrees back to meters
-    x_north, y_north = transformer['4326_3413'].transform(lon_north, lat_north)
+    x_north, y_north = transformer['4326_to_3413'].transform(lon_north, lat_north)
     
     # arrow
     ax.annotate(
