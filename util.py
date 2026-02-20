@@ -106,6 +106,12 @@ def _set_transformer():
     transformer['crs_string_4326'] = CRS.from_string(
         "+proj=longlat +datum=WGS84 +no_defs +type=crs"
     )
+    transformer["crs_string_3408"] = CRS.from_string(
+        "+proj=laea +lat_0=90 +lon_0=0 "
+        "+x_0=0 +y_0=0 "
+        "+a=6371228 +b=6371228 "
+        "+units=m +no_defs +type=crs"
+    )
     
     transformer['proj4_3413_dict'] = {
         "proj": "stere",
@@ -128,6 +134,12 @@ def _set_transformer():
     transformer['3413_to_4326'] = Transformer.from_crs(
         transformer['crs_string_3413'],
         transformer['crs_string_4326'],
+        always_xy=True
+    )
+    
+    transformer['4326_to_3408'] = Transformer.from_crs(
+        transformer['crs_string_4326'],
+        transformer['crs_string_3408'],
         always_xy=True
     )
     
@@ -330,6 +342,106 @@ def _create_arctic_grid(nc_file_path, run_date, config):
     ds.close()
     del ds
        
+
+def _create_netcdf_base_grid():
+    """
+    Build an EPSG:3413 (NSIDC Polar Stereographic North) regular x/y grid at step_m,
+    compute lat/lon at cell centers, and save a template NetCDF.
+
+    The domain is defined by a regular x/y lattice that covers the entire range of
+    longitudes and the latitude band >= lat_min. Cells below lat_min are masked.
+    """
+    import numpy as np
+    import xarray as xr
+    from pyproj import CRS, Transformer
+
+    # CRS
+    crs = CRS.from_epsg(3413)
+    step_m = 12_500
+    
+    to_3413 = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
+    to_ll = Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
+
+    # ---- Build a conservative x/y bounding box that covers lon [-180,180] for lat>=lat_min ----
+    # Sample the boundary at lat_min across all longitudes; take min/max projected x/y.
+    # This reliably creates an x/y rectangle big enough.
+    lons = np.linspace(-180, 180, 1441)  # dense enough
+    lats = np.full_like(lons, lat_min, dtype=float)
+    xs, ys = to_3413.transform(lons, lats)
+
+    # Add the pole point to ensure we include the top (usually near 0,0 in polar stereo)
+    x_pole, y_pole = to_3413.transform(0.0, 90.0)
+
+    xmin = np.nanmin(np.concatenate([xs, [x_pole]]))
+    xmax = np.nanmax(np.concatenate([xs, [x_pole]]))
+    ymin = np.nanmin(np.concatenate([ys, [y_pole]]))
+    ymax = np.nanmax(np.concatenate([ys, [y_pole]]))
+
+    # Snap bounds outward to the 12.5 km lattice (anchored at 0)
+    def snap_floor(v, step):
+        return np.floor(v / step) * step
+
+    def snap_ceil(v, step):
+        return np.ceil(v / step) * step
+
+    xmin = snap_floor(xmin, step_m)
+    xmax = snap_ceil(xmax, step_m)
+    ymin = snap_floor(ymin, step_m)
+    ymax = snap_ceil(ymax, step_m)
+
+    # Coordinate vectors (cell centers). Keep them increasing.
+    x = np.arange(xmin, xmax + step_m, step_m, dtype=np.float64)
+    y = np.arange(ymin, ymax + step_m, step_m, dtype=np.float64)
+
+    # 2D mesh of cell centers
+    xx, yy = np.meshgrid(x, y)
+    lon2d, lat2d = to_ll.transform(xx, yy)  # returns degrees
+
+    # Mask outside your requested latitude band (below lat_min, or above lat_max if you want)
+    # Note: lat_max=90 usually does nothing, but included for completeness
+    valid = (lat2d >= lat_min) & (lat2d <= lat_max)
+
+    lat2d = np.where(valid, lat2d, np.nan)
+    lon2d = np.where(valid, lon2d, np.nan)
+
+    # Build dataset
+    ds = xr.Dataset(
+        data_vars=dict(
+            latitude=(("y", "x"), lat2d.astype(np.float32), {"units": "degrees_north"}),
+            longitude=(("y", "x"), lon2d.astype(np.float32), {"units": "degrees_east"}),
+            valid_mask=(("y", "x"), valid.astype(np.uint8), {"long_name": "1=within lat range"}),
+        ),
+        coords=dict(
+            x=("x", x, {"standard_name": "projection_x_coordinate", "units": "m"}),
+            y=("y", y, {"standard_name": "projection_y_coordinate", "units": "m"}),
+        ),
+        attrs=dict(
+            title="EPSG:3413 Polar Stereographic North template grid",
+            summary=f"Regular EPSG:3413 x/y grid at {step_m/1000:.3f} km spacing; "
+                    f"latitudes outside [{lat_min}, {lat_max}] masked.",
+            Conventions="CF-1.8",
+        )
+    )
+
+    # CF grid mapping variable (CRS metadata)
+    # xarray will store attrs; many tools look for a variable named 'crs' or 'spatial_ref'.
+    ds["crs"] = xr.DataArray(0, attrs=crs.to_cf())
+    ds["crs"].attrs["crs_wkt"] = crs.to_wkt()
+
+    # Link lat/lon to grid mapping
+    ds["latitude"].attrs["grid_mapping"] = "crs"
+    ds["longitude"].attrs["grid_mapping"] = "crs"
+
+    # Save
+    encoding = {
+        "latitude": {"zlib": True, "complevel": 4},
+        "longitude": {"zlib": True, "complevel": 4},
+        "valid_mask": {"zlib": True, "complevel": 4},
+    }
+    ds.to_netcdf(out_path, format="NETCDF4", engine="netcdf4", encoding=encoding)
+
+    return ds
+
         
 def _nearest_idx_1d(coord_1d, values):
     """
@@ -362,6 +474,32 @@ def _nearest_idx_1d(coord_1d, values):
     
     return np.where(choose_left, idx - 1, idx).astype(np.int64)
 
+
+def _ensure_increasing_1d_coord(ds, dim):
+    """
+    Ensure ds[dim] is monotonic increasing by flipping if needed.
+    (Cheaper than sortby for regular grids.)
+    """
+    import numpy as np
+    
+    if dim not in ds.dims:
+        return ds
+    coord = ds[dim].values
+    if coord.size < 2:
+        return ds
+
+    # If decreasing, flip
+    if coord[1] < coord[0]:
+        ds = ds.isel({dim: slice(None, None, -1)})
+        coord = ds[dim].values
+
+    # fall back to sortby if still not properly sorted
+    diffs = np.diff(coord.astype("float64"))
+    if np.any(diffs < -1e-9):
+        ds = ds.sortby(dim)
+
+    return ds
+    
 
 #=========
 # Data I/O
@@ -453,10 +591,10 @@ def read_sar_drift_data_file(input_file, config):
 
 
     # Convert lon/lat to float and round
-    df['Lon1'] = np.round(df['Lon1'].astype(float), precision)
-    df['Lat1'] = np.round(df['Lat1'].astype(float), precision)
-    df['Lon2'] = np.round(df['Lon2'].astype(float), precision)
-    df['Lat2'] = np.round(df['Lat2'].astype(float), precision)
+    # df['Lon1'] = np.round(df['Lon1'].astype(float), precision)
+    # df['Lat1'] = np.round(df['Lat1'].astype(float), precision)
+    # df['Lon2'] = np.round(df['Lon2'].astype(float), precision)
+    # df['Lat2'] = np.round(df['Lat2'].astype(float), precision)
     
 
     # transform lon/lat to polarstereographic meters
@@ -468,6 +606,7 @@ def read_sar_drift_data_file(input_file, config):
     df['X2'], df['Y2'] = transformer['4326_to_3413'].transform(
         df['Lon2'].values, df['Lat2'].values
     )
+    
     
     # Get the zonal and meridional displacment used by NetCDF
     df['U_kmdy'] = (df['U_vel_ms'] * 60 * 60 * 24) / 1000 # in km
@@ -486,6 +625,8 @@ def read_sar_drift_data_file(input_file, config):
     
     df['Sat1'] = df["File1"].str.partition("_")[0]
     df['Sat2'] = df["File2"].str.partition("_")[0]
+    
+
     
     return df
 
@@ -712,7 +853,7 @@ def create_netcdf(df, base_name, config):
     import xarray as xr
    
     # Define grid resolution and bounds
-    resolution_km = 1  # Resolution in km
+    resolution_km = 12.5  # Resolution in km
     
     
     # reduce data frame to needed features   
@@ -941,7 +1082,132 @@ def create_netcdf(df, base_name, config):
         netcdf_grid.close()
         del netcdf_grid
         
+
+def create_png(config, base_name):
+    import xarray as xr
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import matplotlib.colors as mcolors
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+
+    source_nc_path = os.path.join(config['nc_dir'], f'{base_name}.nc')
+    
+    with xr.open_dataset(source_nc_path) as ds:
+        x_values = ds['x'].values
+        y_values = ds['y'].values
+        dx_values = ds["dx"].isel(time=0).values
+        dy_values = ds["dy"].isel(time=0).values
+        mag = np.hypot(dx_values, dy_values) / 1000 # values in km
         
+        # determine total valid observations
+        arr = ds['Speed_kmdy'].isel(time=0).values
+        valid = np.isfinite(arr) # ignore any NaN values
+        norm = mcolors.Normalize(
+            vmin=np.nanmin(mag),
+            vmax=np.nanmax(mag)
+        )
+    
+    # set projection defined by data set
+    crs_3413 = ccrs.NorthPolarStereo(central_longitude=-45)
+    
+    fig = plt.figure(figsize=(10, 10))
+    ax = plt.axes(projection=crs_3413)
+    
+    # Set extent in the projection's coordinate system (meters)
+    pad = 50_000 # 50km <-- change the pad to change scope of view
+    xmin = np.round(x_values.min() - pad, 3)
+    xmax = np.round(x_values.max() + pad, 3)
+    ymin = np.round(y_values.min() - pad, 3)
+    ymax = np.round(y_values.max() + pad, 3)
+    
+    # set reasonable size of quivers based on dataset extent
+    map_width = xmax - xmin
+    map_height = ymax - ymin
+    map_span = np.round(max(map_height, map_width), 0)
+    if map_span > 2_000_000:
+        quiver_scale = 0.1
+    else:
+        quiver_scale = 1.0
+    ax.set_extent([xmin, xmax, ymin, ymax], crs=crs_3413)
+    
+    
+    # Coastlines / land
+    ax.add_feature(cfeature.LAND, zorder=0)
+    ax.coastlines(resolution="10m", linewidth=1.0, zorder=1)
+    
+    q = ax.quiver(
+        x_values, y_values, dx_values, dy_values, mag,
+        transform=crs_3413,
+        angles="xy", scale_units="xy",
+        scale=quiver_scale,
+        width=0.001,
+        pivot="tail",
+        cmap="viridis",
+        norm=norm,
+        zorder=2
+    )
+    
+    
+    ax.set_title(
+        f"Sea-ice Vector Velocities\n"
+        f"x {xmin} to {xmax}; y {ymin} to {ymax}\n"
+        f"Total observations: {valid.sum()}\n"
+        f"Width {np.int32(map_height / 1000)} km by Height {np.int32(map_width / 1000)} km"
+    )
+    
+    cbar = fig.colorbar(q, ax=ax, orientation="vertical", shrink=0.65, pad=0.02)
+    cbar.set_label("Vector velocity (km_day)")
+    
+    # ax.quiverkey(q, 1.05, 0.08, 10_000, "10 km", labelpos="E", coordinates="axes")
+    # ax.quiverkey(q, 1.05, 0.06, 20_000, "20 km", labelpos="E", coordinates="axes")
+    # ax.quiverkey(q, 1.05, 0.04, 30_000, "30 km", labelpos="E", coordinates="axes")  
+    
+    # save plot as .png
+    png_file = os.path.join(
+        config['png_dir'], f"{base_name}.png"
+    )
+    fig.savefig(png_file, bbox_inches='tight', dpi=300)
+    plt.close(fig)
+    
+    
+def concat_netcdf_files(config, output_basename):
+    from glob import glob
+    from collections import defaultdict
+    import pandas as pd
+    import xarray as xr
+    import numpy as np
+    
+    files = sorted(glob(r"output/nc/*.nc"))
+    keep_vars = ["Speed_kmdy", "dx", "dy", "Bear_deg", "spatial_ref"]
+    chunk_size = 1024
+    
+
+
+    
+    out = xr.concat(mosaics, dim="time").sortby("time")
+    out = out.chunk({"time": 1, "y": chunk_size, "x": chunk_size})
+
+    data_vars = [v for v in ["Speed_kmdy", "dx", "dy", "Bear_deg"] if v in out.data_vars]
+    encoding = {
+        v: {
+            "zlib": True,
+            "complevel": 4,
+            "chunksizes": (1, chunk_size, chunk_size),
+        }
+        for v in data_vars
+    }
+
+    
+    out.to_netcdf(r"output/nc/mosiac.nc", engine="netcdf4", format="NETCDF4", encoding=encoding)
+
+    # Close mosaics + output dataset
+    for ds in mosaics:
+        ds.close()
+    out.close()
+    
+    
+
 def overlay_sar_drift_on_geotiff(config, gdf_lines, df_sar, base_name):
     """
     Create a two-panel visualization of SAR sea-ice drift data overlaid 
@@ -1212,12 +1478,11 @@ def overlay_sar_drift_on_geotiff(config, gdf_lines, df_sar, base_name):
    
     # save plot as .png
     png_file = os.path.join(
-        config['output_dir'], f"{base_name}.png"
+        config['png_dir'], f"{base_name}.png"
     )
     fig.savefig(png_file, bbox_inches='tight', dpi=300)
-        
+    plt.close(fig)
     
-    return fig
         
 
 def read_geotiff_rasterio(geotiff_file):

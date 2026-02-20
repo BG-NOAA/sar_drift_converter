@@ -14,15 +14,20 @@ This repository converts **SAR sea‑ice drift “gfilter” text outputs** into
 Python environment:
 
 - `cartopy`
+- `dask` (used by xarray)
 - `geopandas`
 - `pandas`
 - `matplotlib`
+- `matplotlib-map-utils`
+- `matplotlib-scalebar`
 - `netCDF4`
 - `numpy`
 - `pyproj`
+- `rasterio`
 - `scikit-learn` (for `MinCovDet`)
 - `scipy`
 - `shapely`
+- `tqdm`
 - `xarray`
 
 > **Note:** `cartopy`/`geopandas` are easiest via **conda-forge**.

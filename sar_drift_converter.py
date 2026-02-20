@@ -483,9 +483,51 @@ def main():
                 files.append(file)
     else:
         files = [config['sar_drift_file']]
+        
     
+    updated_files = []
+    for gfilter_path in files:
+        
+        basename, ext = os.path.splitext(gfilter_path)
+        if '_' in ext:
+            ext = ext.split('_')[0]
+        normalized_gfilter_path = basename + ext
+            
+        
+        """
+        Use 0075000m file instead of 0050000m.
+        Check as normalized .txt file name since 007500m doesn't have
+        _counter after .txt extension
+        """
+        gfilter_path_75km = normalized_gfilter_path.replace(
+            '_0050000m_',
+            '_0075000m_',
+        )
+        
+        
+        if os.path.exists(gfilter_path_75km):
+            updated_files.append(gfilter_path_75km)
+        else:
+            # use original file name with counter after .txt_
+            updated_files.append(gfilter_path)
+        
+        # if df.shape[0] < config['ignore_vector_threshold']:
+        #     # ignore files with few observations
+        #     # print(f"skipping {os.path.basename(gfilter_path)} with {df.shape[0]} observations")
+        #     continue
+        
+        
+        
+        # skip 75km file if MaxCorr2 > MaxCorr1 for < 60% of the data
+        # if '_0075000m_' in gfilter_path:
+        #     pct_correct = (df['Maxcorr2'] > df['Maxcorr1']).mean() * 100
+        #     if pct_correct < 60:
+        #         print(
+        #             f"Reject file: {os.path.basename(gfilter_path)}\n"
+        #             f"pct_correct={pct_correct:.1f}% (<60%)"
+        #         )
     
-    for data_file in tqdm(files, desc='Processing data files...'):
+    for data_file in tqdm(updated_files, desc='Processing data files...'):
         # set base name for output files
         data_file_basename = os.path.splitext(
             os.path.basename(data_file)
@@ -541,24 +583,30 @@ def main():
             base_name=data_file_basename,
             config=config
         )
-        continue
+
         # combine all created netcdf files into one
         output_basename = (
             f"SIVelocity_SAR_{start_date}_{end_date}_12km_NH_v00"
         )
-        util.concat_nc_files()
+        # util.concat_netcdf_files(config, output_basename)
         
+        
+        # create individual PNG file
+        util.create_png(
+            config=config,
+            base_name=data_file_basename
+        )
         continue
-        
+    
         # Overlay SAR drift data vectors on geotiff image
         util.overlay_sar_drift_on_geotiff(
             config=config,
             gdf_lines=gdf_lines,
             df_sar=df_sar,
-            base_name=output_basename
+            base_name=data_file_basename
         )
         
-        exit()
+        continue
         
         # Detect outliers
         if config['detect_outliers']:

@@ -1,4 +1,7 @@
+cartopy
+dask
 geopandas
+matplotlib
 matplotlib-map-utils
 matplotlib-scalebar
 netCDF4
