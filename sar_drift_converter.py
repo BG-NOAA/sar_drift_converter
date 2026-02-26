@@ -59,6 +59,8 @@ def read_json_config():
                                         image.
         - "netcdf_cdl_file" (str): Path to the CDL file used for
                                    NetCDF metadata.
+        - "netcdf_template_file" (str): Path to NetCDF template file on which
+                                        scenes will be built                                   
         - "output_dir" (str): Output directory where generated files will
                               be stored.
         - "batch_process" (bool): Process one file `sar_drift_filename` or
@@ -139,6 +141,7 @@ def read_json_config():
         "sar_drift_filename",
         "sar_geotiff_filename",
         "netcdf_cdl_file",
+        "netcdf_template_file",
         "output_dir",
         "batch_process",
         "delimiter",
@@ -228,6 +231,15 @@ def read_json_config():
             9
         )
         
+    # check netcdf template file exists
+    netcdf_template_file = os.path.normpath(
+        os.path.join(config['netcdf_template_file']
+    ))
+    if not os.path.exists(netcdf_template_file):
+        util.error_msg(
+            f"Cannot find NetCDF template file `{netcdf_template_file}`",
+            9
+        )        
         
     # check output dir exists
     output_dir = os.path.normpath(os.path.join(config['output_dir']))
@@ -383,6 +395,7 @@ def read_json_config():
         'sar_drift_file': sar_drift_file,
         'sar_geotiff_file': sar_geotiff_file,
         'netcdf_cdl_file': netcdf_cdl_file,
+        'netcdf_template_file': netcdf_template_file,
         'output_dir': output_dir,
         'formatted_data_dir': formatted_data_dir,
         'gpkg_dir': gpkg_dir,
@@ -414,6 +427,8 @@ def read_json_config():
         f"{config['sar_geotiff_file']}\n"
         "  NetCDF CDL file:         "
         f"{config['netcdf_cdl_file']}\n"
+        "  NetCDF template file:    "
+        f"{config['netcdf_template_file']}\n"        
         "  output directory:        "
         f"{config['output_dir']}\n"
         "  batch process:           "
@@ -471,10 +486,26 @@ def main():
     from glob import glob
     from tqdm import tqdm
     from datetime import datetime
+    import xarray as xr
     
     # parse user arguments
     config = read_json_config()
+    
+    # load NSIDC EPSG:3411 NetCDF template
+    # creat Arctic grid at 3413
+    with xr.open_dataset(config['netcdf_template_file']) as ds:
+        template_ds = ds.load()
 
+    # nc_file_path = os.path.join(
+    #     'meta',
+    #     'arctic_wide_3413_template.nc'
+    # )
+    # util._create_arctic_grid(nc_file_path, '20200224', config)
+    # with xr.open_dataset(nc_file_path) as ds:
+    #     template_ds = ds.load()
+        
+
+    # find files to process
     files= []
     if config['batch_process']:
         all_files = glob(os.path.join(config['sar_drift_directory'], '*'))
@@ -527,7 +558,11 @@ def main():
         #             f"pct_correct={pct_correct:.1f}% (<60%)"
         #         )
     
+    
+    
+
     for data_file in tqdm(updated_files, desc='Processing data files...'):
+    # for data_file in updated_files:
         # set base name for output files
         data_file_basename = os.path.splitext(
             os.path.basename(data_file)
@@ -545,6 +580,9 @@ def main():
             f"formatted_{data_file_basename}.csv"
         )
         df_sar.to_csv(output_path, index=False)
+        
+        if df_sar.shape[0] < config['ignore_vector_threshold']:
+            continue
         
     
         """
@@ -576,13 +614,14 @@ def main():
             config=config
         )
         
-        
         # Create NetCDF file for QGIS    
         util.create_netcdf(
             df=df_sar,
             base_name=data_file_basename,
-            config=config
+            config=config,
+            template_ds=template_ds
         )
+        
 
         # combine all created netcdf files into one
         output_basename = (
