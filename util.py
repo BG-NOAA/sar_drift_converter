@@ -63,6 +63,180 @@ from pyproj import CRS, Transformer, Geod
 
 from typing import Tuple
 
+
+
+######################################################
+# Take starting date which coressponds to Lon1, Lat1 #
+######################################################
+
+# =============================================================
+# Grid navigation functions from 
+# https://github.com/nsidc/polarstereo-lonlat-convert-py/blob/
+# main/polar_convert/polar_convert.py
+# =============================================================
+
+# The grid size cell dimensions in km
+VALID_GRID_SIZES = (6.25, 12.5, 25)
+
+# Valid hemisphere names.
+NORTH = 'north'
+SOUTH = 'south'
+VALID_HEMISPHERES = (NORTH, SOUTH)
+
+# Earth-parameter defualts
+TRUE_SCALE_LATITUDE = 70
+EARTH_RADIUS_KM = 6378.273
+EARTH_ECCENTRICITY = 0.081816153
+
+
+def _validate_grid_size(grid_size):
+    if grid_size not in VALID_GRID_SIZES:
+        raise ValueError(
+            f'Got `grid_size` of {grid_size} but expected one of '
+            f'{VALID_GRID_SIZES}'
+        )
+
+    return grid_size
+
+
+def _validate_hemisphere(hemisphere):
+    if not isinstance(hemisphere, str) or hemisphere.lower()  \
+    not in VALID_HEMISPHERES:
+        raise ValueError(
+            f'Got `hemisphere` of {hemisphere} but expected one of '
+            f'{VALID_HEMISPHERES}'
+        )
+
+    return hemisphere.lower()
+
+
+def _hemi_direction(hemisphere):
+    """Return `1` for 'north' and `-1` for 'south'"""
+    return {'north': 1, 'south': -1}[hemisphere]
+
+
+def _grid_params(grid_size, hemisphere):
+    if hemisphere == NORTH:
+        delta = 45
+        imax = 1216
+        jmax = 1792
+        xmin = -3850 + grid_size / 2
+        ymin = -5350 + grid_size / 2
+    else:
+        delta = 0
+        imax = 1264
+        jmax = 1328
+        xmin = -3950 + grid_size / 2
+        ymin = -3950 + grid_size / 2
+
+    if grid_size == 12.5:
+        imax = imax // 2
+        jmax = jmax // 2
+    elif grid_size == 25:
+        imax = imax // 4
+        jmax = jmax // 4
+
+    return delta, imax, jmax, xmin, ymin
+
+
+def _polar_lonlat_to_xy(longitude, latitude, true_scale_lat, re, e, hemisphere):
+    """Convert from geodetic longitude and latitude to Polar Stereographic
+    (X, Y) coordinates in km.
+
+    Args:
+        longitude (float): longitude or longitude array in degrees
+        latitude (float): latitude or latitude array in degrees (positive)
+        true_scale_lat (float): true-scale latitude in degrees
+        re (float): Earth radius in km
+        e (float): Earth eccentricity
+        hemisphere ('north' or 'south'): Northern or Southern hemisphere
+
+    Returns:
+        If longitude and latitude are scalars then the result is a
+        two-element list containing [X, Y] in km.
+        If longitude and latitude are numpy arrays then the result will be a
+        two-element list where the first element is a numpy array containing
+        the X coordinates and the second element is a numpy array containing
+        the Y coordinates.
+    """
+    import numpy as np
+
+    hemisphere = _validate_hemisphere(hemisphere)
+    hemi_direction = _hemi_direction(hemisphere)
+
+    lat = abs(latitude) * np.pi / 180
+    lon = longitude * np.pi / 180
+    slat = true_scale_lat * np.pi / 180
+
+    e2 = e * e
+
+    # Snyder (1987) p. 161 Eqn 15-9
+    t = np.tan(np.pi / 4 - lat / 2) / \
+        ((1 - e * np.sin(lat)) / (1 + e * np.sin(lat))) ** (e / 2)
+
+    if abs(90 - true_scale_lat) < 1e-5:
+        # Snyder (1987) p. 161 Eqn 21-33
+        rho = 2 * re * t / np.sqrt((1 + e) ** (1 + e) * (1 - e) ** (1 - e))
+    else:
+        # Snyder (1987) p. 161 Eqn 21-34
+        tc = np.tan(np.pi / 4 - slat / 2) / \
+            ((1 - e * np.sin(slat)) / (1 + e * np.sin(slat))) ** (e / 2)
+        mc = np.cos(slat) / np.sqrt(1 - e2 * (np.sin(slat) ** 2))
+        rho = re * mc * t / tc
+
+    x = rho * hemi_direction * np.sin(hemi_direction * lon)
+    y = -rho * hemi_direction * np.cos(hemi_direction * lon)
+    return [x, y]
+
+
+def _polar_lonlat_to_ij(longitude, latitude, grid_size, hemisphere):
+    
+    """Transform from geodetic longitude and latitude coordinates
+    to NSIDC Polar Stereographic I, J coordinates
+
+    Args:
+        longitude (float): longitude or longitude array in degrees
+        latitude (float): latitude or latitude array in degrees (positive)
+        grid_size (float): 6.25, 12.5 or 25; the grid_size cell dimensions in km
+        hemisphere ('north' or 'south'): Northern or Southern hemisphere
+
+    Returns:
+        If longitude and latitude are scalars then the result is a
+        two-element list containing [I, J].
+        If longitude and latitude are numpy arrays then the result will
+        be a two-element list where the first element is a numpy array for
+        the I coordinates and the second element is a numpy array for
+        the J coordinates.
+
+    Examples:
+        print(nsidc_polar_lonlat(350.0, 34.41, 12.5, 1))
+            [608, 896]
+    """
+    import numpy as np
+    
+    _validate_grid_size(grid_size)
+    hemisphere = _validate_hemisphere(hemisphere)
+
+    delta, imax, jmax, xmin, ymin = _grid_params(grid_size, hemisphere)
+
+    x, y = _polar_lonlat_to_xy(
+        longitude + delta,
+        np.abs(latitude),
+        TRUE_SCALE_LATITUDE,
+        EARTH_RADIUS_KM,
+        EARTH_ECCENTRICITY,
+        hemisphere
+    )
+    
+    # removed `+ 1` in original code that made the indices 1-based
+    i = (np.round((x - xmin) / grid_size)).astype(int)
+    j = (np.round((y - ymin) / grid_size)).astype(int)
+    # Flip grid_size orientation in the 'y' direction
+    j = (jmax - 1) - j
+    
+    return [i, j]
+
+
 #=========================
 # Standard error messaging
 #=========================
@@ -94,11 +268,11 @@ def error_msg(msg, rc):
 # Internal functions
 #===================
 
-def _set_transformer():
+def _set_transformer(epsg=3411):
     transformer = {}
     
     # CRS setup
-    transformer['epsg'] = 3413
+    transformer['epsg'] = epsg
     transformer['crs_string_3413'] = CRS.from_string(
         "+proj=stere +lat_0=90 +lat_ts=70 +lon_0=-45 "
         "+x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs +type=crs"
@@ -110,6 +284,12 @@ def _set_transformer():
         "+proj=laea +lat_0=90 +lon_0=0 "
         "+x_0=0 +y_0=0 "
         "+a=6371228 +b=6371228 "
+        "+units=m +no_defs +type=crs"
+    )
+    
+    transformer["crs_string_3411"] = CRS.from_string(
+        "+proj=stere +lat_0=90 +lat_ts=70 +lon_0=-45 "
+        "+x_0=0 +y_0=0 +a=6378273 +b=6356889.449 "
         "+units=m +no_defs +type=crs"
     )
     
@@ -140,6 +320,12 @@ def _set_transformer():
     transformer['4326_to_3408'] = Transformer.from_crs(
         transformer['crs_string_4326'],
         transformer['crs_string_3408'],
+        always_xy=True
+    )
+    
+    transformer['4326_to_3411'] = Transformer.from_crs(
+        transformer['crs_string_4326'],
+        transformer['crs_string_3411'],
         always_xy=True
     )
     
@@ -174,6 +360,8 @@ def _set_metadata(config):
         SystemExit: If the `ncgen` command fails or
                     returns a non-zero status code.
     """
+    
+    # COnfirm naming convention meets standards
 
 
     import os
@@ -212,332 +400,406 @@ def _set_metadata(config):
     return xr.open_dataset(ncgen_ofile_nc, decode_times=False)
 
 
-def _parse_pair_times(name):
-    import re
-    from datetime import datetime
+def _read_geotiff_rasterio(geotiff_file):
+    """
+    Reads a GeoTIFF image using GCP-based reprojection to EPSG:3413
+    (NSIDC Sea Ice Polar Stereographic North) and returns a masked
+    array with coordinate information.
     
-    DT_RE = re.compile(r"(\d{4}_\d{2}_\d{2}_\d{2}_\d{2}_\d{2})")
-    parts = DT_RE.findall(name)
-    if len(parts) < 2:
-        raise ValueError(f"Expected 2 timestamps, found {len(parts)} in: {name}")
-    t1 = datetime.strptime(parts[0], "%Y_%m_%d_%H_%M_%S")
-    t2 = datetime.strptime(parts[1], "%Y_%m_%d_%H_%M_%S")
-    return t1, t2
-
-
-def _create_arctic_grid(nc_file_path, run_date, config):
+    This function:
+        - Opens a GeoTIFF file using rasterio
+        - Extracts Ground Control Points (GCPs) to reproject the image
+        to a target CRS (EPSG:3413)
+        - Uses nearest-neighbor resampling to regrid the data
+        - Constructs an xarray.DataArray with spatial coordinates in meters
+        - Masks background values (zeros) to allow clean visualization
+        - Computes the image extent for use in plotting (e.g., with imshow)
+    
+    Parameters:
+        geotiff_path (str): Path to the input GeoTIFF file containing
+                            GCPs and raster data.
+    
+    Returns:
+        tuple:
+            masked_xr (np.ma.MaskedArray): Masked 2D array of image data
+                                           with background set to NaN.
+            extent (list): [xmin, xmax, ymin, ymax] extent of the image
+                           in meters (EPSG:3413) for use with plotting.
+    Coauthor:
+        Rachael Lazzaro, rachel.lazzaro@noaa.gov
     """
-    Creates a NaN-filled Arctic grid NetCDF in EPSG:3413 at resolution_km.
-    Uses NASA EASE Grid 12.5
-    """
-    import numpy as np
+    
+    
+    import rasterio
+    from rasterio.warp import reproject, Resampling
+    from rasterio.warp import calculate_default_transform
     import xarray as xr
-    from datetime import datetime
-    
-    # Arctic region in lon/lat degrees
-    lon_min = -180.0
-    lon_max = 180.0
-    lat_min = 60.0
-    lat_max = 90.0
-
-    # Transform the lat/lon bounding box corners into EPSG:3413
-    transformer = _set_transformer()
-    corners_lon = np.array([lon_min, lon_max, lon_max, lon_min])
-    corners_lat = np.array([lat_min, lat_min, lat_max, lat_max])
-    cx, cy = transformer['4326_to_3413'].transform(corners_lon, corners_lat)
-
-    # Derive projected bounds (meters)
-    xmin, xmax = float(np.min(cx)), float(np.max(cx))
-    ymin, ymax = float(np.min(cy)), float(np.max(cy))
-
-    # Build x/y vectors at 1 km resolution (meters)
-    res_m = 1000.0
-
-    # create default NaN grid (y, x)
-    x = np.arange(xmin, xmax + res_m, res_m, dtype=np.float64)
-    y = np.arange(ymin, ymax + res_m, res_m, dtype=np.float64)
-    data = np.full((y.size, x.size), np.nan, dtype=np.float32)
-    x2d, y2d = np.meshgrid(x, y)
-
-
-
-    ds = xr.Dataset(
-        data_vars={
-            "arctic_region": (("time", "y", "x"), data[None, :, :]),
-            "lon": (("y", "x"), x2d),
-            "lat": (("y", "x"), y2d)
-        },
-        coords={
-            "time": ("time", [run_date]),
-            "x": ("x", x),
-            "y": ("y", y)
-        },
-        attrs={
-            "title": "Arctic base grid",
-            "crs": "EPSG:3413",
-            "grid_resolution_km": res_m / 1000,
-            "lat_lon_bounds": (
-                f"lon[{lon_min},{lon_max}], lat[{lat_min},{lat_max}]"
-            )
-        },
-    )
-
-
-    # Set NetCDF standard attributes
-    metadata_nc = _set_metadata(config)
-    
-    
-    # Replace placeholders with real values
-    ds.attrs.update(metadata_nc.attrs)
-    ds.attrs['date_created'] = (
-        datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
-    )
-    ds.attrs['time_coverage_start'] = (
-        f'{datetime.strptime(run_date, "%Y%m%d").strftime("%Y-%m-%d")}'
-        '00:00:00'
-    )
-    ds.attrs['time_coverage_end'] = (
-        f'{datetime.strptime(run_date, "%Y%m%d").strftime("%Y-%m-%d")}'
-        '23:59:59'
-    )
-    
-    # add spatial ref
-    spatial_ref_attrs = {
-        "grid_mapping_name": "polar_stereographic",
-        "latitude_of_projection_origin": 90.0,
-        "straight_vertical_longitude_from_pole": -45.0,
-        "standard_parallel": 70.0,
-        "false_easting": 0.0,
-        "false_northing": 0.0,
-        "semi_major_axis": 6378137.0,
-        "inverse_flattening": 298.257223563,
-        "spatial_ref": "EPSG:3413" ,
-        "crs": (
-            'PROJCS["WGS 84 / NSIDC Sea Ice Polar Stereographic North",'
-            'GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",'
-            '6378137,298.257223563]],PRIMEM["Greenwich",0],UNIT["degree",'
-            '0.0174532925199433]],PROJECTION["Polar_Stereographic"],'
-            'PARAMETER["latitude_of_origin",70],'
-            'PARAMETER["central_meridian",-45],'
-            'PARAMETER["scale_factor",1],PARAMETER["false_easting",0],'
-            'PARAMETER["false_northing",0],'
-            'UNIT["metre",1,AUTHORITY["EPSG","9001"]]]'
-        )
-    }
-    ds['spatial_ref'] = xr.DataArray(
-        0, attrs=spatial_ref_attrs
-    )
-
-    # Save to NetCDF with compression level 4
-    ds.to_netcdf(
-        nc_file_path, mode='w',
-        encoding={
-            "arctic_region": {"zlib": True, "complevel": 4, "dtype": "float32"},
-            "lon": {"zlib": True, "complevel": 4, "dtype": "float32"},
-            "lat": {"zlib": True, "complevel": 4, "dtype": "float32"},
-            'spatial_ref': {'dtype': 'int32'}
-        }
-    )
-
-    ds.close()
-    del ds
-       
-
-def _create_netcdf_base_grid():
-    """
-    Build an EPSG:3413 (NSIDC Polar Stereographic North) regular x/y grid at step_m,
-    compute lat/lon at cell centers, and save a template NetCDF.
-
-    The domain is defined by a regular x/y lattice that covers the entire range of
-    longitudes and the latitude band >= lat_min. Cells below lat_min are masked.
-    """
     import numpy as np
-    import xarray as xr
-    from pyproj import CRS, Transformer
+   
 
-    # CRS
-    crs = CRS.from_epsg(3413)
-    step_m = 12_500
-    
-    to_3413 = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
-    to_ll = Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
-
-    # ---- Build a conservative x/y bounding box that covers lon [-180,180] for lat>=lat_min ----
-    # Sample the boundary at lat_min across all longitudes; take min/max projected x/y.
-    # This reliably creates an x/y rectangle big enough.
-    lons = np.linspace(-180, 180, 1441)  # dense enough
-    lats = np.full_like(lons, lat_min, dtype=float)
-    xs, ys = to_3413.transform(lons, lats)
-
-    # Add the pole point to ensure we include the top (usually near 0,0 in polar stereo)
-    x_pole, y_pole = to_3413.transform(0.0, 90.0)
-
-    xmin = np.nanmin(np.concatenate([xs, [x_pole]]))
-    xmax = np.nanmax(np.concatenate([xs, [x_pole]]))
-    ymin = np.nanmin(np.concatenate([ys, [y_pole]]))
-    ymax = np.nanmax(np.concatenate([ys, [y_pole]]))
-
-    # Snap bounds outward to the 12.5 km lattice (anchored at 0)
-    def snap_floor(v, step):
-        return np.floor(v / step) * step
-
-    def snap_ceil(v, step):
-        return np.ceil(v / step) * step
-
-    xmin = snap_floor(xmin, step_m)
-    xmax = snap_ceil(xmax, step_m)
-    ymin = snap_floor(ymin, step_m)
-    ymax = snap_ceil(ymax, step_m)
-
-    # Coordinate vectors (cell centers). Keep them increasing.
-    x = np.arange(xmin, xmax + step_m, step_m, dtype=np.float64)
-    y = np.arange(ymin, ymax + step_m, step_m, dtype=np.float64)
-
-    # 2D mesh of cell centers
-    xx, yy = np.meshgrid(x, y)
-    lon2d, lat2d = to_ll.transform(xx, yy)  # returns degrees
-
-    # Mask outside your requested latitude band (below lat_min, or above lat_max if you want)
-    # Note: lat_max=90 usually does nothing, but included for completeness
-    valid = (lat2d >= lat_min) & (lat2d <= lat_max)
-
-    lat2d = np.where(valid, lat2d, np.nan)
-    lon2d = np.where(valid, lon2d, np.nan)
-
-    # Build dataset
-    ds = xr.Dataset(
-        data_vars=dict(
-            latitude=(("y", "x"), lat2d.astype(np.float32), {"units": "degrees_north"}),
-            longitude=(("y", "x"), lon2d.astype(np.float32), {"units": "degrees_east"}),
-            valid_mask=(("y", "x"), valid.astype(np.uint8), {"long_name": "1=within lat range"}),
-        ),
-        coords=dict(
-            x=("x", x, {"standard_name": "projection_x_coordinate", "units": "m"}),
-            y=("y", y, {"standard_name": "projection_y_coordinate", "units": "m"}),
-        ),
-        attrs=dict(
-            title="EPSG:3413 Polar Stereographic North template grid",
-            summary=f"Regular EPSG:3413 x/y grid at {step_m/1000:.3f} km spacing; "
-                    f"latitudes outside [{lat_min}, {lat_max}] masked.",
-            Conventions="CF-1.8",
+    with rasterio.open(geotiff_file) as src:
+        gcps, gcps_crs = src.get_gcps()
+        dst_crs = "EPSG:3413"
+        dst_transform, width, height = calculate_default_transform(
+            gcps_crs, dst_crs, src.width, src.height, gcps=gcps
         )
-    )
 
-    # CF grid mapping variable (CRS metadata)
-    # xarray will store attrs; many tools look for a variable named 'crs' or 'spatial_ref'.
-    ds["crs"] = xr.DataArray(0, attrs=crs.to_cf())
-    ds["crs"].attrs["crs_wkt"] = crs.to_wkt()
+        dst_array = np.empty(
+            (src.count, height, width), 
+            dtype=src.dtypes[0]
+        )
 
-    # Link lat/lon to grid mapping
-    ds["latitude"].attrs["grid_mapping"] = "crs"
-    ds["longitude"].attrs["grid_mapping"] = "crs"
-
-    # Save
-    encoding = {
-        "latitude": {"zlib": True, "complevel": 4},
-        "longitude": {"zlib": True, "complevel": 4},
-        "valid_mask": {"zlib": True, "complevel": 4},
-    }
-    ds.to_netcdf(out_path, format="NETCDF4", engine="netcdf4", encoding=encoding)
-
-    return ds
-
+        reproject(
+            source=rasterio.band(src, 1),
+            destination=dst_array[0],
+            src_crs=gcps_crs,
+            src_transform=None, # None triggers GCP-based warping
+            gcps=gcps,          # Let rasterio warp based on GCPs
+            dst_transform=dst_transform,
+            dst_crs=dst_crs,
+            resampling=Resampling.nearest
+        )
         
-def _nearest_idx_1d(coord_1d, values):
+        # Construct xarray.DataArray with coordinates
+        x_coords = dst_transform[2] + dst_transform[0] * np.arange(width)
+        y_coords = dst_transform[5] + dst_transform[4] * np.arange(height)
+        
+        geotiff_xr = xr.DataArray(
+            dst_array[0],
+            dims=("y", "x"),
+            coords={"x": x_coords, "y": y_coords},
+            attrs={"crs": dst_crs}
+        )
+        
+        # change backround to white
+        masked_xr = np.ma.masked_equal(geotiff_xr.values, 0)
+        
+        extent = [
+            dst_transform[2],
+            dst_transform[2] + dst_transform[0] * width,
+            dst_transform[5] + dst_transform[4] * height,
+            dst_transform[5],
+        ]
+        
+        return masked_xr, extent
+    
+
+#=============
+# Calculations
+#=============
+
+def _circular_mean(a):
+    import numpy as np
+    return np.arctan2(np.nanmean(np.sin(a)), np.nanmean(np.cos(a)))
+
+
+def _circular_std(a):
+    import numpy as np
+    s = np.nanmean(np.sin(a))
+    c = np.nanmean(np.cos(a))
+    R = np.sqrt(s*s + c*c)
+    return np.sqrt(-2 * np.log(np.clip(R, 1e-12, 1.0)))
+
+    
+#==================
+# Plot enhancements
+#==================
+
+def _add_graticules(ax, map_extent):
     """
-    Find nearest indices of coordinates based on each value
-    Coordinates must be sorted
+    Add latitude and longitude graticules with labels to a Cartopy map axis.
+    
+    This function draws dashed gridlines (graticules) at regular intervals
+    of longitude and latitude on a projected plot using EPSG:3413
+    (NSIDC Sea Ice Polar Stereographic North). Longitude labels are placed
+    near the bottom of the plot and labeled in degrees west. Latitude labels
+    are placed along the right edge in degrees north.
+    
+    Parameters
+    ----------
+    ax : matplotlib.axes._subplots.AxesSubplot
+        A Cartopy-projected Matplotlib axis to which graticules will be added.
+    
+    map_extent_xr : list of float
+        The extent of the plotted map in EPSG:3413 projected coordinates, 
+        given as [xmin, xmax, ymin, ymax].
+    
+    Notes
+    -----
+    - Graticules are drawn every 10 degrees longitude and 
+      every 5 degrees latitude.
+    - The function internally transforms coordinates using `pyproj`
+      for EPSG:3413 <-> EPSG:4326.
+    - A 10% buffer is added to both longitude and latitude ranges to ensure
+      full graticule coverage.
+    - Labels are drawn in projected space (not geographic space).
+    - Longitude labels use west notation (e.g., 135°W),
+      and latitude uses north (e.g., 75.0°N).
+    """
+    
+    
+    import numpy as np
+    
+    # Corners in degrees transform from EPSG:3413 to EPSG:4326
+    transformer = _set_transformer()
+    lon_min, lat_min = (
+        transformer['3413_to_4326'].transform(map_extent[0], map_extent[2])
+    )
+    lon_max, lat_max = (
+        transformer['3413_to_4326'].transform(map_extent[1], map_extent[3])
+    )
+    
+    # Fix inverted bounds
+    lon_min, lon_max = sorted([lon_min, lon_max])
+    lat_min, lat_max = sorted([lat_min, lat_max])
+   
+    
+    # Generate labels (every 5 degrees lat; every 10 degrees lon)
+    # Only include multiples of 5 within the actual bounds
+    lon_labels = np.arange(
+        np.ceil(lon_min / 10) * 10,
+        np.floor(lon_max / 10) * 10 + 1,
+        10
+    )
+    
+    lat_labels = np.arange(
+        np.ceil(lat_min / 5) * 5,
+        np.floor(lat_max / 5) * 5 + 1,
+        5
+    )
+
+    
+    # Extend the longitude/latitude range slightly (e.g., 10%) 
+    # to ensure full coverage
+    lon_range = lon_max - lon_min
+    lon_pad = 0.1 * lon_range  # 10% padding
+    lon_min_ext = lon_min - lon_pad
+    lon_max_ext = lon_max + lon_pad
+    
+    lat_range = lat_max - lat_min
+    lat_pad = 0.1 * lat_range
+    lat_min_ext = lat_min - lat_pad
+    lat_max_ext = lat_max + lat_pad
+    
+    
+    # Vertical lines for longitude
+    for lon in lon_labels:
+        lats = np.linspace(lat_min_ext, lat_max_ext, 200)
+        points = []
+        for lat in lats:
+            points.append(transformer['4326_to_3413'].transform(lon, lat))
+        xs, ys = zip(*points)
+        ax.plot(xs, ys, color='lightgray', linestyle='--', linewidth=0.5)
+        
+    # longitude labels
+    for lon in lon_labels:
+        x, y = transformer['3413_to_4326'].transform(lon, lat_min)
+        ax.text(
+            x + 30000,
+            y + 5000,
+            f"{lon:.0f}°W",
+            ha='center',
+            va='top',
+            fontsize=8
+        )
+
+
+    # horizontal lines for latitude    
+    for lat in lat_labels:
+        lons = np.linspace(lon_min_ext, lon_max_ext, 200)
+        points = []
+        for lon in lons:
+            points.append(transformer['4326_to_34123'].transform(lon, lat))
+        xs, ys = zip(*points)
+        ax.plot(xs, ys, color='lightgray', linestyle='--', linewidth=0.5)    
+    
+    # Label latitudes at right
+    for lat in lat_labels:
+        x, y = transformer['4326_to_3413'].transform(lon_labels[-1], lat)
+        ax.text(
+            x - 5000,
+            y - 10000,
+            f"{lat:.1f}°N",
+            ha='left',
+            va='center',
+            fontsize=8
+        )
+
+
+def _add_scale(ax, cartopy_crs):
+    """
+    Add a scale bar to a Cartopy-projected map axis.
+    
+    This function uses the `matplotlib_scalebar` library to draw a scale bar
+    that indicates real-world distance in kilometers. It assumes the map
+    projection uses meters as its base unit (e.g., EPSG:3413).
+    
+    Parameters
+    ----------
+    ax : matplotlib.axes._subplots.AxesSubplot
+        A Matplotlib axis with a Cartopy projection to which the scale bar
+        will be added.
+    
+    cartopy_crs : cartopy.crs.Projection
+        The projection used for the map, assumed to be in meters. Although not
+        directly used, this parameter is kept for compatibility and clarity.
+    
+    Notes
+    -----
+    - The scale bar spans 25% of the axis width.
+    - The bar displays a fixed length of 100 kilometers.
+    - The position of the scale bar is anchored to the lower left corner
+      of the plot.
+    - The axis is assumed to use projected units in meters
+      (e.g., Polar Stereographic).
+    """
+    
+    
+    from matplotlib_scalebar.scalebar import ScaleBar
+    
+    # Add scalebar to ax
+    scalebar = ScaleBar(
+        dx=1,                  # 1 data unit = 1 meter
+        units='m',             # tell it the CRS uses meters
+        location='lower left',
+        scale_loc='bottom',
+        length_fraction=0.25,  # bar spans 25% of axis
+        fixed_value=100,       # (optional) force bar to 100 km
+        fixed_units='km'       # force label to km
+    )
+    ax.add_artist(scalebar)
+    
+    
+def _add_true_north(ax, xmin, xmax, ymin, ymax):
+    """
+    Add a True North arrow to a Cartopy map axis using EPSG:3413 coordinates.
+
+    This function adds an arrow pointing to geographic North at a reference
+    location near the bottom-right corner of the plot. The location is computed
+    in the EPSG:3413 projection (Polar Stereographic North), and then
+    converted to geographic coordinates (EPSG:4326) to calculate the northward
+    direction.
 
     Parameters
     ----------
-    coord_1d (np.ndarray): coordinates of grids
-    values (np.ndarray): values to map on coordinates' i,j
+    ax : matplotlib.axes.Axes
+        The Matplotlib axis on which to draw the True North arrow.
 
-    Returns
-    -------
-    np.ndarray
+    xmin : float
+        Minimum x-coordinate (in meters) of the map extent.
 
+    xmax : float
+        Maximum x-coordinate (in meters) of the map extent.
+
+    ymin : float
+        Minimum y-coordinate (in meters) of the map extent.
+
+    ymax : float
+        Maximum y-coordinate (in meters) of the map extent.
+
+    Notes
+    -----
+    - The north arrow is drawn at 5% from the right and 5% from the bottom
+      of the map.
+    - The arrow is styled with a black face and labeled with an 'N'
+      to indicate direction.
+    - Coordinate conversions between EPSG:3413 and EPSG:4326 are performed
+      using `pyproj.Transformer`.
     """
-    import numpy as np
     
-    values = np.asarray(values)
-    # If 'left', the index of the first suitable location found is given.
-    idx = np.searchsorted(coord_1d, values, side='left')
     
-    # faster alternative to np.minimum
-    idx = np.clip(idx, 1, len(coord_1d) - 1) 
-    left, right = coord_1d[idx - 1], coord_1d[idx]
     
-    # default to left if in the middle
-    # `choose_left` is True|False then passed to np.where condition
-    choose_left = (values - left) <= (right - values) 
+    transformer = _set_transformer()
     
-    return np.where(choose_left, idx - 1, idx).astype(np.int64)
-
-
-def _ensure_increasing_1d_coord(ds, dim):
-    """
-    Ensure ds[dim] is monotonic increasing by flipping if needed.
-    (Cheaper than sortby for regular grids.)
-    """
-    import numpy as np
+    # bottom-right corner of the plot as reference point
+    x_ref = xmax - 0.05 * (xmax - xmin)
+    y_ref = ymin + 0.05 * (ymax - ymin)
     
-    if dim not in ds.dims:
-        return ds
-    coord = ds[dim].values
-    if coord.size < 2:
-        return ds
-
-    # If decreasing, flip
-    if coord[1] < coord[0]:
-        ds = ds.isel({dim: slice(None, None, -1)})
-        coord = ds[dim].values
-
-    # fall back to sortby if still not properly sorted
-    diffs = np.diff(coord.astype("float64"))
-    if np.any(diffs < -1e-9):
-        ds = ds.sortby(dim)
-
-    return ds
+    # convert meters to degrees
+    lon_ref, lat_ref = transformer['3413_to_4326'].transform(x_ref, y_ref)
     
-
+    # move a small distance north
+    lat_north = lat_ref + 0.5
+    lon_north = lon_ref
+    
+    # convert degrees back to meters
+    x_north, y_north = transformer['4326_to_3413'].transform(lon_north, lat_north)
+    
+    # arrow
+    ax.annotate(
+        '', xy=(x_north, y_north), xytext=(x_ref, y_ref),
+        arrowprops=dict(
+            facecolor='black', edgecolor='black', width=2, headwidth=10
+        ),
+    )
+    ax.text(
+        x_ref, y_ref - 20000, 'N', color='black',
+        fontsize=16, ha='center', va='top'
+    )
+    
+    
 #=========
 # Data I/O
 #=========
 
 def read_sar_drift_data_file(input_file, config):
     """
-    Load and preprocess SAR drift data from a CSV file.
+    Read and preprocess a SAR ice-drift text data file into a standardized
+    DataFrame.
 
-    This function performs the following:
-        - Reads a SAR drift CSV file with start/end positions and times
-        - Cleans the dataset by removing invalid records
-        - Converts time values (Julian seconds since 2000-01-01) to 
-          readable timestamps
-        - Computes observation durations in both datetime and seconds
-        - Rounds and converts lat/lon coordinates to a specified decimal
-          precision
-        - Projects coordinates from WGS84 to EPSG:3413 using a pyproj
-          Transformer
-        - Computes zonal (dx) and meridional (dy) displacements in meters
-        - Converts U/V velocity from m/s to km/day
-        - Calculates total drift distance in kilometers using projected
-          coordinates
-        - Writes a formatted intermediate CSV to the output directory
+    This function loads a SAR drift data file (CSV-like text) using parsing
+    rules provided in `config`, cleans column names, removes known-bad
+    observations, and derives additional time, duration, unit-converted
+    velocity, and satellite fields.
+
+    Processing steps:
+        - Read the file with `pandas.read_csv()` using delimiter and
+          header offsets from `config`.
+        - Strip whitespace from column names.
+        - Remove rows where `Bear_deg == 0` (known invalid bearings/records).
+        - Convert SAR "Julian seconds" timestamps (seconds since 2000-01-01) in
+          `Time1_JS` and `Time2_JS` to human-readable `Date1` and `Date2`.
+        - Compute duration between start and end times in both timedelta
+          string form (`Duration`) and raw seconds (`JS_Duration`).
+        - Convert velocity units to meters/day:
+            - `U_vel_ms` -> `U_mdy`
+            - `V_vel_ms` -> `V_mdy`
+            - `Speed_kmdy` -> `Speed_mdy`
+        - Extract satellite identifiers from `File1` and `File2`
+          into `Sat1` and `Sat2`.
+
+    Args:
+        input_file (str or pathlib.Path): Path to the SAR drift data file
+                                          to read.
+        config (dict): Parsing configuration. Expected keys:
+            - 'delimiter' (str): Field delimiter passed to `pd.read_csv`.
+            - 'skip_rows_before_header' (int): Number of rows to skip before
+              the header row.
 
     Returns:
-        pandas.DataFrame: Cleaned and enriched DataFrame with
-        added columns:
-            - Date1, Date2: Human-readable timestamps
-            - Duration, JS_Duration: Observation durations
-            - Lon1, Lat1, Lon2, Lat2: Rounded geographic coordinates
-            - X1, Y1, X2, Y2: Projected coordinates (EPSG:3413, meters)
-            - dx, dy: Displacements (meters)
-            - U_kmdy, V_kmdy: Velocities in km/day
-            - total_distance_km: Great-circle distance in kilometers
+        pandas.DataFrame: Cleaned and enriched SAR drift DataFrame containing
+        original fields plus derived columns including:
+            - 'Date1', 'Date2' (str): Start/end timestamps in
+                                     '%Y-%m-%d %H:%M:%S'.
+            - 'Duration' (str): Duration as a timedelta string.
+            - 'JS_Duration' (numeric): Duration in seconds
+                                      (Time2_JS - Time1_JS).
+            - 'U_mdy', 'V_mdy', 'Speed_mdy' (float): Velocity/speed in meters
+                                                     per day.
+            - 'Sat1', 'Sat2' (str): Satellite identifiers extracted
+                                    from File1/File2.
+
+    Notes:
+        - SAR time fields `Time1_JS` and `Time2_JS` are interpreted as
+          seconds since 2000-01-01 00:00:00.
+        - A specific `pyproj` warning about database path setup is suppressed
+          because it is expected in this runtime environment.
+        - This function assumes the input file includes the required columns:
+          'Bear_deg', 'Time1_JS', 'Time2_JS', 'U_vel_ms', 'V_vel_ms',
+          'Speed_kmdy', 'File1', and 'File2'.
     """
+    
     import pandas as pd
-    import numpy as np
     from datetime import datetime, timedelta
     
     # The project database for pyproj is properly set by the code above
@@ -550,7 +812,7 @@ def read_sar_drift_data_file(input_file, config):
         message="pyproj unable to set database path"
     )
     
-    precision = config['precision']
+
     
     # Read the SAR drift data file
     df = pd.read_csv(
@@ -588,102 +850,69 @@ def read_sar_drift_data_file(input_file, config):
     df['JS_Duration'] = (
         df['Time2_JS'] - df['Time1_JS']
         )
-
-
-    # Convert lon/lat to float and round
-    # df['Lon1'] = np.round(df['Lon1'].astype(float), precision)
-    # df['Lat1'] = np.round(df['Lat1'].astype(float), precision)
-    # df['Lon2'] = np.round(df['Lon2'].astype(float), precision)
-    # df['Lat2'] = np.round(df['Lat2'].astype(float), precision)
-    
-
-    # transform lon/lat to polarstereographic meters
-    transformer = _set_transformer()
-    
-    df['X1'], df['Y1'] = transformer['4326_to_3413'].transform(
-        df['Lon1'].values, df['Lat1'].values
-    )
-    df['X2'], df['Y2'] = transformer['4326_to_3413'].transform(
-        df['Lon2'].values, df['Lat2'].values
-    )
     
     
-    # Get the zonal and meridional displacment used by NetCDF
-    df['U_kmdy'] = (df['U_vel_ms'] * 60 * 60 * 24) / 1000 # in km
-    df['V_kmdy'] = (df['V_vel_ms'] * 60 * 60 * 24) / 1000 # in km
-    
-
-    # set dX and dY to plot quivers
-    df['dx'] = df['X2'] - df['X1']
-    df['dy'] = df['Y2'] - df['Y1']
-    df['total_distance_km'] = compute_distance_meters(
-        df['X1'].values, df['Y1'].values,
-        df['X2'].values, df['Y2'].values,
-        precision
-    )
+    # convert all units to m/day
+    SECONDS_PER_DAY = 86400.0
+    df['U_mdy'] = (df['U_vel_ms'] * SECONDS_PER_DAY) 
+    df['V_mdy'] = (df['V_vel_ms'] * SECONDS_PER_DAY) 
+    df['Speed_mdy'] = (df['Speed_kmdy'] * 1000)
     
     
     df['Sat1'] = df["File1"].str.partition("_")[0]
     df['Sat2'] = df["File2"].str.partition("_")[0]
     
 
-    
     return df
 
 
 def create_shape_package(df, base_name, config):
     """
-    Generate a GeoPackage (.gpkg) file with point and line geometries
-    derived from SAR drift data, suitable for visualization in GIS software.
+    Create a GeoPackage containing start points, end points, and drift lines
+    for SAR drift vectors.
 
-    This function processes a SAR drift DataFrame and performs the following:
-        - Transforms geographic coordinates (lon/lat) to Polar Stereographic
-          (EPSG:3413)
-        - Creates start and end point geometries for each drift vector
-        - Creates line geometries connecting start and end points
-        - Saves all geometries into a single multi-layer GeoPackage file with
-          three layers: 'start_points', 'end_points', and 'drift_lines'
+    This function builds three geometry representations from an input
+    DataFrame:
+      1. Start locations as Point geometries (Lon1/Lat1)
+      2. End locations as Point geometries (Lon2/Lat2)
+      3. Drift vectors as LineString geometries from start to end
 
-    Each output layer:
-        - Uses the EPSG:3413 coordinate reference system
-        - Includes the original date and position metadata
-        - Can be opened in GIS software such as QGIS
+    Each geometry type is written to its own layer within a single GeoPackage:
+      - `start_points`
+      - `end_points`
+      - `drift_lines`
 
-    Parameters:
-        config (dict): Dictionary of user-defined arguments, including:
-            - 'output_dir' (str): Path to the directory for saving
-                                  the .gpkg file
-            - sar_drift_file_base: Basename by which to name the output files
-            - transformer (pyproj.Transformer): Transformer to convert WGS84
-                                                to EPSG:3413
-        df (pandas.DataFrame): DataFrame containing SAR drift data, including:
-            - 'Date1', 'Date2': Observation timestamps
-            - 'Lon1', 'Lat1', 'Lon2', 'Lat2': Geographic coordinates
+    Args:
+        df (pandas.DataFrame): Input DataFrame containing drift vectors.
+        Expected columns:
+            - 'Lon1', 'Lat1' (float): Starting longitude/latitude (degrees).
+            - 'Lon2', 'Lat2' (float): Ending longitude/latitude (degrees).
+            Additional columns are preserved and written to the GeoPackage
+            layers.
+        base_name (str): Base filename (without extension) used to name the output
+            GeoPackage file `<config['gpkg_dir']>/<base_name>.gpkg`.
+        config (dict): Configuration dictionary containing:
+            - 'gpkg_dir' (str): Output directory where the GeoPackage is written.
 
     Returns:
         tuple:
-            gdf_start (geopandas.GeoDataFrame): GeoDataFrame of start point
-                                                geometries 
-                (EPSG:3413) including metadata fields and 'geometry_type' =
-                'point'.
-            gdf_line (geopandas.GeoDataFrame): GeoDataFrame of drift line
-                                               geometries connecting start and
-                                               end points, with 'geometry_type'
-                                               = 'line'.
-
-    Output:
-        Writes a GeoPackage file named "sar_drift_<timestamp>.gpkg"
-        with three layers:
-            - 'start_points': Point geometries at drift start locations
-            - 'end_points': Point geometries at drift end locations
-            - 'drift_lines': Line geometries connecting start to end
-
+            - gdf_start (geopandas.GeoSeries): GeoSeries of start-point
+                                               geometries
+                                               (layer `start_points`),
+                                               CRS assigned.
+            - gdf_line (geopandas.GeoSeries): GeoSeries of drift LineString
+                                              geometries (layer `drift_lines`),
+                                              CRS assigned.
+    
     Notes:
-        - All geometries are tagged with a 'geometry_type' field
-          ('point' or 'line')
-        - Geometry is projected in meters (EPSG:3413)
-        - Useful for visualizing individual drifts or overlaying
-          with SAR data in GIS
+        - CRS is assigned using the EPSG code returned by
+          `_set_transformer(4326)`, and is applied to each layer
+          before writing.
+        - A helper column `geometry_type` is added to each GeoDataFrame
+          to distinguish points versus lines.
+        - The function constructs an intermediate combined GeoDataFrame,
+          but ultimately writes separate layers for clarity and GIS
+          compatibility.
     """
 
     import os
@@ -693,27 +922,19 @@ def create_shape_package(df, base_name, config):
     
     # reduce data frame to needed features
     df_local = df.copy()
-    transformer = _set_transformer()
+    transformer = _set_transformer(4326)
     
-    # transform projection
-    df_local['X1'], df_local['Y1'] = transformer['4326_to_3413'].transform(
-        df_local['Lon1'].values, df_local['Lat1'].values
-    )
-    df_local['X2'], df_local['Y2'] = transformer['4326_to_3413'].transform(
-        df_local['Lon2'].values, df_local['Lat2'].values
-    )
-
     # Create Point and Line Geometries
     df_local['geometry_start'] = df_local.apply(
-        lambda row: Point((row['X1'], row['Y1'])), axis=1
+        lambda row: Point((row['Lon1'], row['Lat1'])), axis=1
     )
     
     df_local['geometry_end'] = df_local.apply(
-        lambda row: Point((row['X2'], row['Y2'])), axis=1
+        lambda row: Point((row['Lon2'], row['Lat2'])), axis=1
     )
     df_local['geometry_line'] = df_local.apply(
         lambda row: LineString(
-            [(row['X1'], row['Y1']), (row['X2'], row['Y2'])]
+            [(row['Lon1'], row['Lat1']), (row['Lon2'], row['Lat2'])]
         ),
         axis=1
     )
@@ -783,67 +1004,67 @@ def create_shape_package(df, base_name, config):
     return gdf_start, gdf_line
 
 
-def create_netcdf(df, base_name, config):
+def create_netcdf(df, base_name, config, template_ds):
     """
-    Generate a CF/ACDD-compliant NetCDF file from SAR drift data.
+    Create a gridded NetCDF sea-ice drift product from point/vector
+    observations.
 
-    This function performs the following operations:
-        - Projects geographic coordinates (longitude/latitude) into 
-          EPSG:3413 (Polar Stereographic) using a pyproj Transformer
-        - Defines a 2D spatial grid at 1 km resolution based on the spatial
-          extent of the drift data
-        - Initializes NetCDF variables for:
-              - `Speed_kmdy` (drift speed in km/day)
-              - `dx`, `dy` (zonal/meridional displacement in meters/day)
-              - `Bear_deg` (bearing in degrees from true north)
-        - Computes the observation time range and stores it as a CF-compliant
-          time coordinate (seconds since Unix epoch)
-        - Loads metadata from a CDL file and populates standard global 
-          attributes in the NetCDF file
-        - Maps each drift observation to the nearest grid cell, 
-          skipping duplicates with a warning
-        - Writes the result to a compressed `.nc` file (NetCDF4 format)
+    This function maps input drift vectors (lon/lat locations with speed and
+    displacement components) onto a polar stereographic grid, populates a
+    NetCDF dataset using attributes from a metadata/template dataset, crops
+    the output to the spatial extent of valid observations (with padding),
+    and writes the result to disk with compression.
 
-    Parameters:
-        config (dict): Dictionary containing script arguments, including:
-            - 'input_filename': Path to the SAR drift input file
-            - 'netcdf_cdl_file': Path to CDL file containing NetCDF metadta
-                                 standards
-            - 'output_dir': Path to directory save NetCDF file
-            - 'sar_drift_file_basename': Basename by which to name the
-                                         output files
-            - 'transformer' (pyproj.Transformer): Transformer to convert WGS84
-                                                to EPSG:3413
-        df (pandas.DataFrame): Cleaned SAR drift data containing the
-                               following fields:
-            - 'X1', 'Y1', 'X2', 'Y2': Projected coordinates in meters
-              (EPSG:3413)
-            - 'dx', 'dy': Displacements in meters/day
-            - 'Speed_kmdy': Speed in kilometers per day
-            - 'Bear_deg': Bearing angle in degrees
-            - 'Date1': Observation datetime string 
-                      (used to extract time coverage)
-        transformer (pyproj.Transformer): Transformer used for coordinate
-                                          projection
-        timestamp (str): Timestamp string used to name the output NetCDF file
-        cdl_file (str): Name of the file with the NetCDF metadata standards
-
+    Args:
+        df (pandas.DataFrame): Input table of drift observations.
+        Expected columns:
+            - 'Date1' (datetime-like): Start timestamp for the vector.
+            - 'Date2' (datetime-like): End timestamp for the vector.
+            - 'Lon1' (float): Starting longitude (degrees).
+            - 'Lat1' (float): Starting latitude (degrees).
+            - 'Speed_mdy' (float): Sea-ice speed (m/day).
+            - 'U_mdy' (float): X displacement component (m/day).
+            - 'V_mdy' (float): Y displacement component (m/day).
+            - 'Bear_deg' (float): Direction of sea-ice displacement (degrees).
+        base_name (str): Base filename (without extension) used to name
+                         the output NetCDF file
+                         `<config['nc_dir']>/<base_name>.nc`.
+        config (dict): Configuration dictionary. Must include:
+            - 'nc_dir' (str): Output directory where the NetCDF file
+                              is written. Also used by `_set_metadata(config)`
+                              to populate global/variable attributes.
+        template_ds (xarray.Dataset): Template dataset providing the
+                                      target grid coordinate arrays and
+                                      dimensions.
     Returns:
         None
 
-    Output:
-        Writes a NetCDF file named `sar_drift_<timestamp>.nc` to the
-        `output/` directory.
+
+    Workflow:
+        1. Normalize input timestamps (`Date1`, `Date2`) to pandas datetimes.
+        2. Convert starting lon/lat positions (`Lon1`, `Lat1`) to grid
+           indices (i, j) using `_polar_lonlat_to_ij(...)`.
+        3. Build an output dataset using variable/global attributes
+           from `_set_metadata(config)` while using the coordinate arrays
+           from `template_ds`.
+        4. Populate the first (and only) time slice with the vector fields:
+           - sea_ice_speed
+           - sea_ice_x_displacement
+           - sea_ice_y_displacement
+           - direction_of_sea_ice_displacement
+        5. Crop the dataset to the bounding box of valid observations
+           with padding.
+        6. Write the dataset to NetCDF using zlib compression (level 4).
 
     Notes:
-        - The grid is defined in projected meters (EPSG:3413) with 1 km
-          resolution
-        - Metadata placeholders in the CDL template (e.g., `FILL_DATE_CREATED`)
-          are replaced with actual values at runtime
-        - Observations mapped to the same grid cell will emit a warning
-          and be skipped
-        - The resulting NetCDF is compatible with QGIS and other
-          CF-compliant tools
+        - The NetCDF time coordinate is stored as seconds since the Unix epoch
+          using the mean of `Date1` and `Date2` across all observations.
+        - Global attributes `date_created`, `time_coverage_start`, and
+          `time_coverage_end` are updated after dataset creation.
+        - Cropping is based on finite values of `sea_ice_speed`
+          at time index 0.
+        - Duplicate (i, j) assignments are detected and logged; the last value
+          written will overwrite earlier ones for that grid cell.
     """
 
     import os
@@ -852,154 +1073,109 @@ def create_netcdf(df, base_name, config):
     from datetime import datetime
     import xarray as xr
    
-    # Define grid resolution and bounds
-    resolution_km = 12.5  # Resolution in km
     
     
-    # reduce data frame to needed features   
+    # standardize date/time stamps
     df_copy = df.copy()
     df_copy['Date1'] = pd.to_datetime(df_copy['Date1'])
     df_copy['Date2'] = pd.to_datetime(df_copy['Date2'])
+
+    
+    # take the starting longitude and latitude that correspond
+    # with the start date
+    lons = df_copy["Lon1"].to_numpy(dtype=float)
+    lats = df_copy["Lat1"].to_numpy(dtype=float)
     
     
-    # Get the absolute minimum and maximum for lat (Y) and lon (X)
-    min_x, max_x = (
-        df_copy[['X1', 'X2']].min().min(),
-        df_copy[['X1', 'X2']].max().max()
+    # get the i,j coordinates based on lon/lat
+    i, j = _polar_lonlat_to_ij(
+        lons,
+        lats,
+        grid_size=12.5,
+        hemisphere="north"
     )
-    min_y, max_y = (
-        df_copy[['Y1', 'Y2']].min().min(),
-        df_copy[['Y1', 'Y2']].max().max()
-    )
+    # force numpy integer arrays
+    i = np.asarray(i, dtype=np.int64)
+    j = np.asarray(j, dtype=np.int64)
     
     
-    # Build the X and Y coordinates based on maximum and minimum
-    # with steps of resolution multiplied by 1000 km
-    x_coords = np.arange(min_x, max_x, resolution_km * 1000)
-    y_coords = np.arange(min_y, max_y, resolution_km * 1000)
+    # template data set settings
+    x_coords = template_ds['x'].values
+    y_coords = template_ds['y'].values
+    grid_shape = (1, template_ds.sizes['y'], template_ds.sizes['x'])
     
-    
-    try:
-        # Create an empty grid
-        # (time, y, x)
-        grid_shape = (1, len(y_coords), len(x_coords))
-        
+    try:       
         # time defaults
-        epoch = datetime(1970, 1, 1)
-        mean_time = pd.concat([df_copy['Date1'], df_copy['Date2']]).mean()
-        min_time = df_copy['Date1'].min()
-        max_time = df_copy['Date2'].max()
-        
         # convert to "seconds since 1970-01-01 00:00:00"
-        time_sec = (mean_time - epoch).total_seconds()
-        
-        # time array for NetCDF
+        # take min time since using Lon1/Lat1
+
+        epoch = datetime(1970, 1, 1)
+        min_time = df_copy['Date1'].min()
+        max_time = df_copy['Date2'].max()        
+        time_sec = (min_time - epoch).total_seconds()
         time_array = np.array([time_sec], dtype='float64')
         
         
-        # shell of NetCDF
-        netcdf_grid = xr.Dataset(
-            {
-                'Speed_kmdy': (('time', 'y', 'x'),
-                                np.full(grid_shape, np.nan),
-                                {
-                                    'long_name': "Speed in km/day",
-                            		'standard_name': "sea_ice_speed",
-                                    'ioos_category': (
-                                        "SAR daily sea-ice drift"
-                                        ),
-                                    'units': "km/day",
-                                    'grid_mapping': "spatial_ref"
-                                    }
-                                ),
-                'dx': (('time', 'y', 'x'),
-                              np.full(grid_shape, np.nan),
-                              {
-                                  'long_name': 'Zonal Velocity',
-                                  'standard_name': 'movement_in_x_direction',
-                                  'ioos_category': 'SAR daily sea-ice drift',
-                                  'units': 'm/day',
-                                  'grid_mapping': 'spatial_ref'
-                                  }
-                              ),
-                'dy': (('time', 'y', 'x'),
-                              np.full(grid_shape, np.nan),
-                              {
-                                  'long_name': 'Meridional Velocity',
-                                  'standard_name': 'movement_in_y_direction',
-                                  'ioos_category': 'SAR daily sea-ice drift',
-                                  'units': 'm/day',
-                                  'grid_mapping': 'spatial_ref'
-                                  }
-                              ),
-                'Bear_deg': (('time', 'y', 'x'),
-                              np.full(grid_shape, np.nan),
-                              {
-                                  'long_name': 'Bearing',
-                                  'standard_name': "direction_true_north",
-                                  'ioos_category': 'SAR daily sea-ice drift',
-                                  'units': 'degrees',
-                                  'grid_mapping': 'spatial_ref'
-                                  }
-                              )               
-            },
-            # Add metadata to coords so QGIS can properly scale the map
-            coords={
-                'x': (('x',), x_coords,
-                      {
-                          'actual_range': (
-                              [float(x_coords.min()), float(x_coords.max())]
-                              ),
-                          'axis': 'X',
-                          'comment': (
-                              'x values are the centers of the grid cells'
-                              ),
-                          'ioos_category': 'Location',
-                          'long_name': 'x coordinate of projection',
-                          'standard_name': 'projection_x_coordinate',
-                          'units': 'm'
-                          }),
-                'y': (('y',), y_coords,
-                      {
-                          'actual_range': (
-                              [float(y_coords.min()), float(y_coords.max())]
-                              ),
-                          'axis': 'Y',
-                          'comment': (
-                              'y values are the centers of the grid cells'
-                              ),                          
-                          'ioos_category': 'Location',
-                          'long_name': 'y coordinate of projection',
-                          'standard_name': 'projection_x_coordinate',
-                          'units': 'm'
-                          }),
-                'time': (('time',), time_array, {
-                    'actual_range': (
-                        [float(time_array.min()), float(time_array.max())]
-                        ),
-                    'axis': 'T',
-                    'comment': (
-                        'This is the 00Z reference time. '
-                        'Note that products are nowcasted to be valid '
-                        'specifically at the time given here.'
-                        ),
-                    'CoordinateAxisType': 'Time',
-                    'ioos_category': 'Time',
-                    'long_name': 'Centered Time',
-                    'standard_name': 'time',
-                    'time_origin': '01-Jan-1970 0:00:00',
-                    'units': "seconds since 1970-01-01 00:00:00 UTC"
-                })
-            }        
+        # set NetCDF standard attributes
+        meta_ds = _set_metadata(config)
+        
+       
+        # replace placeholders with real values
+        # keep attrs from the CDL skeleton
+        global_attrs = meta_ds.attrs.copy()
+        sea_ice_speed_attrs = meta_ds["sea_ice_speed"].attrs.copy()
+        sea_ice_x_attrs = meta_ds["sea_ice_x_displacement"].attrs.copy()
+        sea_ice_y_attrs = meta_ds["sea_ice_y_displacement"].attrs.copy()
+        direction_attrs = (
+            meta_ds["direction_of_sea_ice_displacement"].attrs.copy()
         )
+        spatial_ref_attrs = meta_ds["spatial_ref"].attrs.copy()
+        x_attrs = meta_ds["x"].attrs.copy()
+        y_attrs = meta_ds["y"].attrs.copy()
+        time_attrs = meta_ds["time"].attrs.copy()
+
+        meta_ds.close()
+        del meta_ds
         
         
-        # Set NetCDF standard attributes
-        metadata_nc = _set_metadata(config)
-        
-        
-        # Replace placeholders with real values
-        netcdf_grid.attrs.update(metadata_nc.attrs)
+        # create dataset from CDL
+        netcdf_grid = xr.Dataset(
+            data_vars={
+                "sea_ice_speed": (
+                    ("time", "y", "x"),
+                    np.full(grid_shape, np.nan, dtype=np.float32),
+                    sea_ice_speed_attrs,
+                ),
+                "sea_ice_x_displacement": (
+                    ("time", "y", "x"),
+                    np.full(grid_shape, np.nan, dtype=np.float32),
+                    sea_ice_x_attrs,
+                ),
+                "sea_ice_y_displacement": (
+                    ("time", "y", "x"),
+                    np.full(grid_shape, np.nan, dtype=np.float32),
+                    sea_ice_y_attrs,
+                ),
+                "direction_of_sea_ice_displacement": (
+                    ("time", "y", "x"),
+                    np.full(grid_shape, np.nan, dtype=np.float32),
+                    direction_attrs,
+                ),
+                "spatial_ref": (
+                    (),
+                    np.int32(0),
+                    spatial_ref_attrs,
+                ),
+            },
+            coords={
+                "time": ("time", time_array, time_attrs),
+                "x": ("x", x_coords, x_attrs),
+                "y": ("y", y_coords, y_attrs),
+            },
+            attrs=global_attrs,
+        )
+
+        # update date and time
         netcdf_grid.attrs['date_created'] = (
             datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
             )
@@ -1010,55 +1186,55 @@ def create_netcdf(df, base_name, config):
             max_time.strftime('%Y-%m-%dT%H:%M:%SZ')
             )
         
-        # add spatial ref
-        spatial_ref_attrs = {
-            "grid_mapping_name": "polar_stereographic",
-            "latitude_of_projection_origin": 90.0,
-            "straight_vertical_longitude_from_pole": -45.0,
-            "standard_parallel": 70.0,
-            "false_easting": 0.0,
-            "false_northing": 0.0,
-            "semi_major_axis": 6378137.0,
-            "inverse_flattening": 298.257223563,
-            "spatial_ref": "EPSG:3413" ,
-            "crs": (
-                'PROJCS["WGS 84 / NSIDC Sea Ice Polar Stereographic North",'
-                'GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",'
-                '6378137,298.257223563]],PRIMEM["Greenwich",0],UNIT["degree",'
-                '0.0174532925199433]],PROJECTION["Polar_Stereographic"],'
-                'PARAMETER["latitude_of_origin",70],'
-                'PARAMETER["central_meridian",-45],'
-                'PARAMETER["scale_factor",1],PARAMETER["false_easting",0],'
-                'PARAMETER["false_northing",0],'
-                'UNIT["metre",1,AUTHORITY["EPSG","9001"]]]'
-            )
-        }
-        netcdf_grid['spatial_ref'] = xr.DataArray(
-            0, attrs=spatial_ref_attrs
-        )
         
-        
-        # Mapping data to the grid
-        index_mapping = {}
-        for _, row in df_copy.iterrows():
-            # To get the i, j indices, we
-            x_idx = np.argmin(np.abs(x_coords - row['X1']))
-            y_idx = np.argmin(np.abs(y_coords - row['Y1']))
+        # update NetCDF with values from input data
+        seen_key = set()
+        for row_n, row in enumerate(df_copy.itertuples(index=False)):
+            ix = int(i[row_n])   # x index
+            iy = int(j[row_n])   # y index
+            index_key = f'{ix}_{iy}'
+            
+            if index_key in seen_key:
+                print(f'Duplcate entry found for {ix}, {iy}')
                 
-            
-            # Create a unique key for each (i, j) pair
-            index_key = (y_idx, x_idx)
-            
-            # Check if this index already exists
-            if index_key in index_mapping:
-                print(f"Duplicate index detected at (i, j): {index_key}")
-            else:
-                # Store data in the grid
-                netcdf_grid['Speed_kmdy'][0, y_idx, x_idx] = row['Speed_kmdy']
-                netcdf_grid['dx'][0, y_idx, x_idx] = row['dx']
-                netcdf_grid['dy'][0, y_idx, x_idx] = row['dy']
-                netcdf_grid['Bear_deg'][0, y_idx, x_idx] = row['Bear_deg']
-
+            seen_key.add(index_key)
+        
+            netcdf_grid["sea_ice_speed"].values[0, iy, ix] = (
+                np.float32(row.Speed_mdy)
+            )
+            netcdf_grid["sea_ice_x_displacement"].values[0, iy, ix] = (
+                np.float32(row.U_mdy)
+            )
+            netcdf_grid["sea_ice_y_displacement"].values[0, iy, ix] = (
+                np.float32(row.V_mdy)
+            )
+            netcdf_grid["direction_of_sea_ice_displacement"].values[
+                0, iy, ix
+            ] = np.float32(row.Bear_deg)
+        
+        
+        # crop to populated values
+        data_mask = np.isfinite(netcdf_grid["sea_ice_speed"].values[0])
+        if np.any(data_mask):
+            filled_y, filled_x = np.where(data_mask)
+        
+            y_start = int(filled_y.min())
+            y_end = int(filled_y.max())
+            x_start = int(filled_x.min())
+            x_end = int(filled_x.max())
+        
+            # pad grid cells in case vectors extend outside of viewing area
+            pad_cells = 4
+            y_start = max(0, y_start - pad_cells)
+            y_end = min(netcdf_grid.sizes["y"] - 1, y_end + pad_cells)
+            x_start = max(0, x_start - pad_cells)
+            x_end = min(netcdf_grid.sizes["x"] - 1, x_end + pad_cells)
+        
+            netcdf_grid = netcdf_grid.isel(
+                y=slice(y_start, y_end + 1),
+                x=slice(x_start, x_end + 1)
+            )
+    
         
         # Save to NetCDF with compression level 4
         output_file_path = os.path.join(
@@ -1067,15 +1243,15 @@ def create_netcdf(df, base_name, config):
         netcdf_grid.to_netcdf(
             output_file_path, mode='w',
             encoding={
-                'Speed_kmdy': {'zlib': True, 'complevel': 4},
-                'dx': {'zlib': True, 'complevel': 4},
-                'dy': {'zlib': True, 'complevel': 4},
-                'Bear_deg': {'zlib': True, 'complevel': 4},
+                'sea_ice_speed': {'zlib': True, 'complevel': 4},
+                'sea_ice_x_displacement': {'zlib': True, 'complevel': 4},
+                'sea_ice_y_displacement': {'zlib': True, 'complevel': 4},
+                'direction_of_sea_ice_displacement': {
+                    'zlib': True, 'complevel': 4
+                },
                 'spatial_ref': {'dtype': 'int32'}
             }
         )
-    
-        
         
     finally:
         # Ensure that these lines are executed even if an error occurs
@@ -1084,6 +1260,45 @@ def create_netcdf(df, base_name, config):
         
 
 def create_png(config, base_name):
+    """
+    Create and save a PNG map of sea-ice drift vectors from a NetCDF file.
+    
+    This function opens a NetCDF dataset (expected to be on a polar 
+    stereographic grid consistent with EPSG:3411-like parameters),
+    extracts the first time slice of sea-ice displacement components,
+    computes vector magnitude, and renders a quiver plot on a Cartopy
+    stereographic map. The plot is saved as a PNG file to the directory
+    specified in `config`.
+    
+    Args:
+        config (dict): Configuration dictionary containing required paths:
+            - 'nc_dir' (str): Directory containing the input NetCDF file.
+            - 'png_dir' (str): Directory where the output PNG will be written.
+        base_name (str): Base filename (without extension) used to locate the
+            NetCDF file (`<nc_dir>/<base_name>.nc`) and name the output PNG
+            (`<png_dir>/<base_name>.png`).
+    
+    Returns:
+        None
+    
+    Expected Dataset Variables:
+        - 'x' (1D array): X coordinates in meters (projection coordinates).
+        - 'y' (1D array): Y coordinates in meters (projection coordinates).
+        - 'sea_ice_x_displacement' (time, y, x): X displacement component.
+        - 'sea_ice_y_displacement' (time, y, x): Y displacement component.
+        - 'sea_ice_speed' (time, y, x): Used to count finite
+          (valid) observations.
+    
+    Notes:
+        - Vector magnitude is computed as `hypot(dx, dy)` and used
+          to color the quivers.
+        - The map extent is derived from the min/max of the x/y
+          coordinate arrays.
+        - Quiver scale is adjusted heuristically based on the map span.
+        - Requires Cartopy and its dependencies (e.g., PROJ, GEOS).
+        - The colorbar label assumes units of meters per day ("m_day")
+          and should be updated if the dataset uses different units.
+    """
     import xarray as xr
     import numpy as np
     import matplotlib.pyplot as plt
@@ -1096,12 +1311,12 @@ def create_png(config, base_name):
     with xr.open_dataset(source_nc_path) as ds:
         x_values = ds['x'].values
         y_values = ds['y'].values
-        dx_values = ds["dx"].isel(time=0).values
-        dy_values = ds["dy"].isel(time=0).values
-        mag = np.hypot(dx_values, dy_values) / 1000 # values in km
+        dx_values = ds["sea_ice_x_displacement"].isel(time=0).values
+        dy_values = ds["sea_ice_x_displacement"].isel(time=0).values
+        mag = np.hypot(dx_values, dy_values)
         
         # determine total valid observations
-        arr = ds['Speed_kmdy'].isel(time=0).values
+        arr = ds['sea_ice_speed'].isel(time=0).values
         valid = np.isfinite(arr) # ignore any NaN values
         norm = mcolors.Normalize(
             vmin=np.nanmin(mag),
@@ -1109,13 +1324,25 @@ def create_png(config, base_name):
         )
     
     # set projection defined by data set
-    crs_3413 = ccrs.NorthPolarStereo(central_longitude=-45)
+    globe_3411 = ccrs.Globe(
+        semimajor_axis=6378273.0,
+        semiminor_axis=6356889.449
+    )
     
+    crs_3411 = ccrs.Stereographic(
+        central_latitude=90,
+        central_longitude=-45,
+        false_easting=0.0,
+        false_northing=0.0,
+        true_scale_latitude=70,
+        globe=globe_3411
+    )
+     
     fig = plt.figure(figsize=(10, 10))
-    ax = plt.axes(projection=crs_3413)
+    ax = plt.axes(projection=crs_3411)
     
     # Set extent in the projection's coordinate system (meters)
-    pad = 50_000 # 50km <-- change the pad to change scope of view
+    pad = 0 # 50km <-- change the pad to change scope of view
     xmin = np.round(x_values.min() - pad, 3)
     xmax = np.round(x_values.max() + pad, 3)
     ymin = np.round(y_values.min() - pad, 3)
@@ -1129,7 +1356,7 @@ def create_png(config, base_name):
         quiver_scale = 0.1
     else:
         quiver_scale = 1.0
-    ax.set_extent([xmin, xmax, ymin, ymax], crs=crs_3413)
+    ax.set_extent([xmin, xmax, ymin, ymax], crs=crs_3411)
     
     
     # Coastlines / land
@@ -1138,7 +1365,7 @@ def create_png(config, base_name):
     
     q = ax.quiver(
         x_values, y_values, dx_values, dy_values, mag,
-        transform=crs_3413,
+        transform=crs_3411,
         angles="xy", scale_units="xy",
         scale=quiver_scale,
         width=0.001,
@@ -1153,16 +1380,16 @@ def create_png(config, base_name):
         f"Sea-ice Vector Velocities\n"
         f"x {xmin} to {xmax}; y {ymin} to {ymax}\n"
         f"Total observations: {valid.sum()}\n"
-        f"Width {np.int32(map_height / 1000)} km by Height {np.int32(map_width / 1000)} km"
+        f"Width {np.int32(map_height)} m by Height {np.int32(map_width)} m"
+        f"Polar stereographic EPSG:3411"
     )
     
-    cbar = fig.colorbar(q, ax=ax, orientation="vertical", shrink=0.65, pad=0.02)
-    cbar.set_label("Vector velocity (km_day)")
+    cbar = fig.colorbar(
+        q, ax=ax, orientation="vertical", shrink=0.65, pad=0.02
+    )
+    cbar.set_label("Vector velocity (m_day)")
     
-    # ax.quiverkey(q, 1.05, 0.08, 10_000, "10 km", labelpos="E", coordinates="axes")
-    # ax.quiverkey(q, 1.05, 0.06, 20_000, "20 km", labelpos="E", coordinates="axes")
-    # ax.quiverkey(q, 1.05, 0.04, 30_000, "30 km", labelpos="E", coordinates="axes")  
-    
+
     # save plot as .png
     png_file = os.path.join(
         config['png_dir'], f"{base_name}.png"
@@ -1205,7 +1432,6 @@ def concat_netcdf_files(config, output_basename):
     for ds in mosaics:
         ds.close()
     out.close()
-    
     
 
 def overlay_sar_drift_on_geotiff(config, gdf_lines, df_sar, base_name):
@@ -1482,404 +1708,9 @@ def overlay_sar_drift_on_geotiff(config, gdf_lines, df_sar, base_name):
     )
     fig.savefig(png_file, bbox_inches='tight', dpi=300)
     plt.close(fig)
-    
         
 
-def read_geotiff_rasterio(geotiff_file):
-    """
-    Reads a GeoTIFF image using GCP-based reprojection to EPSG:3413
-    (NSIDC Sea Ice Polar Stereographic North) and returns a masked
-    array with coordinate information.
-    
-    This function:
-        - Opens a GeoTIFF file using rasterio
-        - Extracts Ground Control Points (GCPs) to reproject the image
-        to a target CRS (EPSG:3413)
-        - Uses nearest-neighbor resampling to regrid the data
-        - Constructs an xarray.DataArray with spatial coordinates in meters
-        - Masks background values (zeros) to allow clean visualization
-        - Computes the image extent for use in plotting (e.g., with imshow)
-    
-    Parameters:
-        geotiff_path (str): Path to the input GeoTIFF file containing
-                            GCPs and raster data.
-    
-    Returns:
-        tuple:
-            masked_xr (np.ma.MaskedArray): Masked 2D array of image data
-                                           with background set to NaN.
-            extent (list): [xmin, xmax, ymin, ymax] extent of the image
-                           in meters (EPSG:3413) for use with plotting.
-    Coauthor:
-        Rachael Lazzaro, rachel.lazzaro@noaa.gov
-    """
-    
-    
-    import rasterio
-    from rasterio.warp import reproject, Resampling
-    from rasterio.warp import calculate_default_transform
-    import xarray as xr
-    import numpy as np
-   
 
-    with rasterio.open(geotiff_file) as src:
-        gcps, gcps_crs = src.get_gcps()
-        dst_crs = "EPSG:3413"
-        dst_transform, width, height = calculate_default_transform(
-            gcps_crs, dst_crs, src.width, src.height, gcps=gcps
-        )
-
-        dst_array = np.empty(
-            (src.count, height, width), 
-            dtype=src.dtypes[0]
-        )
-
-        reproject(
-            source=rasterio.band(src, 1),
-            destination=dst_array[0],
-            src_crs=gcps_crs,
-            src_transform=None, # None triggers GCP-based warping
-            gcps=gcps,          # Let rasterio warp based on GCPs
-            dst_transform=dst_transform,
-            dst_crs=dst_crs,
-            resampling=Resampling.nearest
-        )
-        
-        # Construct xarray.DataArray with coordinates
-        x_coords = dst_transform[2] + dst_transform[0] * np.arange(width)
-        y_coords = dst_transform[5] + dst_transform[4] * np.arange(height)
-        
-        geotiff_xr = xr.DataArray(
-            dst_array[0],
-            dims=("y", "x"),
-            coords={"x": x_coords, "y": y_coords},
-            attrs={"crs": dst_crs}
-        )
-        
-        # change backround to white
-        masked_xr = np.ma.masked_equal(geotiff_xr.values, 0)
-        
-        extent = [
-            dst_transform[2],
-            dst_transform[2] + dst_transform[0] * width,
-            dst_transform[5] + dst_transform[4] * height,
-            dst_transform[5],
-        ]
-        
-        return masked_xr, extent
-    
-        
-#=============
-# Calculations
-#=============
-
-def compute_bearing(
-    lat1: float,  # Starting latitude(s), can be a single float or a list of floats
-    lon1: float,  # Starting longitude(s), can be a single float or a list of floats
-    lat2: float,  # Ending latitude(s), can be a single float or a list of floats
-    lon2: float   # Ending longitude(s), can be a single float or a list of floats
-) -> Tuple[float, float]:       # Returns a tuple: (fwd_azimuth, back_azimuth, distance)
-
-    """
-    Calculate the daily drift between two points (start and end) based on their latitude and longitude.
-
-    :param lat1: Starting latitude(s)  
-    :param lon1: Starting longitude(s)  
-    :param lat2: Ending latitude(s)  
-    :param lon2: Ending longitude(s)  
-    :return: 
-        - fwd_azimuth (float): Forward azimuth in degrees (0 to 360), measured clockwise from true north
-        - distance (float): Great circle distance between the two points in meters
-    :ref: https://pyproj4.github.io/pyproj/stable/api/geod.html#pyproj.Geod.inv
-    """
-
-    # Initialize a geodetic object using the WGS84 ellipsoid
-    geod = Geod(ellps='WGS84')
-
-    # Calculate azimuth and distance using geod.inv method
-    # Note: Arguments order is (lon1, lat1, lon2, lat2) as required by pyproj.Geod.inv
-    fwd_azimuth, _ , distance = geod.inv(lon1, lat1, lon2, lat2)
-    
-    # Return the calculated forward azimuth, back azimuth, and distance
-    return fwd_azimuth, distance 
-    
-    
-def compute_distance_meters(x1, y1, x2, y2, precision):
-    """
-    Compute planar bearing (clockwise from north) and Euclidean distance
-    between two points in a projected CRS (e.g., EPSG:3413).
-    
-    Parameters:
-        x1 (float): Starting longitude
-        y1 (float): Starting latitude
-        x2 (float): Ending longitude
-        y2 (float): Ending latitude
-        precision: Round significant digits
-        
-    Returns:
-        distance (float): Computed Euclidean distance
-    """
-    
-    
-    import numpy as np
-    
-    dx = x2 - x1
-    dy = y2 - y1
-
-    # Distance in kilometers --> np.hypot=(dx^2+dy^2)^.5
-    distance = np.round(np.hypot(dx, dy) / 1000, precision)
-
-    return distance
-   
-
-def circular_mean(a):
-    import numpy as np
-    return np.arctan2(np.nanmean(np.sin(a)), np.nanmean(np.cos(a)))
-
-
-def circular_std(a):
-    import numpy as np
-    s = np.nanmean(np.sin(a))
-    c = np.nanmean(np.cos(a))
-    R = np.sqrt(s*s + c*c)
-    return np.sqrt(-2 * np.log(np.clip(R, 1e-12, 1.0)))
-
-    
-#==================
-# Plot enhancements
-#==================
-
-def add_graticules(ax, map_extent):
-    """
-    Add latitude and longitude graticules with labels to a Cartopy map axis.
-    
-    This function draws dashed gridlines (graticules) at regular intervals
-    of longitude and latitude on a projected plot using EPSG:3413
-    (NSIDC Sea Ice Polar Stereographic North). Longitude labels are placed
-    near the bottom of the plot and labeled in degrees west. Latitude labels
-    are placed along the right edge in degrees north.
-    
-    Parameters
-    ----------
-    ax : matplotlib.axes._subplots.AxesSubplot
-        A Cartopy-projected Matplotlib axis to which graticules will be added.
-    
-    map_extent_xr : list of float
-        The extent of the plotted map in EPSG:3413 projected coordinates, 
-        given as [xmin, xmax, ymin, ymax].
-    
-    Notes
-    -----
-    - Graticules are drawn every 10 degrees longitude and 
-      every 5 degrees latitude.
-    - The function internally transforms coordinates using `pyproj`
-      for EPSG:3413 <-> EPSG:4326.
-    - A 10% buffer is added to both longitude and latitude ranges to ensure
-      full graticule coverage.
-    - Labels are drawn in projected space (not geographic space).
-    - Longitude labels use west notation (e.g., 135°W),
-      and latitude uses north (e.g., 75.0°N).
-    """
-    
-    
-    import numpy as np
-    
-    # Corners in degrees transform from EPSG:3413 to EPSG:4326
-    transformer = _set_transformer()
-    lon_min, lat_min = (
-        transformer['3413_to_4326'].transform(map_extent[0], map_extent[2])
-    )
-    lon_max, lat_max = (
-        transformer['3413_to_4326'].transform(map_extent[1], map_extent[3])
-    )
-    
-    # Fix inverted bounds
-    lon_min, lon_max = sorted([lon_min, lon_max])
-    lat_min, lat_max = sorted([lat_min, lat_max])
-   
-    
-    # Generate labels (every 5 degrees lat; every 10 degrees lon)
-    # Only include multiples of 5 within the actual bounds
-    lon_labels = np.arange(
-        np.ceil(lon_min / 10) * 10,
-        np.floor(lon_max / 10) * 10 + 1,
-        10
-    )
-    
-    lat_labels = np.arange(
-        np.ceil(lat_min / 5) * 5,
-        np.floor(lat_max / 5) * 5 + 1,
-        5
-    )
-
-    
-    # Extend the longitude/latitude range slightly (e.g., 10%) 
-    # to ensure full coverage
-    lon_range = lon_max - lon_min
-    lon_pad = 0.1 * lon_range  # 10% padding
-    lon_min_ext = lon_min - lon_pad
-    lon_max_ext = lon_max + lon_pad
-    
-    lat_range = lat_max - lat_min
-    lat_pad = 0.1 * lat_range
-    lat_min_ext = lat_min - lat_pad
-    lat_max_ext = lat_max + lat_pad
-    
-    
-    # Vertical lines for longitude
-    for lon in lon_labels:
-        lats = np.linspace(lat_min_ext, lat_max_ext, 200)
-        points = []
-        for lat in lats:
-            points.append(transformer['4326_to_3413'].transform(lon, lat))
-        xs, ys = zip(*points)
-        ax.plot(xs, ys, color='lightgray', linestyle='--', linewidth=0.5)
-        
-    # longitude labels
-    for lon in lon_labels:
-        x, y = transformer['3413_to_4326'].transform(lon, lat_min)
-        ax.text(
-            x + 30000,
-            y + 5000,
-            f"{lon:.0f}°W",
-            ha='center',
-            va='top',
-            fontsize=8
-        )
-
-
-    # horizontal lines for latitude    
-    for lat in lat_labels:
-        lons = np.linspace(lon_min_ext, lon_max_ext, 200)
-        points = []
-        for lon in lons:
-            points.append(transformer['4326_to_34123'].transform(lon, lat))
-        xs, ys = zip(*points)
-        ax.plot(xs, ys, color='lightgray', linestyle='--', linewidth=0.5)    
-    
-    # Label latitudes at right
-    for lat in lat_labels:
-        x, y = transformer['4326_to_3413'].transform(lon_labels[-1], lat)
-        ax.text(
-            x - 5000,
-            y - 10000,
-            f"{lat:.1f}°N",
-            ha='left',
-            va='center',
-            fontsize=8
-        )
-
-
-def add_scale(ax, cartopy_crs):
-    """
-    Add a scale bar to a Cartopy-projected map axis.
-    
-    This function uses the `matplotlib_scalebar` library to draw a scale bar
-    that indicates real-world distance in kilometers. It assumes the map
-    projection uses meters as its base unit (e.g., EPSG:3413).
-    
-    Parameters
-    ----------
-    ax : matplotlib.axes._subplots.AxesSubplot
-        A Matplotlib axis with a Cartopy projection to which the scale bar
-        will be added.
-    
-    cartopy_crs : cartopy.crs.Projection
-        The projection used for the map, assumed to be in meters. Although not
-        directly used, this parameter is kept for compatibility and clarity.
-    
-    Notes
-    -----
-    - The scale bar spans 25% of the axis width.
-    - The bar displays a fixed length of 100 kilometers.
-    - The position of the scale bar is anchored to the lower left corner
-      of the plot.
-    - The axis is assumed to use projected units in meters
-      (e.g., Polar Stereographic).
-    """
-    
-    
-    from matplotlib_scalebar.scalebar import ScaleBar
-    
-    # Add scalebar to ax
-    scalebar = ScaleBar(
-        dx=1,                  # 1 data unit = 1 meter
-        units='m',             # tell it the CRS uses meters
-        location='lower left',
-        scale_loc='bottom',
-        length_fraction=0.25,  # bar spans 25% of axis
-        fixed_value=100,       # (optional) force bar to 100 km
-        fixed_units='km'       # force label to km
-    )
-    ax.add_artist(scalebar)
-    
-    
-def add_true_north(ax, xmin, xmax, ymin, ymax):
-    """
-    Add a True North arrow to a Cartopy map axis using EPSG:3413 coordinates.
-
-    This function adds an arrow pointing to geographic North at a reference
-    location near the bottom-right corner of the plot. The location is computed
-    in the EPSG:3413 projection (Polar Stereographic North), and then
-    converted to geographic coordinates (EPSG:4326) to calculate the northward
-    direction.
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        The Matplotlib axis on which to draw the True North arrow.
-
-    xmin : float
-        Minimum x-coordinate (in meters) of the map extent.
-
-    xmax : float
-        Maximum x-coordinate (in meters) of the map extent.
-
-    ymin : float
-        Minimum y-coordinate (in meters) of the map extent.
-
-    ymax : float
-        Maximum y-coordinate (in meters) of the map extent.
-
-    Notes
-    -----
-    - The north arrow is drawn at 5% from the right and 5% from the bottom
-      of the map.
-    - The arrow is styled with a black face and labeled with an 'N'
-      to indicate direction.
-    - Coordinate conversions between EPSG:3413 and EPSG:4326 are performed
-      using `pyproj.Transformer`.
-    """
-    
-    
-    
-    transformer = _set_transformer()
-    
-    # bottom-right corner of the plot as reference point
-    x_ref = xmax - 0.05 * (xmax - xmin)
-    y_ref = ymin + 0.05 * (ymax - ymin)
-    
-    # convert meters to degrees
-    lon_ref, lat_ref = transformer['3413_to_4326'].transform(x_ref, y_ref)
-    
-    # move a small distance north
-    lat_north = lat_ref + 0.5
-    lon_north = lon_ref
-    
-    # convert degrees back to meters
-    x_north, y_north = transformer['4326_to_3413'].transform(lon_north, lat_north)
-    
-    # arrow
-    ax.annotate(
-        '', xy=(x_north, y_north), xytext=(x_ref, y_ref),
-        arrowprops=dict(
-            facecolor='black', edgecolor='black', width=2, headwidth=10
-        ),
-    )
-    ax.text(
-        x_ref, y_ref - 20000, 'N', color='black',
-        fontsize=16, ha='center', va='top'
-    )
     
 
 #===================
