@@ -1109,7 +1109,7 @@ def create_netcdf(df, base_name, config, template_ds):
         # convert to "seconds since 1970-01-01 00:00:00"
         # take min time since using Lon1/Lat1
 
-        epoch = datetime(1970, 1, 1)
+        epoch = pd.Timestamp("1970-01-01 00:00:00")
         min_time = df_copy['Date1'].min()
         max_time = df_copy['Date2'].max()        
         time_sec = (min_time - epoch).total_seconds()
@@ -1398,41 +1398,216 @@ def create_png(config, base_name):
     plt.close(fig)
     
     
-def concat_netcdf_files(config, output_basename):
-    from glob import glob
-    from collections import defaultdict
+def combine_daily_netcdf_files(
+    config,
+    nc_files,
+    template_ds,
+    daily_start_date,
+    daily_end_date,
+    daily_nc_path,
+    multi_layered=True,
+    overwrite=False,
+):
+    """
+    Combine multiple sliced SAR drift NetCDF files into one full daily mosaic
+    on the template grid.
+
+    Parameters
+    ----------
+    sliced_nc_files (list[str]): Paths to sliced NetCDF scene files.
+    template_ds (xarray.Dataset): Template dataset providing the
+                                  target grid coordinate arrays and
+                                  dimensions.
+    daily_start_date (str): YYYYMMDD used to set start time bounds
+    daily_end_date (Str): YYYYMMDD used to set start time bounds.
+    daily_nc_filename (str): Path to the output daily NetCDF file.
+    overwrite : bool, default False
+        If False, keep first non-NaN value when overlaps occur.
+        If True, later files overwrite earlier files.
+
+    Returns
+    -------
+    None
+    """
+    import numpy as np
     import pandas as pd
     import xarray as xr
-    import numpy as np
-    
-    files = sorted(glob(r"output/nc/*.nc"))
-    keep_vars = ["Speed_kmdy", "dx", "dy", "Bear_deg", "spatial_ref"]
-    chunk_size = 1024
-    
+    from datetime import datetime
+
+    # template grid settings
+    # each scene netcdf file will be its own layer
+    x_coords = template_ds["x"].values
+    y_coords = template_ds["y"].values
 
 
+    # time defaults for output daily file
+    min_time = pd.to_datetime(daily_start_date, format="%Y%m%d")
+    max_time = pd.to_datetime(daily_end_date, format="%Y%m%d")   
+    if multi_layered:
+        n_time = len(nc_files)
+    else:
+        n_time = 1
+    time_array = np.arange(n_time, dtype='float64')
     
-    out = xr.concat(mosaics, dim="time").sortby("time")
-    out = out.chunk({"time": 1, "y": chunk_size, "x": chunk_size})
+    # finalize grid shape
+    grid_shape = (n_time, template_ds.sizes["y"], template_ds.sizes["x"])
 
-    data_vars = [v for v in ["Speed_kmdy", "dx", "dy", "Bear_deg"] if v in out.data_vars]
-    encoding = {
-        v: {
-            "zlib": True,
-            "complevel": 4,
-            "chunksizes": (1, chunk_size, chunk_size),
-        }
-        for v in data_vars
-    }
-
+    # set defaults
+    daily_grid = None
+    var_names =  [
+        "sea_ice_speed",
+        "sea_ice_x_displacement",
+        "sea_ice_y_displacement",
+        "direction_of_sea_ice_displacement"
+    ]
+    time_list = []
     
-    out.to_netcdf(r"output/nc/mosiac.nc", engine="netcdf4", format="NETCDF4", encoding=encoding)
 
-    # Close mosaics + output dataset
-    for ds in mosaics:
-        ds.close()
-    out.close()
-    
+    try:
+        # ---------------------------------------------------------
+        # Build output dataset from CDL metadata
+        # ---------------------------------------------------------
+        meta_ds = _set_metadata(config)
+
+        global_attrs = meta_ds.attrs.copy()
+        sea_ice_speed_attrs = meta_ds["sea_ice_speed"].attrs.copy()
+        sea_ice_x_attrs = meta_ds["sea_ice_x_displacement"].attrs.copy()
+        sea_ice_y_attrs = meta_ds["sea_ice_y_displacement"].attrs.copy()
+        direction_attrs = (
+            meta_ds["direction_of_sea_ice_displacement"].attrs.copy()
+        )
+        spatial_ref_attrs = meta_ds["spatial_ref"].attrs.copy()
+        x_attrs = meta_ds["x"].attrs.copy()
+        y_attrs = meta_ds["y"].attrs.copy()
+        time_attrs = meta_ds["time"].attrs.copy()
+
+        meta_ds.close()
+        del meta_ds
+        
+        daily_grid = xr.Dataset(
+            data_vars={
+                "sea_ice_speed": (
+                    ("time", "y", "x"),
+                    np.full(grid_shape, np.nan, dtype=np.float32),
+                    sea_ice_speed_attrs,
+                ),
+                "sea_ice_x_displacement": (
+                    ("time", "y", "x"),
+                    np.full(grid_shape, np.nan, dtype=np.float32),
+                    sea_ice_x_attrs,
+                ),
+                "sea_ice_y_displacement": (
+                    ("time", "y", "x"),
+                    np.full(grid_shape, np.nan, dtype=np.float32),
+                    sea_ice_y_attrs,
+                ),
+                "direction_of_sea_ice_displacement": (
+                    ("time", "y", "x"),
+                    np.full(grid_shape, np.nan, dtype=np.float32),
+                    direction_attrs,
+                ),
+                "spatial_ref": (
+                    (),
+                    np.int32(0),
+                    spatial_ref_attrs,
+                ),
+            },
+            coords={
+                "time": ("time", time_array, time_attrs),
+                "x": ("x", x_coords, x_attrs),
+                "y": ("y", y_coords, y_attrs),
+            },
+            attrs=global_attrs,
+        )
+        
+        # update global attrs
+        daily_grid.attrs["date_created"] = (
+            datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
+        daily_grid.attrs["time_coverage_start"] = (
+            min_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
+        daily_grid.attrs["time_coverage_end"] = (
+            max_time.strftime("%Y-%m-%dT23:59:59Z")
+        )
+        
+        # optional: nicer output filename metadata
+        daily_grid.attrs["title"] = (
+            "Daily Northern Hemisphere SAR sea-ice velocity mosaic"
+        )
+        
+        
+        # merge each sliced NetCDF into the template grid
+        for nc_idx, nc_file in enumerate(nc_files):
+            with xr.open_dataset(nc_file, decode_times=False) as scene_ds:
+                # Note: decode_times=False helps keep units perserved
+                # rather than intepreted
+                scene_x = scene_ds['x'].values
+                scene_y = scene_ds['y'].values
+                
+                if multi_layered:
+                    time_list.append(float(scene_ds['time'].values[0]))
+                    t_idx = nc_idx
+                else:
+                    t_idx = 0
+                
+                """
+                get the start and end x/y to place on template;
+                there will be an exact match since the scene was create
+                from the template
+                """                
+                x_start = int(np.where(x_coords == scene_x[0])[0][0])
+                x_end   = int(np.where(x_coords == scene_x[-1])[0][0])
+                y_start = int(np.where(y_coords == scene_y[0])[0][0])
+                y_end   = int(np.where(y_coords == scene_y[-1])[0][0])
+                
+                # ensure indices are ordered
+                x_0, x_1 = min(x_start, x_end), max(x_start, x_end)
+                y_0, y_1 = min(y_start, y_end), max(y_start, y_end)
+        
+                for var_name in var_names:
+                    scene_vals = scene_ds[var_name].isel(time=0).values
+                    daily_grid[var_name].values[
+                        t_idx,
+                        y_0:y_1+1,
+                        x_0:x_1+1
+                    ] = scene_vals
+                               
+                
+        # update time array as found in sliced NetCDF files
+        if multi_layered:
+            time_array = np.array(time_list, dtype='float64')
+        else:
+            daily_time_sec = (
+                pd.to_datetime(daily_start_date, format="%Y%m%d")
+                - pd.Timestamp("1970-01-01 00:00:00")
+            ).total_seconds()
+            time_array = np.array([daily_time_sec], dtype="float64")
+            
+        daily_grid = daily_grid.assign_coords(
+            time=('time', time_array, daily_grid['time'].attrs)
+        )
+
+        # save daily NetCDF (compression level 4)
+        daily_grid.to_netcdf(
+            daily_nc_path,
+            mode="w",
+            encoding={
+                "sea_ice_speed": {"zlib": True, "complevel": 4},
+                "sea_ice_x_displacement": {"zlib": True, "complevel": 4},
+                "sea_ice_y_displacement": {"zlib": True, "complevel": 4},
+                "direction_of_sea_ice_displacement": {
+                    "zlib": True, "complevel": 4
+                },
+                "spatial_ref": {"dtype": "int32"},
+            },
+        )
+
+    finally:
+        if daily_grid is not None:
+            daily_grid.close()
+            del daily_grid    
+
 
 def overlay_sar_drift_on_geotiff(config, gdf_lines, df_sar, base_name):
     """

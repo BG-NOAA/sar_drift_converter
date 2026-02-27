@@ -485,25 +485,16 @@ def main():
     import os
     from glob import glob
     from tqdm import tqdm
-    from datetime import datetime
+    import pandas as pd
     import xarray as xr
     
     # parse user arguments
     config = read_json_config()
     
-    # load NSIDC EPSG:3411 NetCDF template
-    # creat Arctic grid at 3413
+    # load NSIDC polar stereographic EPSG:3411 NetCDF template
     with xr.open_dataset(config['netcdf_template_file']) as ds:
         template_ds = ds.load()
 
-    # nc_file_path = os.path.join(
-    #     'meta',
-    #     'arctic_wide_3413_template.nc'
-    # )
-    # util._create_arctic_grid(nc_file_path, '20200224', config)
-    # with xr.open_dataset(nc_file_path) as ds:
-    #     template_ds = ds.load()
-        
 
     # find files to process
     files= []
@@ -560,7 +551,7 @@ def main():
     
     
     
-
+    daily_start_date, daily_end_date = None, None
     for data_file in tqdm(updated_files, desc='Processing data files...'):
     # for data_file in updated_files:
         # set base name for output files
@@ -587,8 +578,8 @@ def main():
     
         """
         Per OSI SAF, the dates in file names that have motion data
-        the dates in the file typically is the end date of the observation period
-        https://osisaf-hl.met.no/sites/osisaf-hl/files/user_manuals/
+        the dates in the file typically is the end date of the observation
+        period https://osisaf-hl.met.no/sites/osisaf-hl/files/user_manuals/
         osisaf_pum_sea-ice-drift-lr_v1p9.pdf
         (Page 25)
         
@@ -596,17 +587,16 @@ def main():
         
         For multiple pairs in one period, have included start/end date/time
         """
-        start_min = df_sar['Date1'].min()
-        start_date = datetime.strptime(
-            start_min, "%Y-%m-%d %H:%M:%S"
-        ).strftime("%Y%m%d")
+        start_min = pd.to_datetime(df_sar['Date1'].min())
+        if daily_start_date is None or start_min < daily_start_date:
+            daily_start_date = start_min
 
-        end_max = df_sar['Date2'].max()
-        end_date = datetime.strptime(
-            end_max, "%Y-%m-%d %H:%M:%S"
-        ).strftime("%Y%m%d")
+        end_max = pd.to_datetime(df_sar['Date2'].max())
+        if daily_end_date is None or end_max > daily_end_date:
+            daily_end_date = end_max
     
-    
+        # continue # skip right to concatenation
+        
         # Create shape file package for QGIS    
         gdf_points, gdf_lines = util.create_shape_package(
             df=df_sar,
@@ -621,13 +611,6 @@ def main():
             config=config,
             template_ds=template_ds
         )
-        
-
-        # combine all created netcdf files into one
-        output_basename = (
-            f"SIVelocity_SAR_{start_date}_{end_date}_12km_NH_v00"
-        )
-        # util.concat_netcdf_files(config, output_basename)
         
         
         # create individual PNG file
@@ -654,7 +637,42 @@ def main():
                 outlier_type='sd'
             )
     
+    # combine all created netcdf files into one
+    nc_files = glob(os.path.join(config["output_dir"], 'nc', '*.nc'))
+    daily_start_date_str = daily_start_date.strftime("%Y%m%d")
+    daily_end_date_str = daily_end_date.strftime("%Y%m%d")
     
+    # multiple layers
+    daily_nc_path = os.path.join(
+        config["output_dir"],
+        f"SIVelocity_SAR_{daily_start_date_str}_{daily_end_date_str}"
+        "_12km_NH_v00.nc"
+    )
+    util.combine_daily_netcdf_files(
+        config=config,
+        nc_files=nc_files,
+        template_ds=template_ds,
+        daily_start_date=daily_start_date,
+        daily_end_date=daily_end_date,
+        daily_nc_path=daily_nc_path
+    )
+    
+    
+    # one layer
+    daily_nc_path = os.path.join(
+        config["output_dir"],
+        f"SIVelocity_SAR_{daily_start_date_str}_{daily_end_date_str}"
+        "_12km_NH_v00_one_layer.nc"
+    )
+    util.combine_daily_netcdf_files(
+        config=config,
+        nc_files=nc_files,
+        template_ds=template_ds,
+        daily_start_date=daily_start_date,
+        daily_end_date=daily_end_date,
+        daily_nc_path=daily_nc_path,
+        multi_layered=False
+    )
     
 if __name__ == "__main__":
     main()
