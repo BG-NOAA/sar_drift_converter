@@ -595,7 +595,17 @@ def main():
         if daily_end_date is None or end_max > daily_end_date:
             daily_end_date = end_max
     
-        # continue # skip right to concatenation
+
+        # Detect outliers (will return all 00 if not active)
+        df_sar = util.outlier_search(
+            df=df_sar,
+            config=config,
+            base_name=data_file_basename,
+            radius_km=25,
+            min_neighbors=8,
+            iter_count = 1 # number of outlier detection passes
+        )
+
         
         # Create shape file package for QGIS    
         gdf_points, gdf_lines = util.create_shape_package(
@@ -604,38 +614,48 @@ def main():
             config=config
         )
         
-        # Create NetCDF file for QGIS    
+        # Create NetCDF file for QGIS
         util.create_netcdf(
             df=df_sar,
             base_name=data_file_basename,
             config=config,
             template_ds=template_ds
         )
-        
+
         
         # create individual PNG file
         util.create_png(
             config=config,
-            base_name=data_file_basename
-        )
-        continue
-    
-        # Overlay SAR drift data vectors on geotiff image
-        util.overlay_sar_drift_on_geotiff(
-            config=config,
-            gdf_lines=gdf_lines,
-            df_sar=df_sar,
-            base_name=data_file_basename
+            base_name=data_file_basename,
+            outlier_type=None
         )
         
-        continue
-        
-        # Detect outliers
+        # create additional PNG file that shows inliers and outliers
+        # in different colors
         if config['detect_outliers']:
-            util.detect_outliers(
+            # create PNG file for each outlier type
+            util.create_png(
                 config=config,
+                base_name=data_file_basename,
                 outlier_type='sd'
             )
+            
+            util.create_png(
+                config=config,
+                base_name=data_file_basename,
+                outlier_type='md'
+            )
+
+    
+        # Overlay SAR drift data vectors on geotiff image
+        # util.overlay_sar_drift_on_geotiff(
+        #     config=config,
+        #     gdf_lines=gdf_lines,
+        #     df_sar=df_sar,
+        #     base_name=data_file_basename
+        # )
+        
+        
     
     # combine all created netcdf files into one
     nc_files = glob(os.path.join(config["output_dir"], 'nc', '*.nc'))

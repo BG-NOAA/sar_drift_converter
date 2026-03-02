@@ -482,7 +482,7 @@ def _read_geotiff_rasterio(geotiff_file):
         ]
         
         return masked_xr, extent
-    
+        
 
 #=============
 # Calculations
@@ -866,6 +866,249 @@ def read_sar_drift_data_file(input_file, config):
     return df
 
 
+def outlier_search(df, config, base_name, radius_km=20,
+                   min_neighbors=10, iter_count=1):
+    import numpy as np
+    from scipy.spatial import cKDTree
+    from sklearn.covariance import MinCovDet
+    from scipy.stats import chi2
+    
+    
+    if not config['detect_outliers']:
+        # set category to 00
+        df['outlier_category'] = '00'
+        return df
+            
+    out_df = df.reset_index(drop=True).copy()
+    
+    radius_m = radius_km * 1000
+    iter_prev_inliers = None
+    quiver_payloads_by_iter = []
+    
+    # create scene groupings based on `File` and `File2` values
+    out_df = out_df.sort_values(by=['File1', 'File2'], ascending=True)
+    out_df = out_df.reset_index(drop=True) # reset index after sorting
+    out_df["bearing_rad"] = np.deg2rad(out_df["Bear_deg"].to_numpy())
+    out_df["outlier_category"] = '01' # default value of significant inlier
+    out_df["neighbor_indices"] = None
+    out_df["neighbor_count"] = 0
+    out_df["distance_z_score"] = np.nan
+    out_df["bearing_z_score"] = np.nan
+    
+    # for the neighbor search to work, the projection needs
+    # to be changed to EPSG:3411
+    tf = _set_transformer(3411)
+    out_df['X1'], out_df['Y1'] = tf['4326_to_3411'].transform(
+        out_df['Lon1'].to_numpy(),
+        out_df['Lat1'].to_numpy(),
+    )
+    
+    # create scene index for each File1, File2 pairing
+    out_df["scene"] = out_df.groupby(
+        ['File1', 'File2'],
+        sort=False
+    ).ngroup() + 1
+    
+    # save file for debugging
+    out_df.to_csv(os.path.join(config['output_dir'], 'grouped.csv'))
+    
+    
+    
+
+
+    # iterate passes through data to identify outliers and recheck
+    # recommended to leave just two passes so data don't get too homogenized
+    for iter_idx in range(iter_count):
+        # iteratively run outlier detection until no new outliers found
+        # instantiate pool data frame
+        # keep any inlier whether confident or not
+        pool_df = out_df[out_df['outlier_category'].isin(['00', '01'])].copy() 
+        inlier_count = (out_df['outlier_category'] == '01').sum()
+        
+        
+        quiver_payloads_by_iter.append({
+            'LON': pool_df['Lon1'].to_numpy(),
+            'LAT': pool_df['Lat1'].to_numpy(),
+            'U': pool_df['U_mdy'].to_numpy(),
+            'V': pool_df['V_mdy'].to_numpy()
+        })
+        
+        # stop if stable
+        if iter_prev_inliers is not None and \
+            inlier_count == iter_prev_inliers:
+                break
+        iter_prev_inliers = inlier_count
+
+        
+        # create neighbors for each scene            
+        for scene_id, scene_df in pool_df.groupby("scene", sort=False):
+            xy = scene_df[["X1", "Y1"]].to_numpy()
+            
+            if len(xy) == 0:
+                continue
+            
+            tree = cKDTree(xy)
+            all_neighbors = tree.query_ball_point(xy, r=radius_m)
+            Xall = scene_df[['U_mdy', 'V_mdy']].to_numpy() # just bearing rads
+            # scene_df.to_csv(fr'D:\NOAA\GitHub\buoy_eda\output\scenes\{scene_df["File1"].iloc[0]}___{scene_df["File2"].iloc[0]}.csv')
+            
+            for local_idx, local_neighbors in enumerate(all_neighbors):
+                
+                # drop self
+                neigh_idxs = [
+                    j for j in local_neighbors if j != local_idx
+                ]
+                
+                target_out_idx = scene_df.index[local_idx]
+                
+                if len(neigh_idxs) == 0:
+                    out_df.at[target_out_idx, "neighbor_indices"] = None
+                    out_df.at[target_out_idx, "neighbor_count"] = 0
+                    out_df.at[target_out_idx, "distance_z_score"] = np.nan
+                    out_df.at[target_out_idx, "bearing_z_score"] = np.nan
+                    continue
+                
+                neigh_rows = scene_df.iloc[neigh_idxs]
+
+                neigh_dist = neigh_rows['Speed_mdy'].to_numpy()
+                neigh_bear = neigh_rows['bearing_rad'].to_numpy()
+                
+                
+                # compute neighbor mean and standard deviation
+                dist_mean = np.nanmean(neigh_dist)
+                dist_std = np.nanstd(neigh_dist)
+                bear_mean = _circular_mean(neigh_bear)
+                bear_std = _circular_std(neigh_bear)
+                
+                # get current cell values
+                cell_dist = scene_df.iloc[local_idx]["Speed_mdy"]
+                cell_bear = scene_df.iloc[local_idx]["bearing_rad"]
+                
+                # compute z-score
+                if (dist_std == 0) or np.isnan(dist_std):
+                    dist_z_score = np.nan
+                else:   
+                    dist_z_score = (np.abs(cell_dist - dist_mean)/dist_std)
+                # dist_z_scores.append(dist_z_score)
+                # normalize the radians because mean = 359° and cell = 1°
+                # subtraction gives 358°, but the real smallest difference
+                # is 2°. Use delta as a measurement of standard deviation
+                delta_bear = np.arctan2(
+                    np.sin(cell_bear - bear_mean),
+                    np.cos(cell_bear - bear_mean)
+                )
+                if (bear_std == 0) or np.isnan(bear_std):
+                    bear_z_score = np.nan
+                else:
+                    bear_z_score = np.abs(delta_bear) / bear_std
+
+                
+                # store neighbors as out_df indices
+                neigh_out_idx = [
+                    int(scene_df.index[j]) for j in neigh_idxs
+                ]
+                neigh_out_idx = [
+                    i for i in neigh_out_idx if i != target_out_idx
+                ]
+    
+                
+                out_df.at[target_out_idx, "neighbor_indices"] = neigh_out_idx
+                out_df.at[target_out_idx, "neighbor_count"] = len(neigh_out_idx)
+                out_df.at[target_out_idx, "distance_z_score"] = np.round(dist_z_score, 3)
+                out_df.at[target_out_idx, "bearing_z_score"] = np.round(bear_z_score, 3)
+                
+
+                # Mahalanobis distance                
+                x = Xall[local_idx, :] # target vector
+                Xn = Xall[neigh_idxs, :] # neighbor matrix
+                
+                # # Need enough neighbors to estimate covariance robustly
+                p = Xn.shape[1]
+                if len(neigh_idxs) < max(2 * p + 1, min_neighbors):
+                    mahal_sq = np.nan
+                else:
+                    # standardize data
+                    mu = Xn.mean(axis=0)
+                    sd = Xn.std(axis=0)
+                    sd[sd == 0] = 1.0
+                    Xn_z = (Xn - mu) / sd
+                    x_z = (x - mu) / sd
+                    
+                    if np.linalg.matrix_rank(Xn_z) < p:
+                        mahal_sq = np.nan
+                    else:
+                        mcd = MinCovDet().fit(Xn_z)
+                        mahal_sq = mcd.mahalanobis([x_z])[0] # squared distance
+                    
+                    
+                alpha = 0.99 # strict threshold
+                thr_sq = chi2.ppf(alpha, df=p)  # squared-distance threshold
+                
+                # store neighbors as out_df indices
+                neigh_out_idx = [
+                    int(scene_df.index[j]) for j in neigh_idxs
+                ]
+                neigh_out_idx = [
+                    i for i in neigh_out_idx if i != target_out_idx
+                ]
+                
+                out_df.at[target_out_idx, "neighbor_indices"] = neigh_out_idx
+                out_df.at[target_out_idx, "neighbor_count"] = len(neigh_out_idx)
+                out_df.at[target_out_idx, 'mahal_sq'] = mahal_sq
+                out_df.at[target_out_idx, 'thr_sq'] = thr_sq
+                out_df.at[target_out_idx, 'mahal_outlier_flag'] = (
+                    (mahal_sq > thr_sq)
+                )
+                
+                
+        """
+        assign outlier category
+        00: None (under neighbor threshold)
+        01: None (equal to or above neighbor threshold)
+        10: Distance (under neighbor threshold)
+        11: Distance (equal to or above neighbor threshold)
+        20: Bearing (under neighbor threshold)
+        21: Bearing (equal to or above neighbor threshold)
+        30: Distance and bearing (under neighbor threshold)
+        31: Distance and bearing (equal to or above neighbor threshold)
+        40: Mahalondis distance (under neighbor threshold)
+        41: Mahalondis distance (equal to or above neighbor threshold)
+        """
+        # set confidence
+        statistical_confidence_flag = (
+            out_df["neighbor_count"] >= min_neighbors
+        ).astype(np.int8) # force 0/1 not True/False
+        
+        # set status based on standard deviation
+        # allow Mahaladonis to override standard deviation
+        distance_filter = out_df['distance_z_score'] > 3
+        bearing_filter = out_df['bearing_z_score'] > 3
+        md_filter = out_df["mahal_outlier_flag"].astype(bool)
+        sd_base_cat = np.select(
+            [
+                distance_filter & ~bearing_filter,
+                ~distance_filter & bearing_filter,
+                distance_filter & bearing_filter,
+                md_filter
+            ],
+            [1, 2, 3, 4],
+            default=0
+        ).astype(np.int8)
+
+            
+        # update data frame    
+        out_df["outlier_category"] = (
+            sd_base_cat.astype(str) + statistical_confidence_flag.astype(str)
+        )                    
+
+
+        ### TEST CASE 0782302767 ####
+        out_df.to_csv(rf'output/tmp/{base_name}.csv', index=False)
+        
+    
+    return out_df
+
+
 def create_shape_package(df, base_name, config):
     """
     Create a GeoPackage containing start points, end points, and drift lines
@@ -1129,6 +1372,9 @@ def create_netcdf(df, base_name, config, template_ds):
         direction_attrs = (
             meta_ds["direction_of_sea_ice_displacement"].attrs.copy()
         )
+        outlier_attrs = (
+            meta_ds["outlier_category"].attrs.copy()
+        )        
         spatial_ref_attrs = meta_ds["spatial_ref"].attrs.copy()
         x_attrs = meta_ds["x"].attrs.copy()
         y_attrs = meta_ds["y"].attrs.copy()
@@ -1161,6 +1407,11 @@ def create_netcdf(df, base_name, config, template_ds):
                     np.full(grid_shape, np.nan, dtype=np.float32),
                     direction_attrs,
                 ),
+                "outlier_category": (
+                    ("time", "y", "x"),
+                    np.full(grid_shape, "00", dtype='<U2'),
+                    outlier_attrs,
+                ),                
                 "spatial_ref": (
                     (),
                     np.int32(0),
@@ -1211,6 +1462,9 @@ def create_netcdf(df, base_name, config, template_ds):
             netcdf_grid["direction_of_sea_ice_displacement"].values[
                 0, iy, ix
             ] = np.float32(row.Bear_deg)
+            netcdf_grid["outlier_category"].values[
+                0, iy, ix
+            ] = row.outlier_category
         
         
         # crop to populated values
@@ -1249,6 +1503,7 @@ def create_netcdf(df, base_name, config, template_ds):
                 'direction_of_sea_ice_displacement': {
                     'zlib': True, 'complevel': 4
                 },
+                'outlier_category': {'dtype': 'S1'},
                 'spatial_ref': {'dtype': 'int32'}
             }
         )
@@ -1259,7 +1514,7 @@ def create_netcdf(df, base_name, config, template_ds):
         del netcdf_grid
         
 
-def create_png(config, base_name):
+def create_png(config, base_name, outlier_type=None):
     """
     Create and save a PNG map of sea-ice drift vectors from a NetCDF file.
     
@@ -1311,17 +1566,21 @@ def create_png(config, base_name):
     with xr.open_dataset(source_nc_path) as ds:
         x_values = ds['x'].values
         y_values = ds['y'].values
-        dx_values = ds["sea_ice_x_displacement"].isel(time=0).values
-        dy_values = ds["sea_ice_x_displacement"].isel(time=0).values
-        mag = np.hypot(dx_values, dy_values)
+        X, Y = np.meshgrid(x_values, y_values)
         
+        dx_values = ds["sea_ice_x_displacement"].isel(time=0).values
+        dy_values = ds["sea_ice_y_displacement"].isel(time=0).values
+
         # determine total valid observations
         arr = ds['sea_ice_speed'].isel(time=0).values
-        valid = np.isfinite(arr) # ignore any NaN values
-        norm = mcolors.Normalize(
-            vmin=np.nanmin(mag),
-            vmax=np.nanmax(mag)
-        )
+        valid_mask = np.isfinite(arr) # ignore any NaN values
+        
+        
+        outlier_codes = ds['outlier_category'].isel(time=0).values
+        outlier_codes = np.asarray(outlier_codes).astype(str)
+        
+        green_mask = np.isin(outlier_codes, ['00', '01']) & valid_mask
+        red_mask = (~green_mask) & valid_mask
     
     # set projection defined by data set
     globe_3411 = ccrs.Globe(
@@ -1363,37 +1622,84 @@ def create_png(config, base_name):
     ax.add_feature(cfeature.LAND, zorder=0)
     ax.coastlines(resolution="10m", linewidth=1.0, zorder=1)
     
-    q = ax.quiver(
-        x_values, y_values, dx_values, dy_values, mag,
-        transform=crs_3411,
-        angles="xy", scale_units="xy",
-        scale=quiver_scale,
-        width=0.001,
-        pivot="tail",
-        cmap="viridis",
-        norm=norm,
-        zorder=2
-    )
+    
+    if outlier_type:
+        # inliers as green
+        q = ax.quiver(
+            X[green_mask],
+            Y[green_mask],
+            dx_values[green_mask],
+            dy_values[green_mask],
+            transform=crs_3411,
+            angles='xy', scale_units='xy',
+            scale=quiver_scale,
+            width=0.001,
+            pivot='tail',
+            color='green',
+            zorder=2
+        )
+
+        # outliers as red
+        q = ax.quiver(
+                X[red_mask],
+                Y[red_mask],
+                dx_values[red_mask],
+                dy_values[red_mask],
+                transform=crs_3411,
+                angles='xy', scale_units='xy',
+                scale=quiver_scale,
+                width=0.001,
+                pivot='tail',
+                color='red',
+                zorder=2
+            )   
+    else:
+        mag = np.hypot(dx_values, dy_values)
+        norm = mcolors.Normalize(
+            vmin=np.nanmin(mag),
+            vmax=np.nanmax(mag)
+        )
+
+        q = ax.quiver(
+            X[green_mask],
+            Y[green_mask],
+            dx_values[green_mask],
+            dy_values[green_mask],
+            mag[green_mask],
+            transform=crs_3411,
+            angles="xy", scale_units="xy",
+            scale=quiver_scale,
+            width=0.001,
+            pivot="tail",
+            cmap="viridis",
+            norm=norm,
+            zorder=2
+        )       
+    
+        cbar = fig.colorbar(
+            q, ax=ax, orientation="vertical", shrink=0.65, pad=0.02
+        )
+        cbar.set_label("Vector velocity (m_day)")
     
     
     ax.set_title(
         f"Sea-ice Vector Velocities\n"
         f"x {xmin} to {xmax}; y {ymin} to {ymax}\n"
-        f"Total observations: {valid.sum()}\n"
+        f"Total observations: {valid_mask.sum()}\n"
         f"Width {np.int32(map_height)} m by Height {np.int32(map_width)} m"
         f"Polar stereographic EPSG:3411"
     )
     
-    cbar = fig.colorbar(
-        q, ax=ax, orientation="vertical", shrink=0.65, pad=0.02
-    )
-    cbar.set_label("Vector velocity (m_day)")
-    
 
     # save plot as .png
-    png_file = os.path.join(
-        config['png_dir'], f"{base_name}.png"
-    )
+    if outlier_type:
+        png_file = os.path.join(
+            config['png_dir'], f"{base_name}_{outlier_type}_outliers.png"
+        )        
+    else:
+        png_file = os.path.join(
+            config['png_dir'], f"{base_name}.png"
+        )
     fig.savefig(png_file, bbox_inches='tight', dpi=300)
     plt.close(fig)
     
@@ -1892,7 +2198,7 @@ def overlay_sar_drift_on_geotiff(config, gdf_lines, df_sar, base_name):
 #  Outlier detection
 #===================
 
-def detect_outliers(config, outlier_type='sd'):
+def detect_outliers(df_sar, base_name, config, outlier_type='sd'):
     import matplotlib.pyplot as plt
     import matplotlib.colors as mcolors
     import cartopy.crs as ccrs
@@ -1900,10 +2206,6 @@ def detect_outliers(config, outlier_type='sd'):
     import numpy as np
     import xarray as xr
 
-    import pandas as pd
-    from glob import glob
-    from tqdm import tqdm
-    import itertools
     
     # if outlier_type not in ['sd', 'md']:
     #     print(f"Undefined outlier type: {outlier_type}")
@@ -1914,183 +2216,121 @@ def detect_outliers(config, outlier_type='sd'):
     # elif outlier_type == 'md':
     #     html_page='mahalanobis_distance.html'
     #     outlier_desc='Mahalanobis Distance'
-        
-        
-        
-        
-    print('    Detect outlier per scene...')
-    outlier_dates = []
-    quiver_payloads = []
-    starts, ends = [], []
-    
-    # set list of files to process
-    if config['batch_process']:
-        sar_drift_dir = config['sar_drift_directory']
-        gfilter_mask = "*_0050000m_*.txt*"
-        gfilter_pattern = os.path.join(sar_drift_dir, gfilter_mask)
-        gfilter_matches = sorted(glob(gfilter_pattern))
-    else:
-        gfilter_matches = [config['sar_drift_file_name']]
-        
-    
-    
 
-    for gfilter_path in tqdm(
-            gfilter_matches,
-            '    Creating outlier geopackages'
-        ):
-        
-        # use 0075000m file instead of 0050000m
-        # (always force txt extension)
-        gfilter_path_75km = gfilter_path.replace(
-            '_0050000m_',
-            '_0075000m_',
-        )
-        
-        gfilter_path_75km = f'{os.path.splitext(gfilter_path_75km)[0]}.txt'
-        if os.path.exists(gfilter_path_75km):
-            gfilter_path = gfilter_path_75km
-    
-    
-        t1, t2 = _parse_pair_times(gfilter_path)
-        starts.append(min(t1, t2))
-        ends.append(max(t1, t2))
-        
+            
 
-        df = read_sar_drift_data_file(
-            input_file=gfilter_path,
+    # define outliers
+    outlier_df, quiver_payloads_by_iter = _outlier_search(
+        df=df_sar,
+        config=config,
+        radius_km=25,
+        min_neighbors=8,
+        outlier_type=outlier_type,
+        iter_count = 2
+    )
+    
+    
+    # create geopackage file
+    verbose = config['verbose']
+    config['verbose'] = False
+    gpkg_basename = os.path.join(
+        config['output_dir'], 'gpkg', f'{base_name}_outliers.gpkg'
+    )
+
+    gdf_points, gdf_lines = create_shape_package(
+            df=outlier_df,
+            base_name=gpkg_basename,
             config=config
-        )
-        
-        if df.shape[0] < config['ignore_vector_threshold']:
-            # ignore files with few observations
-            # print(f"skipping {os.path.basename(gfilter_path)} with {df.shape[0]} observations")
-            continue
-        
-        
-        
-        # skip 75km file if MaxCorr2 > MaxCorr1 for < 60% of the data
-        # if '_0075000m_' in gfilter_path:
-        # if gfilter_path == gfilter_path: # always run
-        #     pct_correct = (df['Maxcorr2'] > df['Maxcorr1']).mean() * 100
-        #     if pct_correct < 60:
-        #         # print(
-        #         #     f"Reject file: {os.path.basename(gfilter_path)}\n"
-        #         #     f"pct_correct={pct_correct:.1f}% (<60%)"
-        #         # )
-        #         continue
-                
-
-        # define outliers
-        outlier_df, quiver_payloads_by_iter = outlier_search(
-            df=df,
-            config=config,
-            radius_km=25,
-            min_neighbors=8,
-            outlier_type=outlier_type,
-            iter_count = 2
-        )
-        
-        # save intermediary outlier file
-        basename=os.path.basename(gfilter_path)
-        
-        # create geopackage file
-        verbose = config['verbose']
-        config['verbose'] = False
-        gdf_points, gdf_lines = create_shape_package(
-                df=outlier_df,
-                base_name=basename,
-                config=config
-        )
-        config['verbose'] = verbose
-        
-        
-        
-        # draw inlier quivers on supplied PNG file
-        # Plot SAR drift vectors
-
+    )
+    config['verbose'] = verbose
     
-        crs_3413 = ccrs.NorthPolarStereo(central_longitude=-45)
-        # Note: Cartopy's NorthPolarStereo aligns with EPSG:3413 for most use cases,
-        # but EPSG:3413 has specific parameters. If you need exact EPSG:3413,
-        # we can define it via PROJ string; usually this is fine for coastlines.
     
-        fig = plt.figure(figsize=(10, 10))
-        ax = plt.axes(projection=crs_3413)
     
-        # Set extent in the projection's coordinate system (meters)
-        pad = 100_000 # 10km
-        xmin = np.round(outlier_df["X1"].min() - pad, 3)
-        xmax = np.round(outlier_df["X1"].max() + pad, 3)
-        ymin = np.round(outlier_df["Y1"].min() - pad, 3)
-        ymax = np.round(outlier_df["Y1"].max() + pad, 3)
-        
-        map_width = xmax - xmin
-        map_height = ymax - ymin
-        map_span = np.round(max(map_height, map_width), 0)
-        if map_span > 2_000_000:
-            quiver_scale = config['quiver_scale_large_area']
-        else:
-            quiver_scale = config['quiver_scale_small_area']
+    # draw inlier quivers on supplied PNG file
+    # Plot SAR drift vectors
 
-        ax.set_extent([xmin, xmax, ymin, ymax], crs=crs_3413)
-    
-        # Coastlines / land
-        ax.add_feature(cfeature.LAND, zorder=0)
-        ax.coastlines(resolution="10m", linewidth=1.0, zorder=1)
-    
-        mask_inlier = outlier_df["outlier_category"].isin(["00", "01"])
-        
-        inlier_X = outlier_df.loc[mask_inlier, "X1"].to_numpy()
-        inlier_Y = outlier_df.loc[mask_inlier, "Y1"].to_numpy()
-        inlier_u = outlier_df.loc[mask_inlier, "dx"].to_numpy()
-        inlier_v = outlier_df.loc[mask_inlier, "dy"].to_numpy()
 
-        outlier_X = outlier_df.loc[~mask_inlier, "X1"].to_numpy()
-        outlier_Y = outlier_df.loc[~mask_inlier, "Y1"].to_numpy()
-        outlier_u = outlier_df.loc[~mask_inlier, "dx"].to_numpy()
-        outlier_v = outlier_df.loc[~mask_inlier, "dy"].to_numpy()
-        
-        quiver_payloads.append({
-            "X": outlier_df["X1"].to_numpy(),
-            "Y": outlier_df["Y1"].to_numpy(),
-            "u": outlier_df["dx"].to_numpy(),
-            "v": outlier_df["dy"].to_numpy()
-        })
-        
-        ax.quiver(
-            inlier_X, inlier_Y, inlier_u, inlier_v,
-            transform=crs_3413,
-            angles="xy", scale_units="xy",
-            scale=quiver_scale,
-            width=0.002, pivot="tail",
-            color="green", zorder=2, label="inliers"
-        )
+    crs_3413 = ccrs.NorthPolarStereo(central_longitude=-45)
+    # Note: Cartopy's NorthPolarStereo aligns with EPSG:3413 for most use cases,
+    # but EPSG:3413 has specific parameters. If you need exact EPSG:3413,
+    # we can define it via PROJ string; usually this is fine for coastlines.
 
-        ax.quiver(
-            outlier_X, outlier_Y, outlier_u, outlier_v,
-            transform=crs_3413,
-            angles="xy", scale_units="xy",
-            scale=quiver_scale,
-            width=0.002, pivot="tail",
-            color="red", zorder=2, label="outliers"
-        )
-        
-        
-        ax.set_title(
-            f"Scene: {os.path.basename(gfilter_path)}\n"
-            f"X {xmin} to {xmax}; Y {ymin} to {ymax}\n"
-            f"Total observations: {outlier_df.shape[0]}"
-        )
-        
-        ax.legend(loc="lower right")
-        
-        out_png_path = os.path.join(
-            config['output_dir'],
-            f'{basename}_inliers.png'
-        )
-        plt.savefig(out_png_path, dpi=150, bbox_inches="tight")
-        plt.close(fig)
+    fig = plt.figure(figsize=(10, 10))
+    ax = plt.axes(projection=crs_3413)
+
+    # Set extent in the projection's coordinate system (meters)
+    pad = 100_000 # 10km
+    xmin = np.round(outlier_df["X1"].min() - pad, 3)
+    xmax = np.round(outlier_df["X1"].max() + pad, 3)
+    ymin = np.round(outlier_df["Y1"].min() - pad, 3)
+    ymax = np.round(outlier_df["Y1"].max() + pad, 3)
+    
+    map_width = xmax - xmin
+    map_height = ymax - ymin
+    map_span = np.round(max(map_height, map_width), 0)
+    if map_span > 2_000_000:
+        quiver_scale = config['quiver_scale_large_area']
+    else:
+        quiver_scale = config['quiver_scale_small_area']
+
+    ax.set_extent([xmin, xmax, ymin, ymax], crs=crs_3413)
+
+    # Coastlines / land
+    ax.add_feature(cfeature.LAND, zorder=0)
+    ax.coastlines(resolution="10m", linewidth=1.0, zorder=1)
+
+    mask_inlier = outlier_df["outlier_category"].isin(["00", "01"])
+    
+    inlier_X = outlier_df.loc[mask_inlier, "X1"].to_numpy()
+    inlier_Y = outlier_df.loc[mask_inlier, "Y1"].to_numpy()
+    inlier_u = outlier_df.loc[mask_inlier, "U_mdy"].to_numpy()
+    inlier_v = outlier_df.loc[mask_inlier, "V_mdy"].to_numpy()
+
+    outlier_X = outlier_df.loc[~mask_inlier, "X1"].to_numpy()
+    outlier_Y = outlier_df.loc[~mask_inlier, "Y1"].to_numpy()
+    outlier_u = outlier_df.loc[~mask_inlier, "U_mdy"].to_numpy()
+    outlier_v = outlier_df.loc[~mask_inlier, "V_mdy"].to_numpy()
+    
+    quiver_payloads.append({
+        "LON": outlier_df["Lon1"].to_numpy(),
+        "LAT": outlier_df["Lat1"].to_numpy(),
+        "U": outlier_df["dx"].to_numpy(),
+        "V": outlier_df["dy"].to_numpy()
+    })
+    
+    ax.quiver(
+        inlier_X, inlier_Y, inlier_u, inlier_v,
+        transform=crs_3413,
+        angles="xy", scale_units="xy",
+        scale=quiver_scale,
+        width=0.002, pivot="tail",
+        color="green", zorder=2, label="inliers"
+    )
+
+    ax.quiver(
+        outlier_X, outlier_Y, outlier_u, outlier_v,
+        transform=crs_3413,
+        angles="xy", scale_units="xy",
+        scale=quiver_scale,
+        width=0.002, pivot="tail",
+        color="red", zorder=2, label="outliers"
+    )
+    
+    
+    ax.set_title(
+        f"Scene: {os.path.basename(gfilter_path)}\n"
+        f"X {xmin} to {xmax}; Y {ymin} to {ymax}\n"
+        f"Total observations: {outlier_df.shape[0]}"
+    )
+    
+    ax.legend(loc="lower right")
+    
+    out_png_path = os.path.join(
+        config['output_dir'],
+        f'{basename}_inliers.png'
+    )
+    plt.savefig(out_png_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
 
     # full plot
@@ -2317,212 +2557,4 @@ def detect_outliers(config, outlier_type='sd'):
     # # optional: save interactive HTML
     # fig.write_html(r"D:\NOAA\GitHub\buoy_eda\output\iterations\vectors_by_iteration.html")
     
-    
-def outlier_search(df, config, outlier_type,
-                   radius_km=20, min_neighbors=10, iter_count=1):
-    import numpy as np
-    from scipy.spatial import cKDTree
-    # from sklearn.covariance import MinCovDet
-    # from scipy.stats import chi2
-    
-    out_df = df.reset_index(drop=True).copy()
-    
-    mahal_sq_scores = []
-    mahal_outlier_flags = []
-    radius_m = radius_km * 1000
-    iter_prev_inliers = None
-    quiver_payloads_by_iter = []
-    
-    # create scene groupings based on `File` and `File2` values
-    out_df = out_df.sort_values(by=['File1', 'File2'], ascending=True)
-    out_df = out_df.reset_index(drop=True) # reset index after sorting
-    out_df["bearing_rad"] = np.deg2rad(out_df["Bear_deg"].to_numpy())
-    out_df["b_sin"] = np.sin(out_df["bearing_rad"])
-    out_df["b_cos"] = np.cos(out_df["bearing_rad"])
-    out_df["outlier_category"] = '01' # default value of significant inlier
-    out_df["neighbor_indices"] = None
-    out_df["neighbor_count"] = 0
-    out_df["distance_z_score"] = np.nan
-    out_df["bearing_z_score"] = np.nan
-    
-    out_df["scene"] = out_df.groupby(
-        ['File1', 'File2'],
-        sort=False
-    ).ngroup() + 1
-    out_df.to_csv(os.path.join(config['output_dir'], 'grouped.csv'))
-    
-    
-
-
-    
-    for iter_idx in range(iter_count):
-        # iteratively run outlier detection until no new outliers found
-        # instantiate pool data frame
-        pool_df = out_df[out_df['outlier_category'].isin(['00', '01'])].copy() # keep any inliet whether confident or not
-        inlier_count = (out_df['outlier_category'] == '01').sum()
-        
-        
-        quiver_payloads_by_iter.append({
-            "X": pool_df["X1"].to_numpy(),
-            "Y": pool_df["Y1"].to_numpy(),
-            "u": pool_df["dx"].to_numpy(),
-            "v": pool_df["dy"].to_numpy()
-        })
-        
-        # stop if stable
-        if iter_prev_inliers is not None and \
-            inlier_count == iter_prev_inliers:
-                break
-        iter_prev_inliers = inlier_count
-
-        
-        # create neighbors for each scene            
-        for scene_id, scene_df in pool_df.groupby("scene", sort=False):
-            xy = scene_df[["X1", "Y1"]].to_numpy()
-            if len(xy) == 0:
-                continue
-            
-            tree = cKDTree(xy)
-            all_neighbors = tree.query_ball_point(xy, r=radius_m)
-            # Xall = scene_df[['U_kmdy', 'V_kmdy', 'b_sin', 'b_cos']].to_numpy() # just bearing rads (not sin & cos)
-            # scene_df.to_csv(fr'D:\NOAA\GitHub\buoy_eda\output\scenes\{scene_df["File1"].iloc[0]}___{scene_df["File2"].iloc[0]}.csv')
-            
-            for local_idx, local_neighbors in enumerate(all_neighbors):
-                
-                # drop self
-                neigh_idxs = [
-                    j for j in local_neighbors if j != local_idx
-                ]
-                
-                target_out_idx = scene_df.index[local_idx]
-                
-                if len(neigh_idxs) == 0:
-                    out_df.at[target_out_idx, "neighbor_indices"] = None
-                    out_df.at[target_out_idx, "neighbor_count"] = 0
-                    out_df.at[target_out_idx, "distance_z_score"] = np.nan
-                    out_df.at[target_out_idx, "bearing_z_score"] = np.nan
-                    continue
-                
-                neigh_rows = scene_df.iloc[neigh_idxs]
-
-                neigh_dist = neigh_rows['total_distance_km'].to_numpy()
-                neigh_bear = neigh_rows['bearing_rad'].to_numpy()
-                
-                # compute neighbor mean and standard deviation
-                dist_mean = np.nanmean(neigh_dist)
-                dist_std = np.nanstd(neigh_dist)
-                bear_mean = circular_mean(neigh_bear)
-                bear_std = circular_std(neigh_bear)
-                
-                # get current cell values
-                cell_dist = scene_df.iloc[local_idx]["total_distance_km"]
-                cell_bear = scene_df.iloc[local_idx]["bearing_rad"]
-                
-                # compute z-score
-                if (dist_std == 0) or np.isnan(dist_std):
-                    dist_z_score = np.nan
-                else:   
-                    dist_z_score = (np.abs(cell_dist - dist_mean)/dist_std)
-                # dist_z_scores.append(dist_z_score)
-                # normalize the radians because mean = 359° and cell = 1°
-                # subtraction gives 358°, but the real smallest difference
-                # is 2°. Use delta as a measurement of standard deviation
-                delta_bear = np.arctan2(
-                    np.sin(cell_bear - bear_mean),
-                    np.cos(cell_bear - bear_mean)
-                )
-                if (bear_std == 0) or np.isnan(bear_std):
-                    bear_z_score = np.nan
-                else:
-                    bear_z_score = np.abs(delta_bear) / bear_std
-
-                
-                # store neighbors as out_df indices
-                neigh_out_idx = [
-                    int(scene_df.index[j]) for j in neigh_idxs
-                ]
-                neigh_out_idx = [
-                    i for i in neigh_out_idx if i != target_out_idx
-                ]
-    
-                
-                out_df.at[target_out_idx, "neighbor_indices"] = neigh_out_idx
-                out_df.at[target_out_idx, "neighbor_count"] = len(neigh_out_idx)
-                out_df.at[target_out_idx, "distance_z_score"] = np.round(dist_z_score, 3)
-                out_df.at[target_out_idx, "bearing_z_score"] = np.round(bear_z_score, 3)
-                
-                
-                # # Mahalanobis distance
-                # if outlier_type=='md':
-                #     x = Xall[idx, :] # target vector
-                #     Xn = Xall[neigh_idxs, :] # neighbor matrix
-                    
-                #     # standardize data
-                #     mu = Xn.mean(axis=0)
-                #     sd = Xn.std(axis=0)
-                #     sd[sd == 0] = 1.0
-                #     Xn_z = (Xn - mu) / sd
-                #     x_z = (x - mu) / sd
-    
-                    
-                #     # # Need enough neighbors to estimate covariance robustly
-                #     p = Xn.shape[1]
-                #     if len(neigh_idxs) < 5:
-                #         mahal_sq = np.nan
-                #     else:
-                #         mcd = MinCovDet().fit(Xn_z)
-                #         mahal_sq = mcd.mahalanobis([x_z])[0]  # squared distance
-                    
-                #     alpha = 0.5
-                #     thr_sq = chi2.ppf(alpha, df=p)  # squared-distance threshold
-                #     is_outlier = (mahal_sq > thr_sq)
-                    
-                #     mahal_sq_scores.append(mahal_sq)
-                #     mahal_outlier_flags.append(int(is_outlier))
-                # else:
-                #     mahal_sq_scores.append(np.nan)
-                #     mahal_outlier_flags.append(0)
-                
-
-                
- 
-                
-                
-        """
-        assign outlier category
-        00: None (under neighbor threshold)
-        01: None (equal to or above neighbor threshold)
-        10: Distance (under neighbor threshold)
-        11: Distance (equal to or above neighbor threshold)
-        20: Bearing (under neighbor threshold)
-        21: Bearing (equal to or above neighbor threshold)
-        30: Distance and bearing (under neighbor threshold)
-        31: Distance and bearing (equal to or above neighbor threshold)
-        """
-        distance_filter = out_df['distance_z_score'] > 3
-        bearing_filter = out_df['bearing_z_score'] > 3
-        base_cat = np.select(
-            [
-                distance_filter & ~bearing_filter,
-                ~distance_filter & bearing_filter,
-                distance_filter & bearing_filter, 
-            ],
-            [1, 2, 3],
-            default=0
-        ).astype(np.int8)
-        statistical_confidence_flag = (
-            out_df["neighbor_count"] >= min_neighbors
-        ).astype(np.int8) # force 0/1 not True/False
-        out_df["outlier_category"] = (
-            base_cat.astype(str) + statistical_confidence_flag.astype(str)
-        )
-                    
-
-        # review_columns = ['outlier_category', 'neighbor_indices', 'neighbor_count', 'distance_z_score', 'bearing_z_score']
-        # out_df[review_columns].to_csv(fr'D:\NOAA\GitHub\buoy_eda\output\iterations\{iter_idx+1}.csv')                    
-    
-   
-    return out_df, quiver_payloads_by_iter    
-
-
     

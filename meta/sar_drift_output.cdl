@@ -31,6 +31,25 @@ variables:
 		direction_of_sea_ice_displacement:ioos_category = "SAR daily sea-ice drift" ;
 		direction_of_sea_ice_displacement:units = "degrees" ;
 		direction_of_sea_ice_displacement:grid_mapping = "spatial_ref" ;
+	float outlier_category(time, y, x) ;
+		outlier_category:long_name = "Outlier category code" ;
+		outlier_category:standard_name = "status_flag" ;
+		outlier_category:ioos_category = "quality_flag" ;
+		outlier_category:units = "1" ;
+		outlier_category:flag_values = 0s, 1s, 10s, 11s, 20s, 21s, 30s, 31s ;
+		outlier_category:comment = "Codes are displayed conceptually as 00, 01, 10, 11, 20, 21, 30, 31, 40, 41." ;
+		outlier_category:flag_meanings =
+			"none_under_neighbor_threshold \
+			 none_at_or_above_neighbor_threshold \
+			 distance_under_neighbor_threshold \
+			 distance_at_or_above_neighbor_threshold \
+			 bearing_under_neighbor_threshold \
+			 bearing_at_or_above_neighbor_threshold \
+			 distance_and_bearing_under_neighbor_threshold \
+			 distance_and_bearing_at_or_above_neighbor_threshold \
+			 mahaladonis_distance_under_neighbor_threshold \
+			 mahaladonis_distance_at_or_above_neighbor_threshold" ;
+		outlier_category:grid_mapping = "spatial_ref" ;		
 	double time(time) ;
 		time:standard_name = "time" ;
 		time:long_name = "Centered Time" ;

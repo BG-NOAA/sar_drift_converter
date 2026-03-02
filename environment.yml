@@ -14,6 +14,7 @@ dependencies:
   - pyproj
   - netCDF4
   - scipy
+  - scikit-learn
   - rasterio
   - pip
   - pip:
