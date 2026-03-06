@@ -60,9 +60,13 @@ def read_json_config():
         - "netcdf_cdl_file" (str): Path to the CDL file used for
                                    NetCDF metadata.
         - "netcdf_template_file" (str): Path to NetCDF template file on which
-                                        scenes will be built                                   
+                                        scenes will be built
+        - "qml_file" (str): Path to qml file that will apply a style
+                            to the geopackages when opened in QGIS
         - "output_dir" (str): Output directory where generated files will
                               be stored.
+        - "clear_output" (bool): Remove output directory and all contents from
+                                 previous runs
         - "batch_process" (bool): Process one file `sar_drift_filename` or
                                   multiple files `sar_drift_directory`.
         - "delimiter" (str): Field separator in the input file
@@ -111,6 +115,7 @@ def read_json_config():
     import util
     import argparse
     import os
+    import shutil
     import json
 
 
@@ -142,7 +147,9 @@ def read_json_config():
         "sar_geotiff_filename",
         "netcdf_cdl_file",
         "netcdf_template_file",
+        "qml_file",
         "output_dir",
+        "clear_output_dir",
         "batch_process",
         "delimiter",
         "skip_rows_before_header",
@@ -241,23 +248,39 @@ def read_json_config():
             9
         )        
         
-    # check output dir exists
-    output_dir = os.path.normpath(os.path.join(config['output_dir']))
-    if not os.path.exists(output_dir):
+    # check layer style qml file exists
+    qml_file = os.path.normpath(
+        os.path.join(config['qml_file']
+    ))
+    if not os.path.exists(qml_file):
         util.error_msg(
-            f"Cannot find output directory `{output_dir}`",
-            10
+            f"Cannot find qml file `{qml_file}`",
+            9
+        )           
+        
+    # check output dir exists
+    clear_output_dir = config['clear_output_dir']
+    if not isinstance(clear_output_dir, bool):
+        util.error_msg(
+            f'`batch_process` must be boolen, '
+            f'got {type(batch_process).__name__}',
+            4
         )
-    else:
-        # create subfolders
-        formatted_data_dir = os.path.join(output_dir, 'formatted_data')
-        os.makedirs(formatted_data_dir, exist_ok=True)
-        gpkg_dir = os.path.join(output_dir, 'gpkg')
-        os.makedirs(gpkg_dir, exist_ok=True)
-        nc_dir = os.path.join(output_dir, 'nc')
-        os.makedirs(nc_dir, exist_ok=True)
-        png_dir = os.path.join(output_dir, 'png')
-        os.makedirs(png_dir, exist_ok=True)
+    output_dir = os.path.normpath(os.path.join(config['output_dir']))
+    if os.path.exists(output_dir) and clear_output_dir:
+            shutil.rmtree(output_dir)
+            
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # create subfolders
+    formatted_data_dir = os.path.join(output_dir, 'formatted_data')
+    os.makedirs(formatted_data_dir, exist_ok=True)
+    gpkg_dir = os.path.join(output_dir, 'gpkg')
+    os.makedirs(gpkg_dir, exist_ok=True)
+    nc_dir = os.path.join(output_dir, 'nc')
+    os.makedirs(nc_dir, exist_ok=True)
+    png_dir = os.path.join(output_dir, 'png')
+    os.makedirs(png_dir, exist_ok=True)
 
 
     # delimiter character (encode().decode handles \t)
@@ -396,11 +419,13 @@ def read_json_config():
         'sar_geotiff_file': sar_geotiff_file,
         'netcdf_cdl_file': netcdf_cdl_file,
         'netcdf_template_file': netcdf_template_file,
+        'qml_file': qml_file,
         'output_dir': output_dir,
         'formatted_data_dir': formatted_data_dir,
         'gpkg_dir': gpkg_dir,
         'nc_dir':nc_dir,
         'png_dir': png_dir,
+        "clear_output_dir": clear_output_dir,
         'batch_process': batch_process,
         'delimiter': delimiter,
         'skip_rows_before_header': skip_rows_before_header,
@@ -428,11 +453,15 @@ def read_json_config():
         "  NetCDF CDL file:         "
         f"{config['netcdf_cdl_file']}\n"
         "  NetCDF template file:    "
-        f"{config['netcdf_template_file']}\n"        
+        f"{config['netcdf_template_file']}\n"
+        "  qml file:                "
+        f"{config['qml_file']}\n" 
         "  output directory:        "
         f"{config['output_dir']}\n"
         "  batch process:           "
         f"{config['batch_process']}\n"
+        "  clear output dir:        "
+        f"{config['clear_output_dir']}\n"
         "  delimiter:               "
         f"`{config['delimiter']}`\n"
         "  skip rows before header: "
@@ -550,10 +579,10 @@ def main():
         #         )
     
     
-    
+    scene_i_j = {}
     daily_start_date, daily_end_date = None, None
     for data_file in tqdm(updated_files, desc='Processing data files...'):
-    # for data_file in updated_files:
+
         # set base name for output files
         data_file_basename = os.path.splitext(
             os.path.basename(data_file)
@@ -595,6 +624,7 @@ def main():
         if daily_end_date is None or end_max > daily_end_date:
             daily_end_date = end_max
     
+        # continue # get right to concatenating
 
         # Detect outliers (will return all 00 if not active)
         df_sar = util.outlier_search(
@@ -603,23 +633,28 @@ def main():
             base_name=data_file_basename,
             radius_km=25,
             min_neighbors=8,
-            iter_count = 1 # number of outlier detection passes
+            md_neighbors=24,
+            std_dev_lvl=2.75,
+            chi_sq=0.975,
+            iter_count = 3 # number of outlier detection passes
         )
 
         
         # Create shape file package for QGIS    
-        gdf_points, gdf_lines = util.create_shape_package(
+        util.create_shape_package(
             df=df_sar,
             base_name=data_file_basename,
             config=config
         )
+        
         
         # Create NetCDF file for QGIS
         util.create_netcdf(
             df=df_sar,
             base_name=data_file_basename,
             config=config,
-            template_ds=template_ds
+            template_ds=template_ds,
+            scene_i_j=scene_i_j
         )
 
         
@@ -655,6 +690,35 @@ def main():
         #     base_name=data_file_basename
         # )
         
+
+    """
+    read through each scene_i_j dictionary items
+    ((i, j) coordinates in each scene)
+    Get the counts of each (i, j) coordinate found in the entire set of scenes
+    per time period
+    Show the count of each (i, j) coordinate and the scenes where they exist
+    """
+    df = pd.DataFrame(columns=['scene', 'item_count', 'items'])
+    for idx, (scene, coords) in enumerate(scene_i_j.items()):
+        df.loc[idx] = [scene, len(coords), coords]
+    df = df.sort_values('item_count', ascending=True)
+    df.to_csv(r'output/scenes.csv')
+
+    
+    from collections import Counter, defaultdict
+    cell_counts = Counter()
+    cell_scenes = defaultdict(list)
+    
+    for scene, items in zip(df['scene'], df['items']):
+        uniq_cells = set(items)
+        cell_counts.update(uniq_cells)
+        for cell in uniq_cells:
+            cell_scenes[cell].append(scene)
+    df_report = pd.DataFrame(columns=['Cell', 'Count', 'Scenes'])
+    for idx, (i_j, count) in enumerate(cell_counts.most_common(50)):
+        df_report.loc[idx] = [i_j, count, cell_scenes[i_j]]
+    df_report.to_csv(r'output/scene_report.csv', index=False)
+
         
     
     # combine all created netcdf files into one

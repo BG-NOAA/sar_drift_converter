@@ -5,6 +5,7 @@
 **/*.xml
 **/*.xlsx
 **/*.bkp
+**/*.qgz
 
 # Jupyter Notebook Checkpoints
 .ipynb_checkpoints/

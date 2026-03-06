@@ -484,6 +484,99 @@ def _read_geotiff_rasterio(geotiff_file):
         return masked_xr, extent
         
 
+def _embed_qml_style(gpkg_path, layer_name, qml_path):
+    """
+    Embed a QML style into a GeoPackage's layer_styles table.
+
+    Reads a QML file and writes its contents into the QGIS-standard
+    layer_styles table inside the GeoPackage. QGIS will automatically
+    apply the style when the layer is loaded, requiring no QML file
+    on the end user's machine.
+
+    Args:
+        gpkg_path (str): Full path to the target GeoPackage file.
+        layer_name (str): Name of the layer to apply the style to.
+                          Must match the layer name in the GeoPackage exactly.
+        qml_path (str): Full path to the QML style file to embed.
+
+    Returns:
+        None
+
+    Notes:
+        - The layer_styles table is created if it does not already exist,
+          following the QGIS standard schema.
+        - `f_geometry_column` is hardcoded to 'geom' because GeoPandas
+          silently renames the geometry column from 'geometry' to 'geom'
+          when writing to GeoPackage format.
+        - `useAsDefault` is set to 1 so QGIS applies the style automatically
+          on load without user intervention.
+        - The layer_styles table is registered in gpkg_contents as an
+          attributes layer for full GeoPackage spec compliance.
+    """
+    import sqlite3
+    
+    with open(qml_path, 'r') as f:
+        qml_content = f.read()
+
+    conn = sqlite3.connect(gpkg_path)
+    cursor = conn.cursor()
+
+    # Create layer_styles table if it doesn't exist (QGIS standard schema)
+    cursor.execute("""
+                   CREATE TABLE IF NOT EXISTS layer_styles (
+                       id INTEGER PRIMARY KEY AUTOINCREMENT,
+                       f_table_catalog TEXT,
+                       f_table_schema TEXT,
+                       f_table_name TEXT,
+                       f_geometry_column TEXT,
+                       styleName TEXT,
+                       styleQML TEXT,
+                       styleSLD TEXT,
+                       useAsDefault INTEGER,
+                       description TEXT,
+                       owner TEXT,
+                       ui TEXT,
+                       update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+    )
+
+
+    cursor.execute("""
+                   INSERT INTO layer_styles 
+                   (f_table_catalog, f_table_schema, f_table_name, 
+                    f_geometry_column, styleName, styleQML, styleSLD,
+                    useAsDefault, description, owner)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   """,
+                   (
+                       '',           # f_table_catalog
+                       '',           # f_table_schema
+                       layer_name,   # f_table_name  
+                       'geom',       # f_geometry_column
+                       'outliers',   # styleName
+                       qml_content,  # styleQML
+                       '',           # styleSLD (leave blank)
+                       1,            # useAsDefault
+                       '',
+                       ''
+                    )
+    )
+    
+    cursor.execute("""
+                   INSERT OR IGNORE INTO gpkg_contents 
+                   (table_name, data_type, identifier, description,
+                    last_change)
+                   VALUES 
+                   ('layer_styles', 'attributes', 'layer_styles',
+                    'QGIS layer styles', datetime('now'))
+                   """
+    )
+
+    conn.commit()    
+    conn.close()
+
+
 #=============
 # Calculations
 #=============
@@ -761,10 +854,8 @@ def read_sar_drift_data_file(input_file, config):
           `Time1_JS` and `Time2_JS` to human-readable `Date1` and `Date2`.
         - Compute duration between start and end times in both timedelta
           string form (`Duration`) and raw seconds (`JS_Duration`).
-        - Convert velocity units to meters/day:
-            - `U_vel_ms` -> `U_mdy`
-            - `V_vel_ms` -> `V_mdy`
-            - `Speed_kmdy` -> `Speed_mdy`
+        - Convert spped in km/day units to meters/s-1:
+            - `Speed_kmdy` -> `Speed_ms`
         - Extract satellite identifiers from `File1` and `File2`
           into `Sat1` and `Sat2`.
 
@@ -839,6 +930,13 @@ def read_sar_drift_data_file(input_file, config):
         lambda x: base_time + timedelta(seconds=x)
         )
     df['Date2'] = df['Date2'].dt.strftime('%Y-%m-%d %H:%M:%S')
+    
+    
+    # need to mormalize longitudes since the file was created in
+    # Polar stereogrpahic despite having lon/lat
+    # This transitions helps future projections and if files opened in QGIS
+    df['Lon1'] = df['Lon1'].apply(lambda x: x - 360 if x > 180 else x)
+    df['Lon2'] = df['Lon2'].apply(lambda x: x - 360 if x > 180 else x)
 
 
     # Calculate duration of observations
@@ -852,11 +950,9 @@ def read_sar_drift_data_file(input_file, config):
         )
     
     
-    # convert all units to m/day
+    # convert speed units to m/s-1
     SECONDS_PER_DAY = 86400.0
-    df['U_mdy'] = (df['U_vel_ms'] * SECONDS_PER_DAY) 
-    df['V_mdy'] = (df['V_vel_ms'] * SECONDS_PER_DAY) 
-    df['Speed_mdy'] = (df['Speed_kmdy'] * 1000)
+    df['Speed_ms'] = (df['Speed_kmdy'] * 1000) / SECONDS_PER_DAY
     
     
     df['Sat1'] = df["File1"].str.partition("_")[0]
@@ -867,10 +963,12 @@ def read_sar_drift_data_file(input_file, config):
 
 
 def outlier_search(df, config, base_name, radius_km=20,
-                   min_neighbors=10, iter_count=1):
+                   min_neighbors=10, md_neighbors=24,
+                   std_dev_lvl=3, chi_sq=0.99,
+                   iter_count=1):
     import numpy as np
     from scipy.spatial import cKDTree
-    from sklearn.covariance import MinCovDet
+    from sklearn.covariance import MinCovDet, LedoitWolf
     from scipy.stats import chi2
     
     
@@ -890,10 +988,17 @@ def outlier_search(df, config, base_name, radius_km=20,
     out_df = out_df.reset_index(drop=True) # reset index after sorting
     out_df["bearing_rad"] = np.deg2rad(out_df["Bear_deg"].to_numpy())
     out_df["outlier_category"] = '01' # default value of significant inlier
-    out_df["neighbor_indices"] = None
-    out_df["neighbor_count"] = 0
+    out_df["sd_neighbor_indices"] = None
+    out_df["sd_neighbor_count"] = 0
     out_df["distance_z_score"] = np.nan
     out_df["bearing_z_score"] = np.nan
+    out_df['md_neighbor_indices'] = None
+    out_df['md_neighbor_count'] = 0
+    out_df['mahal_sq'] = np.nan
+    out_df['thr_sq'] = np.nan
+    out_df['mahal_outlier_flag'] = False
+    out_df['sd_outlier_pass'] = -1
+    out_df['md_outlier_pass'] = -1
     
     # for the neighbor search to work, the projection needs
     # to be changed to EPSG:3411
@@ -908,13 +1013,7 @@ def outlier_search(df, config, base_name, radius_km=20,
         ['File1', 'File2'],
         sort=False
     ).ngroup() + 1
-    
-    # save file for debugging
-    out_df.to_csv(os.path.join(config['output_dir'], 'grouped.csv'))
-    
-    
-    
-
+   
 
     # iterate passes through data to identify outliers and recheck
     # recommended to leave just two passes so data don't get too homogenized
@@ -929,8 +1028,8 @@ def outlier_search(df, config, base_name, radius_km=20,
         quiver_payloads_by_iter.append({
             'LON': pool_df['Lon1'].to_numpy(),
             'LAT': pool_df['Lat1'].to_numpy(),
-            'U': pool_df['U_mdy'].to_numpy(),
-            'V': pool_df['V_mdy'].to_numpy()
+            'U': pool_df['U_vel_ms'].to_numpy(),
+            'V': pool_df['V_vel_ms'].to_numpy()
         })
         
         # stop if stable
@@ -949,8 +1048,8 @@ def outlier_search(df, config, base_name, radius_km=20,
             
             tree = cKDTree(xy)
             all_neighbors = tree.query_ball_point(xy, r=radius_m)
-            Xall = scene_df[['U_mdy', 'V_mdy']].to_numpy() # just bearing rads
-            # scene_df.to_csv(fr'D:\NOAA\GitHub\buoy_eda\output\scenes\{scene_df["File1"].iloc[0]}___{scene_df["File2"].iloc[0]}.csv')
+            Xall = scene_df[['U_vel_ms', 'V_vel_ms']].to_numpy()
+
             
             for local_idx, local_neighbors in enumerate(all_neighbors):
                 
@@ -962,15 +1061,11 @@ def outlier_search(df, config, base_name, radius_km=20,
                 target_out_idx = scene_df.index[local_idx]
                 
                 if len(neigh_idxs) == 0:
-                    out_df.at[target_out_idx, "neighbor_indices"] = None
-                    out_df.at[target_out_idx, "neighbor_count"] = 0
-                    out_df.at[target_out_idx, "distance_z_score"] = np.nan
-                    out_df.at[target_out_idx, "bearing_z_score"] = np.nan
                     continue
                 
                 neigh_rows = scene_df.iloc[neigh_idxs]
 
-                neigh_dist = neigh_rows['Speed_mdy'].to_numpy()
+                neigh_dist = neigh_rows['Speed_ms'].to_numpy()
                 neigh_bear = neigh_rows['bearing_rad'].to_numpy()
                 
                 
@@ -981,10 +1076,10 @@ def outlier_search(df, config, base_name, radius_km=20,
                 bear_std = _circular_std(neigh_bear)
                 
                 # get current cell values
-                cell_dist = scene_df.iloc[local_idx]["Speed_mdy"]
+                cell_dist = scene_df.iloc[local_idx]["Speed_ms"]
                 cell_bear = scene_df.iloc[local_idx]["bearing_rad"]
                 
-                # compute z-score
+                # compute z-score absolute value makes it two-sided
                 if (dist_std == 0) or np.isnan(dist_std):
                     dist_z_score = np.nan
                 else:   
@@ -1012,19 +1107,35 @@ def outlier_search(df, config, base_name, radius_km=20,
                 ]
     
                 
-                out_df.at[target_out_idx, "neighbor_indices"] = neigh_out_idx
-                out_df.at[target_out_idx, "neighbor_count"] = len(neigh_out_idx)
-                out_df.at[target_out_idx, "distance_z_score"] = np.round(dist_z_score, 3)
-                out_df.at[target_out_idx, "bearing_z_score"] = np.round(bear_z_score, 3)
+                out_df.at[target_out_idx, "sd_neighbor_indices"] = (
+                    neigh_out_idx
+                )
+                out_df.at[target_out_idx, "sd_neighbor_count"] = (
+                    len(neigh_out_idx)
+                )
+                out_df.at[target_out_idx, "distance_z_score"] = (
+                    np.round(dist_z_score, 3)
+                )
+                out_df.at[target_out_idx, "bearing_z_score"] = (
+                    np.round(bear_z_score, 3)
+                )
                 
 
-                # Mahalanobis distance                
+                # Mahalanobis distance
+                k_md = min(md_neighbors+1, len(scene_df))
+                distances, all_neighbors = tree.query(xy, k=k_md)
+                neigh_idxs = all_neighbors[local_idx].tolist()
+                neigh_idxs  = [j for j in neigh_idxs if j != local_idx] # drop self
+                
+            
+                # Mahalanobis on neighbors
                 x = Xall[local_idx, :] # target vector
                 Xn = Xall[neigh_idxs, :] # neighbor matrix
                 
-                # # Need enough neighbors to estimate covariance robustly
-                p = Xn.shape[1]
-                if len(neigh_idxs) < max(2 * p + 1, min_neighbors):
+                # Need enough neighbors to estimate covariance robustly
+                p = Xn.shape[1] # degrees of freedom
+                if len(neigh_idxs) < max(2 * p + 1, md_neighbors) or \
+                    k_md < md_neighbors + 1:
                     mahal_sq = np.nan
                 else:
                     # standardize data
@@ -1037,11 +1148,13 @@ def outlier_search(df, config, base_name, radius_km=20,
                     if np.linalg.matrix_rank(Xn_z) < p:
                         mahal_sq = np.nan
                     else:
-                        mcd = MinCovDet().fit(Xn_z)
-                        mahal_sq = mcd.mahalanobis([x_z])[0] # squared distance
+                        # mcd = MinCovDet().fit(Xn_z) # standard covariance measurement
+                        # mahal_sq = mcd.mahalanobis([x_z])[0] # squared distance
+                        lw = LedoitWolf().fit(Xn_z) # better for small  samples or the covariance is ill-conditioned.
+                        mahal_sq = lw.mahalanobis([x_z])[0] # squared distance
                     
                     
-                alpha = 0.99 # strict threshold
+                alpha = chi_sq # 99 strict threshold
                 thr_sq = chi2.ppf(alpha, df=p)  # squared-distance threshold
                 
                 # store neighbors as out_df indices
@@ -1052,8 +1165,9 @@ def outlier_search(df, config, base_name, radius_km=20,
                     i for i in neigh_out_idx if i != target_out_idx
                 ]
                 
-                out_df.at[target_out_idx, "neighbor_indices"] = neigh_out_idx
-                out_df.at[target_out_idx, "neighbor_count"] = len(neigh_out_idx)
+                
+                out_df.at[target_out_idx, "md_neighbor_indices"] = neigh_out_idx
+                out_df.at[target_out_idx, "md_neighbor_count"] = len(neigh_out_idx)
                 out_df.at[target_out_idx, 'mahal_sq'] = mahal_sq
                 out_df.at[target_out_idx, 'thr_sq'] = thr_sq
                 out_df.at[target_out_idx, 'mahal_outlier_flag'] = (
@@ -1061,49 +1175,130 @@ def outlier_search(df, config, base_name, radius_km=20,
                 )
                 
                 
-        """
-        assign outlier category
-        00: None (under neighbor threshold)
-        01: None (equal to or above neighbor threshold)
-        10: Distance (under neighbor threshold)
-        11: Distance (equal to or above neighbor threshold)
-        20: Bearing (under neighbor threshold)
-        21: Bearing (equal to or above neighbor threshold)
-        30: Distance and bearing (under neighbor threshold)
-        31: Distance and bearing (equal to or above neighbor threshold)
-        40: Mahalondis distance (under neighbor threshold)
-        41: Mahalondis distance (equal to or above neighbor threshold)
-        """
-        # set confidence
-        statistical_confidence_flag = (
-            out_df["neighbor_count"] >= min_neighbors
-        ).astype(np.int8) # force 0/1 not True/False
-        
-        # set status based on standard deviation
-        # allow Mahaladonis to override standard deviation
-        distance_filter = out_df['distance_z_score'] > 3
-        bearing_filter = out_df['bearing_z_score'] > 3
-        md_filter = out_df["mahal_outlier_flag"].astype(bool)
-        sd_base_cat = np.select(
-            [
-                distance_filter & ~bearing_filter,
-                ~distance_filter & bearing_filter,
-                distance_filter & bearing_filter,
-                md_filter
-            ],
-            [1, 2, 3, 4],
-            default=0
-        ).astype(np.int8)
-
+            ### TEST ON FULL SENE (index to right when done)
+            # # 1) Build full-scene feature matrix
+            # Xall = out_df[["U_vel_ms", "V_vel_ms"]].to_numpy(dtype=float)
+            # n, p = Xall.shape
             
-        # update data frame    
-        out_df["outlier_category"] = (
-            sd_base_cat.astype(str) + statistical_confidence_flag.astype(str)
-        )                    
+            # # Optional: drop rows with non-finite values (recommended)
+            # finite_mask = np.isfinite(Xall).all(axis=1)
+            
+            # # Initialize outputs (so you can keep original length)
+            # mahal_sq = np.full(n, np.nan, dtype=float)
+            
+            # if finite_mask.sum() >= max(2 * p + 1, md_neighbors):   # keep your minimum sample rule
+            #     X = Xall[finite_mask]
+            
+            #     # 2) Standardize using full-scene stats
+            #     mu = X.mean(axis=0)
+            #     sd = X.std(axis=0, ddof=0)
+            #     sd[sd == 0] = 1.0
+            #     Xz = (X - mu) / sd
+            
+            #     # 3) Fit covariance once (scene-wide)
+            #     lw = LedoitWolf().fit(Xz)
+            
+            #     # 4) Mahalanobis squared distances for all points (scene-wide)
+            #     mahal_sq[finite_mask] = lw.mahalanobis(Xz)  # returns squared distances
+            
+            # # 5) Threshold (chi-square, df=p)
+            # alpha = chi_sq
+            # thr_sq = float(chi2.ppf(alpha, df=p))
+            
+            # # 6) Store results
+            # out_df["mahal_sq"] = mahal_sq
+            # out_df["thr_sq"] = thr_sq
+            # out_df["mahal_outlier_flag"] = (out_df["mahal_sq"] > out_df["thr_sq"]).fillna(False)
+            
+            # # 7) Neighbor fields no longer mean "neighbors"—repurpose or simplify
+            # # If you want "count used for scene covariance":
+            # out_df["md_neighbor_count"] = int(finite_mask.sum()) - 1  # "others in scene" (approx)
+            # # If you don't want indices, keep empty lists or None:
+            # out_df["md_neighbor_indices"] = None
+            # md_neighbors = int(finite_mask.sum()) - 1                 
+
+                
+                
+            """
+            assign outlier category
+            00: None (under neighbor threshold)
+            01: None (equal to or above neighbor threshold)
+            10: Distance (under neighbor threshold)
+            11: Distance (equal to or above neighbor threshold)
+            20: Bearing (under neighbor threshold)
+            21: Bearing (equal to or above neighbor threshold)
+            30: Mahalanobis distance (under neighbor threshold)
+            31: Mahalanobis distance (equal to or above neighbor threshold)
+            40: Distance and bearing (under neighbor threshold)
+            41: Distance and bearing (equal to or above neighbor threshold)
+            50: Mahalanobis distance and distance (under neighbor threshold)
+            51: Mahalanobis distance and distance (equal to or above neighbor threshold)
+            60: Mahalanobis distance and bearing (under neighbor threshold)
+            61: Mahalanobis distance and bearing (equal to or above neighbor threshold)            
+            70: Mahalanobis distance, distance and bearing (under neighbor threshold)
+            71: Mahalanobis distance, distance and bearing (equal to or above neighbor threshold)
+
+            """
+            
+            # outlier boolean flags
+            distance_filter = out_df['distance_z_score'] > std_dev_lvl
+            bearing_filter = out_df['bearing_z_score'] > std_dev_lvl
+            md_filter = out_df["mahal_outlier_flag"].astype(bool)
+            
+            # set confidence
+            sd_statistical_confidence_flag = (
+                out_df["sd_neighbor_count"] >= min_neighbors
+            ).astype(np.int8) # force 0/1 not True/False
+    
+            md_statistical_confidence_flag = (
+                out_df["md_neighbor_count"] >= md_neighbors
+            ).astype(np.int8) # force 0/1 not True/False
+            
+            
+            # base category set to all zeros
+            base_cat = np.zeros(len(out_df), dtype=np.int8)
+            
+            # order matters
+            mask_md_d_b = md_filter & distance_filter & bearing_filter
+            mask_md_d   = md_filter & distance_filter & ~bearing_filter
+            mask_md_b   = md_filter & ~distance_filter & bearing_filter
+            mask_md     = md_filter & ~distance_filter & ~bearing_filter            
+            mask_d_b    = ~md_filter & distance_filter & bearing_filter
+            mask_d      = ~md_filter & distance_filter & ~bearing_filter
+            mask_b      = ~md_filter & ~distance_filter & bearing_filter
+            
+            base_cat[mask_md_d_b] = 7
+            base_cat[mask_md_b]   = 6
+            base_cat[mask_md_d]   = 5
+            base_cat[mask_d_b]    = 4
+            base_cat[mask_md]     = 3            
+            base_cat[mask_b]      = 2
+            base_cat[mask_d]      = 1
+    
+            # complete statistical confidence flag
+            # use MD confidence whenever MD is involved;
+            # otherwise SD confidence
+            md_involved = np.isin(base_cat, [3, 5, 6, 7])
+            statistical_confidence_flag = np.where(
+                md_involved, # was Mahalanobis filter used
+                md_statistical_confidence_flag, # true
+                sd_statistical_confidence_flag # false
+            ).astype(np.int8)
+            
+            
+            # record which pass
+            sd_outlier_now = (distance_filter | bearing_filter)
+            md_outlier_now = md_filter
+            out_df.loc[sd_outlier_now & (out_df["sd_outlier_pass"] == -1), "sd_outlier_pass"] = iter_idx + 1
+            out_df.loc[md_outlier_now & (out_df["md_outlier_pass"] == -1), "md_outlier_pass"] = iter_idx + 1
+            
+            # update data frame
+            out_df["outlier_category"] = (
+                base_cat.astype(str) + statistical_confidence_flag.astype(str)
+            )                    
 
 
         ### TEST CASE 0782302767 ####
-        out_df.to_csv(rf'output/tmp/{base_name}.csv', index=False)
         
     
     return out_df
@@ -1111,70 +1306,44 @@ def outlier_search(df, config, base_name, radius_km=20,
 
 def create_shape_package(df, base_name, config):
     """
-    Create a GeoPackage containing start points, end points, and drift lines
-    for SAR drift vectors.
+    Create a GeoPackage containing drift line vectors for SAR drift data.
 
-    This function builds three geometry representations from an input
-    DataFrame:
-      1. Start locations as Point geometries (Lon1/Lat1)
-      2. End locations as Point geometries (Lon2/Lat2)
-      3. Drift vectors as LineString geometries from start to end
-
-    Each geometry type is written to its own layer within a single GeoPackage:
-      - `start_points`
-      - `end_points`
-      - `drift_lines`
+    Builds LineString geometries from start to end coordinates and writes
+    them to a single layer within a GeoPackage. Longitudes in the 0-360
+    range are normalized to -180/180 before geometry creation.
 
     Args:
         df (pandas.DataFrame): Input DataFrame containing drift vectors.
-        Expected columns:
-            - 'Lon1', 'Lat1' (float): Starting longitude/latitude (degrees).
-            - 'Lon2', 'Lat2' (float): Ending longitude/latitude (degrees).
-            Additional columns are preserved and written to the GeoPackage
-            layers.
-        base_name (str): Base filename (without extension) used to name the output
-            GeoPackage file `<config['gpkg_dir']>/<base_name>.gpkg`.
+            Expected columns:
+                - 'Lon1', 'Lat1' (float): Starting longitude/latitude
+                                          (degrees).
+                - 'Lon2', 'Lat2' (float): Ending longitude/latitude (degrees).
+                Additional columns are preserved and written to the GeoPackage.
+        base_name (str): Base filename (without extension) used to name the
+            output GeoPackage file `<config['gpkg_dir']>/<base_name>.gpkg`.
         config (dict): Configuration dictionary containing:
-            - 'gpkg_dir' (str): Output directory where the GeoPackage is written.
+                - 'gpkg_dir' (str): Output directory where the GeoPackage
+                                    is written.
+                - 'qml_file' (str): Path to the QML style file to embed.
 
     Returns:
-        tuple:
-            - gdf_start (geopandas.GeoSeries): GeoSeries of start-point
-                                               geometries
-                                               (layer `start_points`),
-                                               CRS assigned.
-            - gdf_line (geopandas.GeoSeries): GeoSeries of drift LineString
-                                              geometries (layer `drift_lines`),
-                                              CRS assigned.
-    
+        None
+
     Notes:
-        - CRS is assigned using the EPSG code returned by
-          `_set_transformer(4326)`, and is applied to each layer
-          before writing.
-        - A helper column `geometry_type` is added to each GeoDataFrame
-          to distinguish points versus lines.
-        - The function constructs an intermediate combined GeoDataFrame,
-          but ultimately writes separate layers for clarity and GIS
-          compatibility.
+        - CRS is set to EPSG:4326 (geographic lat/lon).
+        - A helper column `geometry_type` is added with value 'line'.
+        - The QML style is embedded directly into the GeoPackage's
+          layer_styles table, so no QML file is needed by end users.
     """
 
     import os
-    import pandas as pd
     import geopandas as gpd
-    from shapely.geometry import Point, LineString
+    from shapely.geometry import LineString
     
     # reduce data frame to needed features
     df_local = df.copy()
     transformer = _set_transformer(4326)
     
-    # Create Point and Line Geometries
-    df_local['geometry_start'] = df_local.apply(
-        lambda row: Point((row['Lon1'], row['Lat1'])), axis=1
-    )
-    
-    df_local['geometry_end'] = df_local.apply(
-        lambda row: Point((row['Lon2'], row['Lat2'])), axis=1
-    )
     df_local['geometry_line'] = df_local.apply(
         lambda row: LineString(
             [(row['Lon1'], row['Lat1']), (row['Lon2'], row['Lat2'])]
@@ -1182,19 +1351,6 @@ def create_shape_package(df, base_name, config):
         axis=1
     )
 
-    # Create GeoDataFrame for start points (points only)
-    gdf_start = gpd.GeoDataFrame(
-        df_local, geometry='geometry_start'
-    )
-    # Add a column to distinguish geometry type    
-    gdf_start['geometry_type'] = 'point'  
-    
-    # Create GeoDataFrame for end points (points only)
-    gdf_end = gpd.GeoDataFrame(
-        df_local, geometry='geometry_end'
-    )
-    # Add a column to distinguish geometry type    
-    gdf_end['geometry_type'] = 'point'  
     
     # Create GeoDataFrame for lines (lines only)
     gdf_line = gpd.GeoDataFrame(
@@ -1203,36 +1359,12 @@ def create_shape_package(df, base_name, config):
     # Add a column to distinguish geometry type    
     gdf_line['geometry_type'] = 'line'  
     
-    # Combine the two GeoDataFrames while retaining original fields
-    gdf_combined = pd.concat([
-        gdf_start.rename(columns={'geometry_start': 'geometry'}),
-        gdf_end.rename(columns={'geometry_end': 'geometry'}),
-        gdf_line.rename(columns={'geometry_line': 'geometry'})
-    ], ignore_index=True)
-    
-    # Recreate the GeoDataFrame with the common geometry column
-    gdf_combined = gpd.GeoDataFrame(
-        gdf_combined, geometry='geometry'
-    )
-    
+   
     # Save as a single GeoPackage file (supports mixed geometries)
     geopackage_file = f"{base_name}.gpkg"
     output_file_path = os.path.join(
         config['gpkg_dir'], f"{geopackage_file}"
     )
-    
-    gdf_start = gdf_start.rename(
-        columns={'geometry_start': 'geometry'}
-    ).set_geometry('geometry')
-    gdf_start.crs = CRS.from_epsg(transformer['epsg'])
-    gdf_start.to_file(output_file_path, layer='start_points', driver='GPKG')
-    
-    gdf_end = gdf_end.rename(
-        columns={'geometry_end': 'geometry'}
-    ).set_geometry('geometry')
-    gdf_end.crs = CRS.from_epsg(transformer['epsg'])
-    gdf_end.to_file(output_file_path, layer='end_points', driver='GPKG')
-    
     
     gdf_line = gdf_line.rename(
         columns={'geometry_line': 'geometry'}
@@ -1240,14 +1372,12 @@ def create_shape_package(df, base_name, config):
     gdf_line.crs = CRS.from_epsg(transformer['epsg'])
     gdf_line.to_file(output_file_path, layer='drift_lines', driver='GPKG')
     
-    gdf_start = gdf_start['geometry']
-    gdf_line = gdf_line['geometry']
 
-    
-    return gdf_start, gdf_line
+    # embed .qml outlier layer style
+    _embed_qml_style(output_file_path, 'drift_lines', config['qml_file'])
 
 
-def create_netcdf(df, base_name, config, template_ds):
+def create_netcdf(df, base_name, config, template_ds, scene_i_j):
     """
     Create a gridded NetCDF sea-ice drift product from point/vector
     observations.
@@ -1265,9 +1395,9 @@ def create_netcdf(df, base_name, config, template_ds):
             - 'Date2' (datetime-like): End timestamp for the vector.
             - 'Lon1' (float): Starting longitude (degrees).
             - 'Lat1' (float): Starting latitude (degrees).
-            - 'Speed_mdy' (float): Sea-ice speed (m/day).
-            - 'U_mdy' (float): X displacement component (m/day).
-            - 'V_mdy' (float): Y displacement component (m/day).
+            - 'Speed_ms' (float): Sea-ice speed (m s-1).
+            - 'U_vel_ms' (float): X displacement component (m s-1).
+            - 'V_vel_ms' (float): Y displacement component (m s-1).
             - 'Bear_deg' (float): Direction of sea-ice displacement (degrees).
         base_name (str): Base filename (without extension) used to name
                          the output NetCDF file
@@ -1336,11 +1466,14 @@ def create_netcdf(df, base_name, config, template_ds):
         lats,
         grid_size=12.5,
         hemisphere="north"
-    )
+    )    
     # force numpy integer arrays
     i = np.asarray(i, dtype=np.int64)
     j = np.asarray(j, dtype=np.int64)
     
+    i_list = [int(val) for val in i]
+    j_list = [int(val) for val in j]
+
     
     # template data set settings
     x_coords = template_ds['x'].values
@@ -1439,11 +1572,13 @@ def create_netcdf(df, base_name, config, template_ds):
         
         
         # update NetCDF with values from input data
+        idx_list = []
         seen_key = set()
         for row_n, row in enumerate(df_copy.itertuples(index=False)):
             ix = int(i[row_n])   # x index
             iy = int(j[row_n])   # y index
-            index_key = f'{ix}_{iy}'
+            index_key = (ix, iy)
+            idx_list.append(index_key)
             
             if index_key in seen_key:
                 print(f'Duplcate entry found for {ix}, {iy}')
@@ -1451,13 +1586,13 @@ def create_netcdf(df, base_name, config, template_ds):
             seen_key.add(index_key)
         
             netcdf_grid["sea_ice_speed"].values[0, iy, ix] = (
-                np.float32(row.Speed_mdy)
+                np.float32(row.Speed_ms)
             )
             netcdf_grid["sea_ice_x_displacement"].values[0, iy, ix] = (
-                np.float32(row.U_mdy)
+                np.float32(row.U_vel_ms)
             )
             netcdf_grid["sea_ice_y_displacement"].values[0, iy, ix] = (
-                np.float32(row.V_mdy)
+                np.float32(row.V_vel_ms)
             )
             netcdf_grid["direction_of_sea_ice_displacement"].values[
                 0, iy, ix
@@ -1466,6 +1601,9 @@ def create_netcdf(df, base_name, config, template_ds):
                 0, iy, ix
             ] = row.outlier_category
         
+        
+        # update scene_i_j
+        scene_i_j[base_name] = list(zip(i_list, j_list))
         
         # crop to populated values
         data_mask = np.isfinite(netcdf_grid["sea_ice_speed"].values[0])
@@ -1704,16 +1842,10 @@ def create_png(config, base_name, outlier_type=None):
     plt.close(fig)
     
     
-def combine_daily_netcdf_files(
-    config,
-    nc_files,
-    template_ds,
-    daily_start_date,
-    daily_end_date,
-    daily_nc_path,
-    multi_layered=True,
-    overwrite=False,
-):
+def combine_daily_netcdf_files(config, nc_files, template_ds,
+                               daily_start_date, daily_end_date,
+                               daily_nc_path, multi_layered=True,
+                               overwrite=False):
     """
     Combine multiple sliced SAR drift NetCDF files into one full daily mosaic
     on the template grid.
@@ -1757,6 +1889,14 @@ def combine_daily_netcdf_files(
     
     # finalize grid shape
     grid_shape = (n_time, template_ds.sizes["y"], template_ds.sizes["x"])
+    
+    # track last_write time per cell
+    latest_time_grid = np.full(
+        (template_ds.sizes["y"], template_ds.sizes["x"]),
+        -np.inf,
+        dtype=np.float64
+    ) 
+
 
     # set defaults
     daily_grid = None
@@ -1767,6 +1907,7 @@ def combine_daily_netcdf_files(
         "direction_of_sea_ice_displacement"
     ]
     time_list = []
+    update_log = []
     
 
     try:
@@ -1837,14 +1978,31 @@ def combine_daily_netcdf_files(
             max_time.strftime("%Y-%m-%dT23:59:59Z")
         )
         
-        # optional: nicer output filename metadata
         daily_grid.attrs["title"] = (
             "Daily Northern Hemisphere SAR sea-ice velocity mosaic"
         )
         
         
-        # merge each sliced NetCDF into the template grid
-        for nc_idx, nc_file in enumerate(nc_files):
+        """
+        For single-layer daily mosaics, deterministic "latest wins" behavior
+        for overlapping cells. Do a lightweight first pass to read each
+        scene's timestamp, then sort by time (ascending) so later scenes
+        are the newest.
+        
+        For multi-layer output, sorting is optional but keeps layers
+        ordered by time.
+        """
+        file_times = []
+        for nc_file in nc_files:
+            with xr.open_dataset(nc_file, decode_times=False) as scene_ds:
+                file_times.append(
+                    (float(scene_ds['time'].values[0]), nc_file)
+                )
+        file_times.sort(key=lambda x: x[0])
+        
+        
+        # merge each sliced NetCDF into the template grid        
+        for nc_idx, (scene_time, nc_file) in enumerate(file_times):
             with xr.open_dataset(nc_file, decode_times=False) as scene_ds:
                 # Note: decode_times=False helps keep units perserved
                 # rather than intepreted
@@ -1871,14 +2029,51 @@ def combine_daily_netcdf_files(
                 x_0, x_1 = min(x_start, x_end), max(x_start, x_end)
                 y_0, y_1 = min(y_start, y_end), max(y_start, y_end)
         
-                for var_name in var_names:
-                    scene_vals = scene_ds[var_name].isel(time=0).values
-                    daily_grid[var_name].values[
-                        t_idx,
-                        y_0:y_1+1,
-                        x_0:x_1+1
-                    ] = scene_vals
-                               
+                if multi_layered:
+                    for var_name in var_names:
+                        scene_vals = scene_ds[var_name].isel(time=0).values
+                        daily_grid[var_name].values[
+                            t_idx, y_0:y_1+1, x_0:x_1+1
+                        ] = scene_vals
+                else:
+                    # Compute write_mask once using the first variable
+                    ref_vals = scene_ds[var_names[0]].isel(time=0).values
+                    last_t = latest_time_grid[y_0:y_1+1, x_0:x_1+1]
+                    valid = np.isfinite(ref_vals)
+                    newer = scene_time > last_t # only if timestamp is later not also the same
+                    write_mask = valid & newer
+                
+                    if write_mask.any():
+                        # Log (i,j) updates once — not per variable
+                        local_rows, local_cols = np.where(write_mask)
+                        for lr, lc in zip(local_rows, local_cols):
+                            old_ts = last_t[lr, lc]
+                            update_log.append({
+                                "i":             y_0 + lr,
+                                "j":             x_0 + lc,
+                                "old_timestamp": last_t[lr, lc],
+                                "new_timestamp": scene_time,
+                                "nc_file":       nc_file,
+                                "overwrite": old_ts != -np.inf # filter later
+                            })
+                
+                        # Apply write_mask to all variables in one pass
+                        for var_name in var_names:
+                            scene_vals = scene_ds[var_name].isel(time=0).values
+                            target = daily_grid[var_name].values[
+                                0, y_0:y_1+1, x_0:x_1+1
+                            ]
+                            target[write_mask] = scene_vals[write_mask]
+                            daily_grid[var_name].values[
+                                0, y_0:y_1+1, x_0:x_1+1
+                            ] = target
+                
+                        # Update timestamp tracker once after all variables
+                        # are written
+                        latest_time_grid[
+                            y_0:y_1+1, x_0:x_1+1
+                        ][write_mask] = scene_time
+                        
                 
         # update time array as found in sliced NetCDF files
         if multi_layered:
@@ -1908,6 +2103,17 @@ def combine_daily_netcdf_files(
                 "spatial_ref": {"dtype": "int32"},
             },
         )
+
+        if update_log:
+            update_df = pd.DataFrame(update_log)
+            df_filter = update_df['overwrite']
+            update_df = update_df[df_filter].drop(columns='overwrite')
+            update_df = update_df.sort_values(['i', 'j'])
+            log_path = os.path.join(
+                config['output_dir'],
+                'cell_update_log.csv'
+            )
+            update_df.to_csv(log_path, index=False)
 
     finally:
         if daily_grid is not None:
@@ -2190,371 +2396,3 @@ def overlay_sar_drift_on_geotiff(config, gdf_lines, df_sar, base_name):
     fig.savefig(png_file, bbox_inches='tight', dpi=300)
     plt.close(fig)
         
-
-
-    
-
-#===================
-#  Outlier detection
-#===================
-
-def detect_outliers(df_sar, base_name, config, outlier_type='sd'):
-    import matplotlib.pyplot as plt
-    import matplotlib.colors as mcolors
-    import cartopy.crs as ccrs
-    import cartopy.feature as cfeature
-    import numpy as np
-    import xarray as xr
-
-    
-    # if outlier_type not in ['sd', 'md']:
-    #     print(f"Undefined outlier type: {outlier_type}")
-    #     exit()
-    # elif outlier_type == 'sd':
-    #     html_page='standard_deviation.html'
-    #     outlier_desc='Standard Deviation'
-    # elif outlier_type == 'md':
-    #     html_page='mahalanobis_distance.html'
-    #     outlier_desc='Mahalanobis Distance'
-
-            
-
-    # define outliers
-    outlier_df, quiver_payloads_by_iter = _outlier_search(
-        df=df_sar,
-        config=config,
-        radius_km=25,
-        min_neighbors=8,
-        outlier_type=outlier_type,
-        iter_count = 2
-    )
-    
-    
-    # create geopackage file
-    verbose = config['verbose']
-    config['verbose'] = False
-    gpkg_basename = os.path.join(
-        config['output_dir'], 'gpkg', f'{base_name}_outliers.gpkg'
-    )
-
-    gdf_points, gdf_lines = create_shape_package(
-            df=outlier_df,
-            base_name=gpkg_basename,
-            config=config
-    )
-    config['verbose'] = verbose
-    
-    
-    
-    # draw inlier quivers on supplied PNG file
-    # Plot SAR drift vectors
-
-
-    crs_3413 = ccrs.NorthPolarStereo(central_longitude=-45)
-    # Note: Cartopy's NorthPolarStereo aligns with EPSG:3413 for most use cases,
-    # but EPSG:3413 has specific parameters. If you need exact EPSG:3413,
-    # we can define it via PROJ string; usually this is fine for coastlines.
-
-    fig = plt.figure(figsize=(10, 10))
-    ax = plt.axes(projection=crs_3413)
-
-    # Set extent in the projection's coordinate system (meters)
-    pad = 100_000 # 10km
-    xmin = np.round(outlier_df["X1"].min() - pad, 3)
-    xmax = np.round(outlier_df["X1"].max() + pad, 3)
-    ymin = np.round(outlier_df["Y1"].min() - pad, 3)
-    ymax = np.round(outlier_df["Y1"].max() + pad, 3)
-    
-    map_width = xmax - xmin
-    map_height = ymax - ymin
-    map_span = np.round(max(map_height, map_width), 0)
-    if map_span > 2_000_000:
-        quiver_scale = config['quiver_scale_large_area']
-    else:
-        quiver_scale = config['quiver_scale_small_area']
-
-    ax.set_extent([xmin, xmax, ymin, ymax], crs=crs_3413)
-
-    # Coastlines / land
-    ax.add_feature(cfeature.LAND, zorder=0)
-    ax.coastlines(resolution="10m", linewidth=1.0, zorder=1)
-
-    mask_inlier = outlier_df["outlier_category"].isin(["00", "01"])
-    
-    inlier_X = outlier_df.loc[mask_inlier, "X1"].to_numpy()
-    inlier_Y = outlier_df.loc[mask_inlier, "Y1"].to_numpy()
-    inlier_u = outlier_df.loc[mask_inlier, "U_mdy"].to_numpy()
-    inlier_v = outlier_df.loc[mask_inlier, "V_mdy"].to_numpy()
-
-    outlier_X = outlier_df.loc[~mask_inlier, "X1"].to_numpy()
-    outlier_Y = outlier_df.loc[~mask_inlier, "Y1"].to_numpy()
-    outlier_u = outlier_df.loc[~mask_inlier, "U_mdy"].to_numpy()
-    outlier_v = outlier_df.loc[~mask_inlier, "V_mdy"].to_numpy()
-    
-    quiver_payloads.append({
-        "LON": outlier_df["Lon1"].to_numpy(),
-        "LAT": outlier_df["Lat1"].to_numpy(),
-        "U": outlier_df["dx"].to_numpy(),
-        "V": outlier_df["dy"].to_numpy()
-    })
-    
-    ax.quiver(
-        inlier_X, inlier_Y, inlier_u, inlier_v,
-        transform=crs_3413,
-        angles="xy", scale_units="xy",
-        scale=quiver_scale,
-        width=0.002, pivot="tail",
-        color="green", zorder=2, label="inliers"
-    )
-
-    ax.quiver(
-        outlier_X, outlier_Y, outlier_u, outlier_v,
-        transform=crs_3413,
-        angles="xy", scale_units="xy",
-        scale=quiver_scale,
-        width=0.002, pivot="tail",
-        color="red", zorder=2, label="outliers"
-    )
-    
-    
-    ax.set_title(
-        f"Scene: {os.path.basename(gfilter_path)}\n"
-        f"X {xmin} to {xmax}; Y {ymin} to {ymax}\n"
-        f"Total observations: {outlier_df.shape[0]}"
-    )
-    
-    ax.legend(loc="lower right")
-    
-    out_png_path = os.path.join(
-        config['output_dir'],
-        f'{basename}_inliers.png'
-    )
-    plt.savefig(out_png_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-
-
-    # full plot
-    
-    # get sea ice extent from GMASI
-    nc_path = r"D:\NOAA\Analysis\GMASI\GMASI-Snowice-2km_v1r0_blend_s202510150000000_e202510152359599_c202510160223347.nc"
-    ds = xr.open_dataset(nc_path)
-    ds = ds.sortby("Latitude")
-    arctic_ds = ds["SnowIceMap"].sel(Latitude=slice(60, 90))
-    # stride = 1
-    # ice_ds = ice.isel(
-    #     Latitude=slice(None, None, stride),
-    #     Longitude=slice(None, None, stride),
-    # )
-    ice_mask = xr.where(arctic_ds == 3, 1.0, np.nan)
-    lats = ice_mask["Latitude"].to_numpy()
-    lons = ice_mask["Longitude"].to_numpy()
-    lons_2d, lats_2d = np.meshgrid(lons, lats)
-    
-    
-    # transformer = _set_transformer()
-    # lons_X, lats_Y = transformer['4326_3413'].transform(lons_2d, lats_2d)
-    
-    
-    crs_3413 = ccrs.NorthPolarStereo(central_longitude=-45)
-    
-    # compute global extent from all X/Y points
-    # all_x = np.concatenate([p["X"] for p in quiver_payloads if len(p["X"])])
-    # all_y = np.concatenate([p["Y"] for p in quiver_payloads if len(p["Y"])])
-    
-    # pad_m = 50_000  # 50 km padding
-    # xmin, xmax = all_x.min() - pad_m, all_x.max() + pad_m
-    # ymin, ymax = all_y.min() - pad_m, all_y.max() + pad_m
-    all_mag = np.concatenate([
-        np.hypot(p["u"], p["v"])/1000 for p in quiver_payloads if len(p["u"])
-    ])
-
-    
-    norm = mcolors.Normalize(
-        vmin=np.nanmin(all_mag),
-        vmax=np.nanmax(all_mag)
-    )
-    
-    fig = plt.figure(figsize=(12, 12))
-    ax = fig.add_subplot(1, 1, 1, projection=crs_3413)
-    # ax.set_extent([xmin, xmax, ymin, ymax], crs=crs_3413)
-    ax.set_extent([-180, 180, 60, 90], crs=ccrs.PlateCarree())
-    
-    ax.add_feature(cfeature.LAND, facecolor="#efe8d8", zorder=0)
-    ax.coastlines(resolution="10m", linewidth=1.0, zorder=2)
-    # ax.set_facecolor("#cfe8f3") # ocean blue
-    ax.set_facecolor("#bfe3f3")
-    # sea ice
-    ice_cmap = mcolors.ListedColormap(["#f7f7f7"]) # sea ice as off-white
-    ax.pcolormesh(
-        lons_2d, lats_2d, ice_mask.to_numpy(),
-        transform=ccrs.PlateCarree(),
-        cmap=ice_cmap,
-        shading="nearest",
-        alpha=1.0,
-        zorder=1, # display in layer below the coastlines
-        edgecolors="none",
-        linewidth=0,
-        antialiased=False,
-        rasterized=True
-    )
-    
-    q_for_cbar = None  # keep one Quiver artist to attach the colorbar
-    
-    
-    for p in quiver_payloads:
-        if len(p["X"]) == 0:
-            continue
-        
-        step = config['inlier_vector_stride']
-        X = p["X"][::step]; Y = p["Y"][::step]
-        u = p["u"][::step]; v = p["v"][::step]
-        M = np.hypot(u, v)/1000 # km
-    
-        q = ax.quiver(
-            X, Y, u, v, M,   # <-- M colors the arrows
-            transform=crs_3413,
-            angles="xy",
-            scale_units="xy",
-            scale=config['quiver_scale_large_area'],
-            width=0.001,
-            pivot="tail",
-            cmap="viridis",
-            norm=norm,
-            zorder=2
-        )
-    
-        if q_for_cbar is None:
-            q_for_cbar = q
-    
-    # add magnitude legend (colorbar)
-    if q_for_cbar is not None:
-        cbar = fig.colorbar(q_for_cbar, ax=ax, orientation="vertical", shrink=0.65, pad=0.02)
-        cbar.set_label("Vector velocity (km_day)")
-        
-        ax.quiverkey(q_for_cbar, 1.05, 0.08, 10_000, "10 km", labelpos="E", coordinates="axes")
-        ax.quiverkey(q_for_cbar, 1.05, 0.06, 20_000, "20 km", labelpos="E", coordinates="axes")
-        ax.quiverkey(q_for_cbar, 1.05, 0.04, 30_000, "30 km", labelpos="E", coordinates="axes")            
-    
-    ax.set_title(
-        "All inlier vectors colored by magnitude\n"
-        f"from {min(starts)} to {max(ends)}"
-    )
-    import matplotlib.patches as mpatches
-    leg = ax.legend(
-        handles=[
-            mpatches.Patch(
-                facecolor="#f7f7f7",
-                edgecolor="#555555",
-                linewidth=0.5,
-                label="Sea ice"
-            )
-        ],
-        loc="lower left",
-        frameon=True,
-        framealpha=1.0,
-        fancybox=True
-    )
-    leg.get_frame().set_edgecolor("#555555")
-    leg.get_frame().set_linewidth(1.0)
-    
-    out_png_path = os.path.join(config["output_dir"], "all_inliers.png")
-    plt.savefig(out_png_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    
-    
-    
-    # # create slide image for each iteration
-    # import plotly.graph_objects as go
-    
-    # def segments(X, Y, u, v):
-    #     # build x,y arrays with None gaps between segments
-    #     xs = np.column_stack([X, X + u, np.full_like(X, np.nan)]).ravel()
-    #     ys = np.column_stack([Y, Y + v, np.full_like(Y, np.nan)]).ravel()
-    #     xs = np.where(np.isnan(xs), None, xs)
-    #     ys = np.where(np.isnan(ys), None, ys)
-    #     return xs, ys
-    
-    
-    # line_style = dict(width=2)
-    
-    
-    # frames = []
-    # for k, p in enumerate(quiver_payloads_by_iter):
-    #     xs, ys = segments(p["X"], p["Y"], p["u"], p["v"])
-    #     frames.append(
-    #         go.Frame(
-    #             name=str(k+1),
-    #             data=[go.Scattergl(
-    #                 x=xs, y=ys, mode="lines", line=line_style
-    #             )],
-    #             traces=[0]
-    #         )
-    #     )
-    
-    # # initial
-    # xs0, ys0 = segments(**quiver_payloads_by_iter[0])
-    
-    # fig = go.Figure(
-    #     data=[go.Scattergl(x=xs0, y=ys0, mode="lines", line=line_style)],
-    #     frames=frames
-    # )
-    
-    # fig.update_layout(
-    #     title="Vectors by iteration",
-    #     xaxis=dict(scaleanchor="y"),  # keep aspect ratio
-    #     sliders=[{
-    #         "steps": [
-    #             {
-    #                 "method": "animate",
-    #                 "label": str(k+1),
-    #                 "args": [
-    #                     [str(k+1)],
-    #                     {
-    #                         "mode": "immediate",
-    #                         "frame": {"duration": 0, "redraw": True},
-    #                         "transition": {"duration": 0},
-    #                     }
-    #                 ],
-    #             }
-    #             for k in range(len(frames))
-    #         ]
-    #     }],
-    #     updatemenus=[{
-    #         "type": "buttons",
-    #         "showactive": False,
-    #         "buttons": [
-    #             {
-    #                 "label": "Play",
-    #                 "method": "animate",
-    #                 "args": [
-    #                     None,
-    #                     {
-    #                         "fromcurrent": True,
-    #                         "mode": "immediate",
-    #                         "frame": {"duration": 300, "redraw": True},
-    #                         "transition": {"duration": 0},
-    #                     }
-    #                 ]
-    #             },
-    #             {
-    #                 "label": "Pause",
-    #                 "method": "animate",
-    #                 "args": [
-    #                     [None],
-    #                     {
-    #                         "mode": "immediate",
-    #                         "frame": {"duration": 0, "redraw": False},
-    #                         "transition": {"duration": 0},
-    #                     }
-    #                 ]
-    #             }
-    #         ]
-    #     }]
-    # )
-    # fig.show()
-    # # exit()
-    
-    # # optional: save interactive HTML
-    # fig.write_html(r"D:\NOAA\GitHub\buoy_eda\output\iterations\vectors_by_iteration.html")
-    
-    

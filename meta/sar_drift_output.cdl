@@ -8,14 +8,14 @@ variables:
 		sea_ice_speed:long_name = "Sea ice speed" ;
 		sea_ice_speed:standard_name = "sea_ice_speed" ;
 		sea_ice_speed:ioos_category = "sea-ice" ;
-		sea_ice_speed:units = "m/day" ;
+		sea_ice_speed:units = "m s-1" ;
 		sea_ice_speed:grid_mapping = "spatial_ref" ;
 	float sea_ice_x_displacement(time, y, x) ;
 		sea_ice_x_displacement:_FillValue = NaNf ;
 		sea_ice_x_displacement:long_name = "u-velocity component" ;
 		sea_ice_x_displacement:standard_name = "movement_in_x_direction" ;
 		sea_ice_x_displacement:ioos_category = "sea-ice" ;
-		sea_ice_x_displacement:units = "m/day" ;
+		sea_ice_x_displacement:units = "m s-1" ;
 		sea_ice_x_displacement:grid_mapping = "spatial_ref" ;
 		sea_ice_x_displacement:comment = "x values are the centers of the grid cells" ;
 	float sea_ice_y_displacement(time, y, x) ;
@@ -23,7 +23,7 @@ variables:
 		sea_ice_y_displacement:long_name = "v-velocity component" ;
 		sea_ice_y_displacement:standard_name = "movement_in_y_direction" ;
 		sea_ice_y_displacement:ioos_category = "sea-ice" ;
-		sea_ice_y_displacement:units = "m/day" ;
+		sea_ice_y_displacement:units = "m s -1" ;
 		sea_ice_y_displacement:grid_mapping = "spatial_ref" ;
 	float direction_of_sea_ice_displacement(time, y, x) ;
 		direction_of_sea_ice_displacement:long_name = "Direction of the vector change in geospatial position of an object that has moved over time" ;
@@ -36,19 +36,25 @@ variables:
 		outlier_category:standard_name = "status_flag" ;
 		outlier_category:ioos_category = "quality_flag" ;
 		outlier_category:units = "1" ;
-		outlier_category:flag_values = 0s, 1s, 10s, 11s, 20s, 21s, 30s, 31s ;
-		outlier_category:comment = "Codes are displayed conceptually as 00, 01, 10, 11, 20, 21, 30, 31, 40, 41." ;
+		outlier_category:flag_values = 0s, 1s, 10s, 11s, 20s, 21s, 30s, 31s, 40s, 41s, 50s, 51s, 60s, 61s, 70s, 71s ;
+		outlier_category:comment = "Codes are displayed conceptually as 00, 01, 10, 11, 20, 21, 30, 31, 40, 41, 50, 51, 60, 61, 70 71." ;
 		outlier_category:flag_meanings =
-			"none_under_neighbor_threshold \
-			 none_at_or_above_neighbor_threshold \
-			 distance_under_neighbor_threshold \
-			 distance_at_or_above_neighbor_threshold \
-			 bearing_under_neighbor_threshold \
-			 bearing_at_or_above_neighbor_threshold \
-			 distance_and_bearing_under_neighbor_threshold \
-			 distance_and_bearing_at_or_above_neighbor_threshold \
-			 mahaladonis_distance_under_neighbor_threshold \
-			 mahaladonis_distance_at_or_above_neighbor_threshold" ;
+			"None (under neighbor threshold) \
+             None (equal to or above neighbor threshold) \
+             Distance (under neighbor threshold) \
+             Distance (equal to or above neighbor threshold) \
+             Bearing (under neighbor threshold) \
+             Bearing (equal to or above neighbor threshold) \
+             Mahalanobis distance (under neighbor threshold) \
+             Mahalanobis distance (equal to or above neighbor threshold) \
+             Distance and bearing (under neighbor threshold) \
+             Distance and bearing (equal to or above neighbor threshold) \
+             Mahalanobis distance and distance (under neighbor threshold) \
+             Mahalanobis distance and distance (equal to or above neighbor threshold) \
+             Mahalanobis distance and bearing (under neighbor threshold) \
+             Mahalanobis distance and bearing (equal to or above neighbor threshold) \
+             Mahalanobis distance, distance and bearing (under neighbor threshold) \
+             Mahalanobis distance, distance and bearing (equal to or above neighbor threshold)" ;
 		outlier_category:grid_mapping = "spatial_ref" ;		
 	double time(time) ;
 		time:standard_name = "time" ;
