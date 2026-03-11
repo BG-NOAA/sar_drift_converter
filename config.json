@@ -10,8 +10,13 @@
   "batch_process": true,
   "delimiter": ",",
   "skip_rows_before_header": 2,
-  "detect_outliers": true,
   "ignore_vector_threshold": 25,
+  "z_score_level": 2.75,
+  "chi_square_level": 0.975,
+  "neighbor_radius_km": 25.0,
+  "min_neighbors": 8,
+  "md_min_neighbors": 24,
+  "outlier_passes": 3,
   "use_geotiff": false,
   "create_region_plot": false,
   "vector_stride": 10,
@@ -19,5 +24,6 @@
   "quiver_scale_small_area": 1.0,
   "quiver_scale_large_area": 0.1,
   "precision": 3,
-  "verbose": true
+  "verbose": true,
+  "version": "02"
 }

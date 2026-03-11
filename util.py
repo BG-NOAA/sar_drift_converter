@@ -59,10 +59,7 @@ os.environ["PROJ_LIB"] = str(proj_dir)   # backward compatibility
 from pyproj.datadir import set_data_dir
 set_data_dir(str(proj_dir))
 
-from pyproj import CRS, Transformer, Geod
-
-from typing import Tuple
-
+from pyproj import CRS, Transformer
 
 
 ######################################################
@@ -241,7 +238,7 @@ def _polar_lonlat_to_ij(longitude, latitude, grid_size, hemisphere):
 # Standard error messaging
 #=========================
 
-def error_msg(msg, rc):
+def error_msg(msg):
     """
     Print an error message with a warning icon and exit the program.
 
@@ -250,18 +247,14 @@ def error_msg(msg, rc):
     msg : str
         The error message to display in the console.
 
-    rc : int
-        The return code with which to exit the script.
-
     Notes
     -----
-    - The message is prefixed with a warning symbol (⚠️).
-    - This function immediately terminates the program using `exit(rc)`.
+    - This function immediately terminates the program using `exit()`.
     """
 
     
     print(f"  ⚠️ {msg}")
-    exit(rc)
+    exit()
     
     
 #===================
@@ -593,7 +586,7 @@ def _circular_std(a):
     R = np.sqrt(s*s + c*c)
     return np.sqrt(-2 * np.log(np.clip(R, 1e-12, 1.0)))
 
-    
+
 #==================
 # Plot enhancements
 #==================
@@ -850,11 +843,13 @@ def read_sar_drift_data_file(input_file, config):
           header offsets from `config`.
         - Strip whitespace from column names.
         - Remove rows where `Bear_deg == 0` (known invalid bearings/records).
-        - Convert SAR "Julian seconds" timestamps (seconds since 2000-01-01) in
-          `Time1_JS` and `Time2_JS` to human-readable `Date1` and `Date2`.
+        - Normalize longitudes from 0–360 to -180/180 range for
+          `Lon1` and `Lon2`.
+        - Convert SAR "Julian seconds" timestamps (seconds since 2000-01-01)
+          in `Time1_JS` and `Time2_JS` to human-readable `Date1` and `Date2`.
         - Compute duration between start and end times in both timedelta
           string form (`Duration`) and raw seconds (`JS_Duration`).
-        - Convert spped in km/day units to meters/s-1:
+        - Convert speed from km/day to m s⁻¹:
             - `Speed_kmdy` -> `Speed_ms`
         - Extract satellite identifiers from `File1` and `File2`
           into `Sat1` and `Sat2`.
@@ -871,18 +866,20 @@ def read_sar_drift_data_file(input_file, config):
         pandas.DataFrame: Cleaned and enriched SAR drift DataFrame containing
         original fields plus derived columns including:
             - 'Date1', 'Date2' (str): Start/end timestamps in
-                                     '%Y-%m-%d %H:%M:%S'.
+                                      '%Y-%m-%d %H:%M:%S'.
             - 'Duration' (str): Duration as a timedelta string.
             - 'JS_Duration' (numeric): Duration in seconds
-                                      (Time2_JS - Time1_JS).
-            - 'U_mdy', 'V_mdy', 'Speed_mdy' (float): Velocity/speed in meters
-                                                     per day.
+                                       (Time2_JS - Time1_JS).
+            - 'Speed_ms' (float): Speed converted from km/day to m s⁻¹.
             - 'Sat1', 'Sat2' (str): Satellite identifiers extracted
                                     from File1/File2.
 
     Notes:
         - SAR time fields `Time1_JS` and `Time2_JS` are interpreted as
           seconds since 2000-01-01 00:00:00.
+        - Longitudes are normalized from 0–360 to -180/180 to ensure
+          correct rendering in QGIS and compatibility with downstream
+          projections.
         - A specific `pyproj` warning about database path setup is suppressed
           because it is expected in this runtime environment.
         - This function assumes the input file includes the required columns:
@@ -903,7 +900,6 @@ def read_sar_drift_data_file(input_file, config):
         message="pyproj unable to set database path"
     )
     
-
     
     # Read the SAR drift data file
     df = pd.read_csv(
@@ -955,28 +951,37 @@ def read_sar_drift_data_file(input_file, config):
     df['Speed_ms'] = (df['Speed_kmdy'] * 1000) / SECONDS_PER_DAY
     
     
+    # # convert to EPSG:3411 for shape file
+    # tf = _set_transformer()
+    # df['X1'], df['Y1'] = tf['4326_to_3411'].transform(
+    #     df['Lon1'].values, df['Lat1'].values
+    # )
+    # df['X2'], df['Y2'] = tf['4326_to_3411'].transform(
+    #     df['Lon2'].values, df['Lat2'].values
+    # )
+    
+    # identify satellites for analysis
     df['Sat1'] = df["File1"].str.partition("_")[0]
     df['Sat2'] = df["File2"].str.partition("_")[0]
-    
+
 
     return df
 
 
-def outlier_search(df, config, base_name, radius_km=20,
-                   min_neighbors=10, md_neighbors=24,
-                   std_dev_lvl=3, chi_sq=0.99,
-                   iter_count=1):
+def outlier_search(df, config, base_name, radius_km,
+                   min_neighbors, md_neighbors, z_score_level,
+                   chi_square_level, passes):
     import numpy as np
     from scipy.spatial import cKDTree
     from sklearn.covariance import MinCovDet, LedoitWolf
     from scipy.stats import chi2
     
-    
-    if not config['detect_outliers']:
-        # set category to 00
+    if config['version'] == '01':
+        # no outlier deteection required
         df['outlier_category'] = '00'
         return df
-            
+    
+
     out_df = df.reset_index(drop=True).copy()
     
     radius_m = radius_km * 1000
@@ -1017,7 +1022,7 @@ def outlier_search(df, config, base_name, radius_km=20,
 
     # iterate passes through data to identify outliers and recheck
     # recommended to leave just two passes so data don't get too homogenized
-    for iter_idx in range(iter_count):
+    for pass_idx in range(passes):
         # iteratively run outlier detection until no new outliers found
         # instantiate pool data frame
         # keep any inlier whether confident or not
@@ -1125,7 +1130,8 @@ def outlier_search(df, config, base_name, radius_km=20,
                 k_md = min(md_neighbors+1, len(scene_df))
                 distances, all_neighbors = tree.query(xy, k=k_md)
                 neigh_idxs = all_neighbors[local_idx].tolist()
-                neigh_idxs  = [j for j in neigh_idxs if j != local_idx] # drop self
+                # drop self
+                neigh_idxs  = [j for j in neigh_idxs if j != local_idx] 
                 
             
                 # Mahalanobis on neighbors
@@ -1148,13 +1154,17 @@ def outlier_search(df, config, base_name, radius_km=20,
                     if np.linalg.matrix_rank(Xn_z) < p:
                         mahal_sq = np.nan
                     else:
-                        # mcd = MinCovDet().fit(Xn_z) # standard covariance measurement
-                        # mahal_sq = mcd.mahalanobis([x_z])[0] # squared distance
-                        lw = LedoitWolf().fit(Xn_z) # better for small  samples or the covariance is ill-conditioned.
+                        # standard covariance measurement
+                        # mcd = MinCovDet().fit(Xn_z)
+                        # squared distance
+                        # mahal_sq = mcd.mahalanobis([x_z])[0]
+                        # better for small  samples or the covariance
+                        # is ill-conditioned.
+                        lw = LedoitWolf().fit(Xn_z) 
                         mahal_sq = lw.mahalanobis([x_z])[0] # squared distance
                     
                     
-                alpha = chi_sq # 99 strict threshold
+                alpha = chi_square_level # 99 strict threshold
                 thr_sq = chi2.ppf(alpha, df=p)  # squared-distance threshold
                 
                 # store neighbors as out_df indices
@@ -1166,8 +1176,12 @@ def outlier_search(df, config, base_name, radius_km=20,
                 ]
                 
                 
-                out_df.at[target_out_idx, "md_neighbor_indices"] = neigh_out_idx
-                out_df.at[target_out_idx, "md_neighbor_count"] = len(neigh_out_idx)
+                out_df.at[target_out_idx, "md_neighbor_indices"] = (
+                    neigh_out_idx
+                )
+                out_df.at[target_out_idx, "md_neighbor_count"] = (
+                    len(neigh_out_idx)
+                )
                 out_df.at[target_out_idx, 'mahal_sq'] = mahal_sq
                 out_df.at[target_out_idx, 'thr_sq'] = thr_sq
                 out_df.at[target_out_idx, 'mahal_outlier_flag'] = (
@@ -1232,17 +1246,20 @@ def outlier_search(df, config, base_name, radius_km=20,
             40: Distance and bearing (under neighbor threshold)
             41: Distance and bearing (equal to or above neighbor threshold)
             50: Mahalanobis distance and distance (under neighbor threshold)
-            51: Mahalanobis distance and distance (equal to or above neighbor threshold)
+            51: Mahalanobis distance and distance
+                (equal to or above neighbor threshold)
             60: Mahalanobis distance and bearing (under neighbor threshold)
-            61: Mahalanobis distance and bearing (equal to or above neighbor threshold)            
-            70: Mahalanobis distance, distance and bearing (under neighbor threshold)
-            71: Mahalanobis distance, distance and bearing (equal to or above neighbor threshold)
-
+            61: Mahalanobis distance and bearing
+                (equal to or above neighbor threshold)            
+            70: Mahalanobis distance, distance and bearing
+                (under neighbor threshold)
+            71: Mahalanobis distance, distance and bearing
+                (equal to or above neighbor threshold)
             """
             
             # outlier boolean flags
-            distance_filter = out_df['distance_z_score'] > std_dev_lvl
-            bearing_filter = out_df['bearing_z_score'] > std_dev_lvl
+            distance_filter = out_df['distance_z_score'] > z_score_level
+            bearing_filter = out_df['bearing_z_score'] > z_score_level
             md_filter = out_df["mahal_outlier_flag"].astype(bool)
             
             # set confidence
@@ -1289,8 +1306,13 @@ def outlier_search(df, config, base_name, radius_km=20,
             # record which pass
             sd_outlier_now = (distance_filter | bearing_filter)
             md_outlier_now = md_filter
-            out_df.loc[sd_outlier_now & (out_df["sd_outlier_pass"] == -1), "sd_outlier_pass"] = iter_idx + 1
-            out_df.loc[md_outlier_now & (out_df["md_outlier_pass"] == -1), "md_outlier_pass"] = iter_idx + 1
+            out_df.loc[
+                sd_outlier_now & (
+                    out_df["sd_outlier_pass"] == -1
+                ), "sd_outlier_pass"] = pass_idx + 1
+            out_df.loc[md_outlier_now & (
+                out_df["md_outlier_pass"] == -1
+                ), "md_outlier_pass"] = pass_idx + 1
             
             # update data frame
             out_df["outlier_category"] = (
@@ -1340,17 +1362,31 @@ def create_shape_package(df, base_name, config):
     import geopandas as gpd
     from shapely.geometry import LineString
     
-    # reduce data frame to needed features
+    # add X and Y for EPSG:3411 projection
     df_local = df.copy()
-    transformer = _set_transformer(4326)
+    
+    
+    tf = _set_transformer()
+    df_local['X1'], df_local['Y1'] = tf['4326_to_3413'].transform(
+        df_local['Lon1'].values,
+        df_local['Lat1'].values
+    )
+    
+    df_local['X2'], df_local['Y2'] = tf['4326_to_3413'].transform(
+        df_local['Lon2'].values,
+        df_local['Lat2'].values
+    )
     
     df_local['geometry_line'] = df_local.apply(
-        lambda row: LineString(
-            [(row['Lon1'], row['Lat1']), (row['Lon2'], row['Lat2'])]
-        ),
+        lambda row: LineString([
+            (row['X1'], row['Y1']),
+            (
+                row['X1'] + row['U_vel_ms'] * row['JS_Duration'],
+                row['Y1'] + row['V_vel_ms'] * row['JS_Duration']
+            )
+        ]),
         axis=1
     )
-
     
     # Create GeoDataFrame for lines (lines only)
     gdf_line = gpd.GeoDataFrame(
@@ -1369,12 +1405,15 @@ def create_shape_package(df, base_name, config):
     gdf_line = gdf_line.rename(
         columns={'geometry_line': 'geometry'}
     ).set_geometry('geometry')
-    gdf_line.crs = CRS.from_epsg(transformer['epsg'])
+    gdf_line = gdf_line.set_crs(tf['crs_string_3411'])
     gdf_line.to_file(output_file_path, layer='drift_lines', driver='GPKG')
     
 
     # embed .qml outlier layer style
     _embed_qml_style(output_file_path, 'drift_lines', config['qml_file'])
+    
+    
+    # *0782308532*0782393500*
 
 
 def create_netcdf(df, base_name, config, template_ds, scene_i_j):
@@ -1479,6 +1518,7 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
     x_coords = template_ds['x'].values
     y_coords = template_ds['y'].values
     grid_shape = (1, template_ds.sizes['y'], template_ds.sizes['x'])
+
     
     try:       
         # time defaults
@@ -1592,7 +1632,7 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
                 np.float32(row.U_vel_ms)
             )
             netcdf_grid["sea_ice_y_displacement"].values[0, iy, ix] = (
-                np.float32(row.V_vel_ms)
+                np.float32(row.V_vel_ms) # negate to match flipped grid y-axis
             )
             netcdf_grid["direction_of_sea_ice_displacement"].values[
                 0, iy, ix
@@ -1652,7 +1692,7 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
         del netcdf_grid
         
 
-def create_png(config, base_name, outlier_type=None):
+def create_png(config, base_name):
     """
     Create and save a PNG map of sea-ice drift vectors from a NetCDF file.
     
@@ -1699,6 +1739,7 @@ def create_png(config, base_name, outlier_type=None):
     import cartopy.crs as ccrs
     import cartopy.feature as cfeature
 
+    SECONDS_PER_DAY = 86_400 # use this scale to properly show quivers
     source_nc_path = os.path.join(config['nc_dir'], f'{base_name}.nc')
     
     with xr.open_dataset(source_nc_path) as ds:
@@ -1718,7 +1759,8 @@ def create_png(config, base_name, outlier_type=None):
         outlier_codes = np.asarray(outlier_codes).astype(str)
         
         green_mask = np.isin(outlier_codes, ['00', '01']) & valid_mask
-        red_mask = (~green_mask) & valid_mask
+    
+    
     
     # set projection defined by data set
     globe_3411 = ccrs.Globe(
@@ -1761,83 +1803,48 @@ def create_png(config, base_name, outlier_type=None):
     ax.coastlines(resolution="10m", linewidth=1.0, zorder=1)
     
     
-    if outlier_type:
-        # inliers as green
-        q = ax.quiver(
-            X[green_mask],
-            Y[green_mask],
-            dx_values[green_mask],
-            dy_values[green_mask],
-            transform=crs_3411,
-            angles='xy', scale_units='xy',
-            scale=quiver_scale,
-            width=0.001,
-            pivot='tail',
-            color='green',
-            zorder=2
-        )
 
-        # outliers as red
-        q = ax.quiver(
-                X[red_mask],
-                Y[red_mask],
-                dx_values[red_mask],
-                dy_values[red_mask],
-                transform=crs_3411,
-                angles='xy', scale_units='xy',
-                scale=quiver_scale,
-                width=0.001,
-                pivot='tail',
-                color='red',
-                zorder=2
-            )   
-    else:
-        mag = np.hypot(dx_values, dy_values)
-        norm = mcolors.Normalize(
-            vmin=np.nanmin(mag),
-            vmax=np.nanmax(mag)
-        )
+    mag = np.hypot(dx_values, dy_values) * SECONDS_PER_DAY
+    norm = mcolors.Normalize(
+        vmin=np.nanmin(mag),
+        vmax=np.nanmax(mag)
+    )
 
-        q = ax.quiver(
-            X[green_mask],
-            Y[green_mask],
-            dx_values[green_mask],
-            dy_values[green_mask],
-            mag[green_mask],
-            transform=crs_3411,
-            angles="xy", scale_units="xy",
-            scale=quiver_scale,
-            width=0.001,
-            pivot="tail",
-            cmap="viridis",
-            norm=norm,
-            zorder=2
-        )       
-    
-        cbar = fig.colorbar(
-            q, ax=ax, orientation="vertical", shrink=0.65, pad=0.02
-        )
-        cbar.set_label("Vector velocity (m_day)")
+    q = ax.quiver(
+        X[green_mask],
+        Y[green_mask],
+        dx_values[green_mask] * SECONDS_PER_DAY,
+        -dy_values[green_mask] * SECONDS_PER_DAY, # negate back for display
+        mag[green_mask],
+        transform=crs_3411,
+        angles="xy", scale_units="xy",
+        scale=quiver_scale,
+        width=0.001,
+        pivot="tail",
+        cmap="viridis",
+        norm=norm,
+        zorder=2
+    )       
+
+    cbar = fig.colorbar(
+        q, ax=ax, orientation="vertical", shrink=0.65, pad=0.02
+    )
+    cbar.set_label("Vector velocity (m_day)")
     
     
     ax.set_title(
         f"Sea-ice Vector Velocities\n"
         f"x {xmin} to {xmax}; y {ymin} to {ymax}\n"
         f"Total observations: {valid_mask.sum()}\n"
-        f"Width {np.int32(map_height)} m by Height {np.int32(map_width)} m"
+        f"Width {np.int32(map_height)} m by Height {np.int32(map_width)} m\n"
         f"Polar stereographic EPSG:3411"
     )
     
 
     # save plot as .png
-    if outlier_type:
-        png_file = os.path.join(
-            config['png_dir'], f"{base_name}_{outlier_type}_outliers.png"
-        )        
-    else:
-        png_file = os.path.join(
-            config['png_dir'], f"{base_name}.png"
-        )
+    png_file = os.path.join(
+        config['png_dir'], f"{base_name}.png"
+    )
     fig.savefig(png_file, bbox_inches='tight', dpi=300)
     plt.close(fig)
     

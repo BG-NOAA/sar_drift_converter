@@ -51,63 +51,92 @@ def read_json_config():
     for each parameter.
     
     Expected JSON keys (must match exactly):
-        - "sar_drift_directory (str): Path to where process multiple SAR
-                                      drift delimited files.
-        - "sar_drift_filename" (str): Path to the SAR drift delimited
-                                      text file.
-        - "sar_geotiff_filename" (str): Path to the SAR backscatter GeoTIFF
-                                        image.
-        - "netcdf_cdl_file" (str): Path to the CDL file used for
-                                   NetCDF metadata.
-        - "netcdf_template_file" (str): Path to NetCDF template file on which
-                                        scenes will be built
-        - "qml_file" (str): Path to qml file that will apply a style
-                            to the geopackages when opened in QGIS
-        - "output_dir" (str): Output directory where generated files will
-                              be stored.
-        - "clear_output" (bool): Remove output directory and all contents from
-                                 previous runs
-        - "batch_process" (bool): Process one file `sar_drift_filename` or
-                                  multiple files `sar_drift_directory`.
-        - "delimiter" (str): Field separator in the input file
-                             (e.g., ",", "\t").
-        - "skip_rows_before_header" (int): Number of rows to skip before header
-                                           in data file.
-        - "detect_outliers" (bool): Look for outliers when process input data.
-        - "ignore_vector_threshold" (int): Ignore data files if the number of
-                                           vector observations are below the
-                                           threshold
-        - "use_geotiff" (bool): Use a supplied geotiff file as background for
-                                output images
-        - "create_region_plot" (bool): If True, create a map of the observed
-                                       region along with the vectors on top of
-                                       the geotiff image. If False, just create
-                                       the vectors on top of the geotiff image.
-        - "vector_stride" (int): Display every vector (1) or use a step
-                                 to display every nth vector
-        - "inlier_vector_stride" (int): Display every vector (1) or use a step
-                                        to display every nth vector for the all
-                                        inliers plot.
-        - "quiver_scale_small_area" (int): Size of the quiver for small area
-                                           plots.
-        - "quiver_scale_large_area" (int): Size of the quiver for large area
-                                           plots.
-        - "precision" (int): Number of decimal places to retain in outputs.
-        - "verbose" (bool): Print detailed parameter info to the console.
-    
+        - "sar_drift_directory"    (str):   Path to directory containing
+                                            multiple SAR drift delimited files
+                                            for batch processing.
+        - "sar_drift_filename"     (str):   Path to a single SAR drift
+                                            delimited text file.
+        - "sar_geotiff_filename"   (str):   Path to the SAR backscatter
+                                            GeoTIFF image.
+        - "netcdf_cdl_file"        (str):   Path to the CDL file used for
+                                            NetCDF metadata.
+        - "netcdf_template_file"   (str):   Path to NetCDF template file on
+                                            which scenes will be built.
+        - "qml_file"               (str):   Path to QML file that applies a
+                                            style to GeoPackages when opened
+                                            in QGIS.
+        - "output_dir"             (str):   Output directory where generated
+                                            files will be stored.
+        - "clear_output_dir"       (bool):  Remove output directory and all
+                                            contents from previous runs.
+        - "batch_process"          (bool):  If True, process all files in
+                                            `sar_drift_directory`; if False,
+                                            process single `sar_drift_filename`.
+        - "delimiter"              (str):   Field separator in the input file
+                                            (e.g., ",", "\\t").
+        - "skip_rows_before_header"(int):   Number of rows to skip before
+                                            the header in the data file.
+        - "ignore_vector_threshold"(int):   Ignore data files where the number
+                                            of vector observations falls below
+                                            this threshold.
+        - "z_score_level"          (float): Z-score threshold for distance and
+                                            bearing outlier detection.
+        - "chi_square_level"       (float): Chi-square tail probability for
+                                            Mahalanobis distance thresholding.
+        - "neighbor_radius_km"     (float): Neighbor search radius in
+                                            kilometers.
+        - "min_neighbors"          (int):   Minimum neighbors required to mark
+                                            a z-score result as statistically
+                                            confident.
+        - "md_min_neighbors"       (int):   Minimum neighbors required to mark
+                                            a Mahalanobis distance result as
+                                            statistically confident.
+        - "outlier_passes"         (int):   Number of iterative passes to
+                                            remove outliers from the neighbor
+                                            pool and recompute.
+        - "use_geotiff"            (bool):  Use a supplied GeoTIFF file as
+                                            background for output images.
+        - "create_region_plot"     (bool):  If True, create a map of the
+                                            observed region with vectors
+                                            overlaid on the GeoTIFF; if False,
+                                            render vectors only.
+        - "vector_stride"          (int):   Display every nth vector (1 = all
+                                            vectors).
+        - "inlier_vector_stride"   (int):   Display every nth vector for the
+                                            inliers-only plot (1 = all).
+        - "quiver_scale_small_area"(float): Quiver arrow scale for small area
+                                            plots.
+        - "quiver_scale_large_area"(float): Quiver arrow scale for large area
+                                            plots.
+        - "precision"              (int):   Number of decimal places to retain
+                                            in outputs.
+        - "verbose"                (bool):  Print detailed parameter info to
+                                            the console.
+        - "version"                (str):   Processing version; controls
+                                            filtering level and output files
+                                            created. Must be one of:
+                                            '00', '01', '02', or '03'.
+
     Command-line arguments:
         -c, --config_file: Path to a JSON file with all required configuration.
-    
+
     Returns:
-        dict: A dictionary of JSON keys and their values
-    
+        dict: Validated configuration dictionary with normalized paths and
+              resolved output subdirectories:
+              - 'formatted_data_dir': <output_dir>/formatted_data
+              - 'gpkg_dir':           <output_dir>/gpkg
+              - 'nc_dir':             <output_dir>/nc
+              - 'png_dir':            <output_dir>/png
+
     Raises:
-        Exits the script (status code 1–19) if:
+        Exits the script (status code 1) if:
             - Config file is missing or improperly formatted.
             - Required files or directories do not exist.
-            - Types for fields like `precision` or `verbose` are invalid.
+            - Parameter types are invalid (e.g., non-integer precision).
             - Unexpected or missing keys are present in the JSON.
-    
+            - Numeric parameters are out of valid range.
+            - Version is not one of '00', '01', '02', or '03'.
+
     Example:
         $ python sar_drift_output.py -c config.json
     """
@@ -119,377 +148,187 @@ def read_json_config():
     import json
 
 
-    # json config file
-    parser = argparse.ArgumentParser(
-        description='Converts SAR drift data to .gpkg and .nc files.'
+    parser = argparse.ArgumentParser(description=(
+        'Converts SAR drift data to NetCDF and/or GeoPackage and/or PNG files.'
         )
-    
-    parser.add_argument(
-        '-c', '--config_file',
-        type=str,
-        action='store',
-        help='Path to config JSON file'
-        )
-
+    )
+    parser.add_argument('-c', '--config_file', type=str, action='store',
+                        help='Path to config JSON file')
     args = parser.parse_args()
     if not args.config_file:
-        util.error_msg('Missing or empty config file argument', 1)
-        
-    
-    config_file = os.path.normpath(os.path.join(args.config_file))
+        util.error_msg('Missing or empty config file argument')
+
+    config_file = os.path.normpath(args.config_file)
     with open(config_file, 'r') as f:
         config = json.load(f)
-    
-    # confirm the needed keys, and only those keys, exist
+
+
+    # Key validation
     required_json_keys = {
-        "sar_drift_directory",
-        "sar_drift_filename",
-        "sar_geotiff_filename",
-        "netcdf_cdl_file",
-        "netcdf_template_file",
-        "qml_file",
-        "output_dir",
-        "clear_output_dir",
-        "batch_process",
-        "delimiter",
-        "skip_rows_before_header",
-        "detect_outliers",
-        "ignore_vector_threshold",
-        "use_geotiff",
-        "create_region_plot",
-        "vector_stride",
-        "inlier_vector_stride",
-        "quiver_scale_small_area",
-        "quiver_scale_large_area",
-        "precision",
-        "verbose"
-    }        
-    config_keys = set(config.keys())
-    if config_keys != required_json_keys:
-        missing = required_json_keys - config_keys
-        extra = config_keys - required_json_keys
-        if missing:
-            util.error_msg(
-                f"Missing required keys in {config_file}: "
-                f"{', '.join(missing)}",
-                2
-            )
-        if extra:
-            util.error_msg(
-                f"Unexpected keys in {config_file}: {', '.join(extra)}",
-                3
-            )
-
-    # check sar drift directory exists
-    batch_process = config['batch_process']
-    if not isinstance(batch_process, bool):
-        util.error_msg(
-            f'`batch_process` must be boolen, '
-            f'got {type(batch_process).__name__}',
-            4
-        )
-    batch_process = bool(batch_process)
-    sar_drift_directory = os.path.normpath(
-        os.path.join(config['sar_drift_directory'])
-    )
-    if not os.path.exists(sar_drift_directory) and batch_process:
-        util.error_msg(
-            f"Cannot find sar_drift_directory `{sar_drift_directory}`",
-            5
-        )
-        
-        
-    # check sar drift file exists
-    sar_drift_file = os.path.normpath(
-        os.path.join(config['sar_drift_filename'])
-    )
-    if not os.path.exists(sar_drift_file) and not batch_process:
-        util.error_msg(f"Cannot find sar_drift_file `{sar_drift_file}`", 6)
-        
-
-    # check sar geotiff file exists
-    use_geotiff = config['use_geotiff']
-    if not isinstance(use_geotiff, bool):
-        util.error_msg(
-            f'`use_geotiff` must be boolen, '
-            f'got {type(use_geotiff).__name__}',
-            7
-        )
-    use_geotiff = bool(use_geotiff)
-    sar_geotiff_file = os.path.normpath(
-        os.path.join(config['sar_geotiff_filename'])
-    )
-    if not os.path.exists(sar_geotiff_file) and use_geotiff:
-        util.error_msg(
-            f"Cannot find sar_getotiff_file `{sar_geotiff_file}`\n\t"
-            f"---`use_geotiff` in {config_file} set to "
-            f"`{config['use_geotiff']}`---",
-            8
-        )
-
-
-    # check netcdf cdl file exists
-    netcdf_cdl_file = os.path.normpath(
-        os.path.join(config['netcdf_cdl_file']
-    ))
-    if not os.path.exists(netcdf_cdl_file):
-        util.error_msg(
-            f"Cannot find NetCDF CDL file `{netcdf_cdl_file}`",
-            9
-        )
-        
-    # check netcdf template file exists
-    netcdf_template_file = os.path.normpath(
-        os.path.join(config['netcdf_template_file']
-    ))
-    if not os.path.exists(netcdf_template_file):
-        util.error_msg(
-            f"Cannot find NetCDF template file `{netcdf_template_file}`",
-            9
-        )        
-        
-    # check layer style qml file exists
-    qml_file = os.path.normpath(
-        os.path.join(config['qml_file']
-    ))
-    if not os.path.exists(qml_file):
-        util.error_msg(
-            f"Cannot find qml file `{qml_file}`",
-            9
-        )           
-        
-    # check output dir exists
-    clear_output_dir = config['clear_output_dir']
-    if not isinstance(clear_output_dir, bool):
-        util.error_msg(
-            f'`batch_process` must be boolen, '
-            f'got {type(batch_process).__name__}',
-            4
-        )
-    output_dir = os.path.normpath(os.path.join(config['output_dir']))
-    if os.path.exists(output_dir) and clear_output_dir:
-            shutil.rmtree(output_dir)
-            
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # create subfolders
-    formatted_data_dir = os.path.join(output_dir, 'formatted_data')
-    os.makedirs(formatted_data_dir, exist_ok=True)
-    gpkg_dir = os.path.join(output_dir, 'gpkg')
-    os.makedirs(gpkg_dir, exist_ok=True)
-    nc_dir = os.path.join(output_dir, 'nc')
-    os.makedirs(nc_dir, exist_ok=True)
-    png_dir = os.path.join(output_dir, 'png')
-    os.makedirs(png_dir, exist_ok=True)
-
-
-    # delimiter character (encode().decode handles \t)
-    delimiter = config['delimiter'].encode().decode('unicode_escape')
-    
-    
-    # header rows to skip
-    skip_rows_before_header = config['skip_rows_before_header']
-    if not isinstance(skip_rows_before_header, int):
-        util.error_msg(
-            f'`skip_header_rows` must be an integer, '
-            f'got {type(skip_rows_before_header).__name__}',
-            11
-        )
-    skip_rows_before_header = int(skip_rows_before_header)
-    if skip_rows_before_header < 0:
-        util.error_msg(
-            f'`skip_header_rwos = {skip_rows_before_header} `'
-            ' cannot be negative.',
-            12
-        )
-    
-            
-    # detect outlier when process input files   
-    detect_outliers = config['detect_outliers']
-    if not isinstance(detect_outliers, bool):
-        util.error_msg(
-            f'`detect_outliers` must be boolen, '
-            f'got {type(detect_outliers).__name__}',
-            13
-        )
-    detect_outliers = bool(detect_outliers)
-    
-
-    # ignore data files where vector observations are below the threshold
-    ignore_vector_threshold = config['ignore_vector_threshold']
-    if not isinstance(ignore_vector_threshold, int):
-        util.error_msg(
-            f'`ignore_vector_threshold` must be an integer, '
-            f'got {type(ignore_vector_threshold).__name__}',
-            14
-        )
-    ignore_vector_threshold = int(ignore_vector_threshold)
-    if ignore_vector_threshold < 1:
-        util.error_msg(
-            f'`ignore_vector_threshold = {ignore_vector_threshold} `'
-            ' must be greater than 1.',
-            15
-        )
-        
-    # create subplots with region or just vectors on geotiff image
-    create_region_plot = config['create_region_plot']
-    if not isinstance(create_region_plot, bool):
-        util.error_msg(
-            f'`create_region_plot` must be boolen, '
-            f'got {type(create_region_plot).__name__}',
-            16
-        )
-    create_region_plot = bool(create_region_plot)
-    
-    
-    # vector stride (offset count of records in SAR drift data)
-    vector_stride = config['vector_stride']
-    if not isinstance(vector_stride, int):
-        util.error_msg(
-            f'`vector_stride` must be an integer, '
-            f'got {type(vector_stride).__name__}',
-            17
-        )
-    vector_stride = int(vector_stride)
-    if vector_stride < 1:
-        util.error_msg(
-            f'`vector_stride = {vector_stride} ` must be greater than 1.',
-            18
-        )
-
-
-    # inlier vector stride (offset count for vectors in all inliers plot)
-    inlier_vector_stride = config['inlier_vector_stride']
-    if not isinstance(inlier_vector_stride, int):
-        util.error_msg(
-            f'`inlier_vector_stride` must be an integer, '
-            f'got {type(inlier_vector_stride).__name__}',
-            19
-        )
-    vector_stride = int(vector_stride)
-    if vector_stride < 1:
-        util.error_msg(
-            f'`vector_stride = {vector_stride} ` must be greater than 1.',
-            20
-        )
-        
-    # quiver scale (relational size of arrows in plot)
-    quiver_scale_small_area = config['quiver_scale_small_area']
-    if not isinstance(quiver_scale_small_area, float):
-        util.error_msg(
-            f'`quiver_scale_small_area` must be a float, '
-            f'got {type(quiver_scale_small_area).__name__}',
-            21
-        )
-        
-    quiver_scale_large_area = config['quiver_scale_large_area']
-    if not isinstance(quiver_scale_large_area, float):
-        util.error_msg(
-            f'`quiver_scale_large_area` must be a float, '
-            f'got {type(quiver_scale_large_area).__name__}',
-            22
-        )
-        
-
-
-    # precision to round significant digits
-    precision = config['precision']
-    if not isinstance(precision, int):
-        util.error_msg(
-            f'`precision` must be an integer, got {type(precision).__name__}',
-            23
-        )
-    precision = int(precision)
-    
-    
-    # show arguments in console and processing messages
-    verbose = config['verbose']
-    if not isinstance(verbose, bool):
-        util.error_msg(
-            f'`verbose` must be boolean, got {type(verbose).__name__}',
-            24
-        )
-    verbose = bool(verbose)       
-    
-    
-    # initialize dictionary
-    config = {
-        'sar_drift_directory': sar_drift_directory,
-        'sar_drift_file': sar_drift_file,
-        'sar_geotiff_file': sar_geotiff_file,
-        'netcdf_cdl_file': netcdf_cdl_file,
-        'netcdf_template_file': netcdf_template_file,
-        'qml_file': qml_file,
-        'output_dir': output_dir,
-        'formatted_data_dir': formatted_data_dir,
-        'gpkg_dir': gpkg_dir,
-        'nc_dir':nc_dir,
-        'png_dir': png_dir,
-        "clear_output_dir": clear_output_dir,
-        'batch_process': batch_process,
-        'delimiter': delimiter,
-        'skip_rows_before_header': skip_rows_before_header,
-        'detect_outliers': detect_outliers,
-        "ignore_vector_threshold": ignore_vector_threshold,
-        'use_geotiff': use_geotiff,
-        'create_region_plot': create_region_plot,
-        'vector_stride': vector_stride,
-        'inlier_vector_stride': inlier_vector_stride,
-        'quiver_scale_small_area': quiver_scale_small_area,
-        'quiver_scale_large_area': quiver_scale_large_area,
-        'precision': precision,
-        'verbose': verbose
+        "sar_drift_directory", "sar_drift_filename", "sar_geotiff_filename",
+        "netcdf_cdl_file", "netcdf_template_file", "qml_file", "output_dir",
+        "clear_output_dir", "batch_process", "delimiter",
+        "skip_rows_before_header", "ignore_vector_threshold", "z_score_level",
+        "chi_square_level", "neighbor_radius_km", "min_neighbors",
+        "md_min_neighbors", "outlier_passes", "use_geotiff",
+        "create_region_plot", "vector_stride", "inlier_vector_stride",
+        "quiver_scale_small_area", "quiver_scale_large_area", "precision",
+        "verbose", "version"
     }
-            
-    # log settings
-    param_string = (
-        "CONF PARAMS:\n"
-        "  sar drift directory:     "
-        f"{config['sar_drift_directory']}\n"
-        "  sar drift file:          "
-        f"{config['sar_drift_file']}\n"
-        "  sar geotiff file:        "
-        f"{config['sar_geotiff_file']}\n"
-        "  NetCDF CDL file:         "
-        f"{config['netcdf_cdl_file']}\n"
-        "  NetCDF template file:    "
-        f"{config['netcdf_template_file']}\n"
-        "  qml file:                "
-        f"{config['qml_file']}\n" 
-        "  output directory:        "
-        f"{config['output_dir']}\n"
-        "  batch process:           "
-        f"{config['batch_process']}\n"
-        "  clear output dir:        "
-        f"{config['clear_output_dir']}\n"
-        "  delimiter:               "
-        f"`{config['delimiter']}`\n"
-        "  skip rows before header: "
-        f"{config['skip_rows_before_header']}\n"
-        "  use geotiff image:       "
-        f"{config['use_geotiff']}\n"
-        "  detect outliers:         "
-        f"{config['detect_outliers']}\n"
-        "  ignore vector threshold: "
-        f"{config['ignore_vector_threshold']}\n"        
-        "  create region plot:      "
-        f"{config['create_region_plot']}\n"
-        "  vector stride:           "
-        f"{config['vector_stride']}\n"
-        "  inlier vector stride:    "
-        f"{config['inlier_vector_stride']}\n"        
-        "  quiver scale small area: "
-        f"{config['quiver_scale_small_area']}\n"
-        "  quiver scale large area: "
-        f"{config['quiver_scale_large_area']}\n"        
-        "  precision:               "
-        f"{config['precision']}\n"
-    )
-    if config['verbose'] is True:
-        print(param_string)
+    config_keys = set(config.keys())
+    missing = required_json_keys - config_keys
+    extra   = config_keys - required_json_keys
+    if missing:
+        util.error_msg(
+            f"Missing required keys in {config_file}: {', '.join(missing)}"
+        )
+    if extra:
+        util.error_msg(
+            f"Unexpected keys in {config_file}: {', '.join(extra)}"
+        )
+
+
+
+    # define schema
+    # (key, expected_type, min_value_or_None, allow_zero)    
+    schema = [
+        ("batch_process",             bool,  None, None),
+        ("clear_output_dir",          bool,  None, None),
+        ("use_geotiff",               bool,  None, None),
+        ("create_region_plot",        bool,  None, None),
+        ("verbose",                   bool,  None, None),
+        ("skip_rows_before_header",   int,   0,    True),
+        ("ignore_vector_threshold",   int,   1,    False),
+        ("min_neighbors",             int,   0,    True),
+        ("md_min_neighbors",          int,   0,    True),
+        ("outlier_passes",            int,   0,    True),
+        ("vector_stride",             int,   1,    False),
+        ("inlier_vector_stride",      int,   1,    False),
+        ("precision",                 int,   0,    True),
+        ("z_score_level",             float, 0.0,  False),
+        ("chi_square_level",          float, 0.0,  False),
+        ("neighbor_radius_km",        float, 0.0,  False),
+        ("quiver_scale_small_area",   float, None, None),
+        ("quiver_scale_large_area",   float, None, None),
+    ]
+
+    for key, expected_type, min_val, allow_zero in schema:
+        val = config[key]
+        if not isinstance(val, expected_type):
+            util.error_msg(
+                f'`{key}` must be {expected_type.__name__}, '
+                f'got {type(val).__name__}'
+            )
+        if min_val is not None and val < min_val:
+            util.error_msg(f'`{key} = {val}` must be >= {min_val}')
+        config[key] = expected_type(val)
+
+
+    # Version validation
+    if config['version'] not in ['00', '01', '02', '03']:
+        util.error_msg('`version` must be one of: `00`, `01`, `02`, `03`')
+
+
+    # Path resolution and existence checks
+    batch_process = config['batch_process']
+    path_checks = [
+        ('sar_drift_directory', 'sar_drift_directory', batch_process),
+        ('sar_drift_filename', 'sar_drift_file', not batch_process),
+        ('sar_geotiff_filename', 'sar_geotiff_file', config['use_geotiff']),
+        ('netcdf_cdl_file', 'netcdf_cdl_file', True),
+        ('netcdf_template_file', 'netcdf_template_file', True),
+        ('qml_file', 'qml_file', True)
+    ]
+    resolved_paths = {}
+    for json_key, config_key, must_exist in path_checks:
+        path = os.path.normpath(config[json_key])
+        if must_exist and not os.path.exists(path):
+            util.error_msg(f"Cannot find `{config_key}`: `{path}`")
+        resolved_paths[config_key] = path
+
     
+    # Output directory setup
+    output_dir = os.path.normpath(config['output_dir'])
+    if os.path.exists(output_dir) and config['clear_output_dir']:
+        shutil.rmtree(output_dir)
+
+    subdirs = ['formatted_data', 'gpkg', 'nc', 'png']
+    subdir_paths = {}
+    for name in subdirs:
+        path = os.path.join(output_dir, name)
+        os.makedirs(path, exist_ok=True)
+        subdir_paths[f'{name}_dir'] = path
+
     
-    return config        
+    # Delimiter decode (\t etc.)
+        delimiter = config['delimiter'].encode().decode('unicode_escape')
+
+    
+    # Build final config
+    config = {
+        **resolved_paths,
+        'output_dir':              output_dir,
+        **subdir_paths,
+        'clear_output_dir':        config['clear_output_dir'],
+        'batch_process':           config['batch_process'],
+        'delimiter':               delimiter,
+        'skip_rows_before_header': config['skip_rows_before_header'],
+        'ignore_vector_threshold': config['ignore_vector_threshold'],
+        'z_score_level':           config['z_score_level'],
+        'chi_square_level':        config['chi_square_level'],
+        'neighbor_radius_km':      config['neighbor_radius_km'],
+        'min_neighbors':           config['min_neighbors'],
+        'md_min_neighbors':        config['md_min_neighbors'],
+        'outlier_passes':          config['outlier_passes'],
+        'use_geotiff':             config['use_geotiff'],
+        'create_region_plot':      config['create_region_plot'],
+        'vector_stride':           config['vector_stride'],
+        'inlier_vector_stride':    config['inlier_vector_stride'],
+        'quiver_scale_small_area': config['quiver_scale_small_area'],
+        'quiver_scale_large_area': config['quiver_scale_large_area'],
+        'precision':               config['precision'],
+        'verbose':                 config['verbose'],
+        'version':                 config['version'],
+    }
+
+    
+    # echo
+    if config['verbose']:
+        labels = {
+            'sar_drift_directory':    'sar drift directory',
+            'sar_drift_file':         'sar drift file',
+            'sar_geotiff_file':       'sar geotiff file',
+            'netcdf_cdl_file':        'NetCDF CDL file',
+            'netcdf_template_file':   'NetCDF template file',
+            'qml_file':               'qml file',
+            'output_dir':             'output directory',
+            'batch_process':          'batch process',
+            'clear_output_dir':       'clear output dir',
+            'delimiter':              'delimiter',
+            'skip_rows_before_header':'skip rows before header',
+            'ignore_vector_threshold':'ignore vector threshold',
+            'z_score_level':          'z-score level',
+            'chi_square_level':       'chi-square level',
+            'neighbor_radius_km':     'neighbor radius (km)',
+            'min_neighbors':          'minimum neighbors',
+            'md_min_neighbors':       'MD minimum neighbors',
+            'outlier_passes':         'outlier passes',
+            'use_geotiff':            'use geotiff image',
+            'create_region_plot':     'create region plot',
+            'vector_stride':          'vector stride',
+            'inlier_vector_stride':   'inlier vector stride',
+            'quiver_scale_small_area':'quiver scale small area',
+            'quiver_scale_large_area':'quiver scale large area',
+            'precision':              'precision',
+            'version':                'version',
+        }
+        lines = ["CONF PARAMS:"]
+        for key, label in labels.items():
+            val = f"`{config[key]}`" if key == 'delimiter' else config[key]
+            lines.append(f"  {label:<25} {val}")
+        print('\n'.join(lines))
+
+    return config
 
 
 def main():
@@ -561,22 +400,31 @@ def main():
         else:
             # use original file name with counter after .txt_
             updated_files.append(gfilter_path)
+
         
-        # if df.shape[0] < config['ignore_vector_threshold']:
-        #     # ignore files with few observations
-        #     # print(f"skipping {os.path.basename(gfilter_path)} with {df.shape[0]} observations")
-        #     continue
+        if int(config['version']) > 1:
+            # get high-level content of data file
+            # Read SAR drift data file
+            df = util.read_sar_drift_data_file(
+                input_file=updated_files[-1], #file just appeneded
+                config=config
+            )
+            if df.shape[0] < config['ignore_vector_threshold']:
+                # ignore files with few observations
+                updated_files.pop()
+                continue
         
-        
-        
-        # skip 75km file if MaxCorr2 > MaxCorr1 for < 60% of the data
-        # if '_0075000m_' in gfilter_path:
-        #     pct_correct = (df['Maxcorr2'] > df['Maxcorr1']).mean() * 100
-        #     if pct_correct < 60:
-        #         print(
-        #             f"Reject file: {os.path.basename(gfilter_path)}\n"
-        #             f"pct_correct={pct_correct:.1f}% (<60%)"
-        #         )
+            
+            # skip 75km file if MaxCorr2 > MaxCorr1 for < 60% of the data
+            if '_0075000m_' in gfilter_path:
+                pct_correct = (df['Maxcorr2'] > df['Maxcorr1']).mean() * 100
+                if pct_correct < 60:
+                    print(
+                        "Reject file: "
+                        f"{os.path.basename(updated_files[-1])}\n"
+                        f"pct_correct={pct_correct:.1f}% (<60%)"
+                    )
+                    updated_files.pop()
     
     
     scene_i_j = {}
@@ -601,8 +449,6 @@ def main():
         )
         df_sar.to_csv(output_path, index=False)
         
-        if df_sar.shape[0] < config['ignore_vector_threshold']:
-            continue
         
     
         """
@@ -631,24 +477,16 @@ def main():
             df=df_sar,
             config=config,
             base_name=data_file_basename,
-            radius_km=25,
-            min_neighbors=8,
-            md_neighbors=24,
-            std_dev_lvl=2.75,
-            chi_sq=0.975,
-            iter_count = 3 # number of outlier detection passes
+            radius_km=config['neighbor_radius_km'],
+            min_neighbors=config['min_neighbors'],
+            md_neighbors=config['md_min_neighbors'],
+            z_score_level=config['z_score_level'],
+            chi_square_level=config['chi_square_level'],
+            passes=config['outlier_passes'] 
         )
 
         
-        # Create shape file package for QGIS    
-        util.create_shape_package(
-            df=df_sar,
-            base_name=data_file_basename,
-            config=config
-        )
-        
-        
-        # Create NetCDF file for QGIS
+        # Create NetCDF always
         util.create_netcdf(
             df=df_sar,
             base_name=data_file_basename,
@@ -657,28 +495,21 @@ def main():
             scene_i_j=scene_i_j
         )
 
-        
-        # create individual PNG file
-        util.create_png(
-            config=config,
-            base_name=data_file_basename,
-            outlier_type=None
-        )
-        
-        # create additional PNG file that shows inliers and outliers
-        # in different colors
-        if config['detect_outliers']:
-            # create PNG file for each outlier type
-            util.create_png(
-                config=config,
+
+        if int(config['version']) > 1 or config['version'] == '00':
+            # Create shape file package for QGIS    
+            util.create_shape_package(
+                df=df_sar,
                 base_name=data_file_basename,
-                outlier_type='sd'
+                config=config
             )
-            
+
+
+        if int(config['version']) > 2 or config['version'] == '00':
+            # create individual PNG file from NetCDF
             util.create_png(
                 config=config,
-                base_name=data_file_basename,
-                outlier_type='md'
+                base_name=data_file_basename
             )
 
     
@@ -730,7 +561,7 @@ def main():
     daily_nc_path = os.path.join(
         config["output_dir"],
         f"SIVelocity_SAR_{daily_start_date_str}_{daily_end_date_str}"
-        "_12km_NH_v00.nc"
+        f"_scenes_12km_NH_v{config['version']}.nc"
     )
     util.combine_daily_netcdf_files(
         config=config,
@@ -746,7 +577,7 @@ def main():
     daily_nc_path = os.path.join(
         config["output_dir"],
         f"SIVelocity_SAR_{daily_start_date_str}_{daily_end_date_str}"
-        "_12km_NH_v00_one_layer.nc"
+        f"_daily_12km_NH_v{config['version']}.nc"
     )
     util.combine_daily_netcdf_files(
         config=config,
@@ -757,6 +588,7 @@ def main():
         daily_nc_path=daily_nc_path,
         multi_layered=False
     )
+    
     
 if __name__ == "__main__":
     main()
