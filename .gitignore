@@ -15,15 +15,21 @@
 __pycache__
 
 # Output files
-output
-overlays
-npz
 **/*.gpkg
 **/*.nc
 **/*.png
 **/*.npz
+**/*.log
 
 # Ignored folders
+v00
+v01
+v02
+v03
 input
 misc
+npz
+overlays
 sample_day
+sample_year
+

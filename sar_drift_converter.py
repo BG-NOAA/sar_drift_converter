@@ -40,6 +40,31 @@ Copyright notice
 """
 
 
+def setup_logger(output_dir):
+    import os
+    import logging
+    from datetime import datetime
+    
+    log_path = os.path.join(
+        output_dir,
+        f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.log"
+    )
+    logger = logging.getLogger('sar_drift_converter')
+    logger.setLevel(logging.INFO)
+
+    # file handler
+    fh = logging.FileHandler(log_path)
+    fh.setLevel(logging.INFO)
+
+
+    formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s')
+    fh.setFormatter(formatter)
+
+    logger.addHandler(fh)
+
+    return logger, log_path
+
+
 def read_json_config():
     """
     Parse and validate configuration for SAR Drift Output Generator.
@@ -65,8 +90,6 @@ def read_json_config():
         - "qml_file"               (str):   Path to QML file that applies a
                                             style to GeoPackages when opened
                                             in QGIS.
-        - "output_dir"             (str):   Output directory where generated
-                                            files will be stored.
         - "clear_output_dir"       (bool):  Remove output directory and all
                                             contents from previous runs.
         - "batch_process"          (bool):  If True, process all files in
@@ -123,6 +146,7 @@ def read_json_config():
     Returns:
         dict: Validated configuration dictionary with normalized paths and
               resolved output subdirectories:
+              - 'filtered_data_dir':  <output_dir>/filtered_data
               - 'formatted_data_dir': <output_dir>/formatted_data
               - 'gpkg_dir':           <output_dir>/gpkg
               - 'nc_dir':             <output_dir>/nc
@@ -165,8 +189,8 @@ def read_json_config():
 
     # Key validation
     required_json_keys = {
-        "sar_drift_directory", "sar_drift_filename", "sar_geotiff_filename",
-        "netcdf_cdl_file", "netcdf_template_file", "qml_file", "output_dir",
+        "sar_drift_directory", "sar_drift_filename",  "sar_geotiff_filename",
+        "netcdf_cdl_file", "netcdf_template_file", "qml_file",
         "clear_output_dir", "batch_process", "delimiter",
         "skip_rows_before_header", "ignore_vector_threshold", "z_score_level",
         "chi_square_level", "neighbor_radius_km", "min_neighbors",
@@ -248,26 +272,33 @@ def read_json_config():
 
     
     # Output directory setup
-    output_dir = os.path.normpath(config['output_dir'])
-    if os.path.exists(output_dir) and config['clear_output_dir']:
-        shutil.rmtree(output_dir)
+    config['output_dir'] = os.path.normpath(f"v{config['version']}")
+    if os.path.exists(config['output_dir']) and config['clear_output_dir']:
+        shutil.rmtree(config['output_dir'])
+        
 
-    subdirs = ['formatted_data', 'gpkg', 'nc', 'png']
+    if config['version'] in ['00', '03']:
+        subdirs = ['filtered_data', 'formatted_data', 'gpkg', 'nc', 'png']
+    elif config['version'] == '01':
+        subdirs = ['filtered_data', 'formatted_data', 'nc']
+    elif config['version'] == '02':
+        subdirs = ['filtered_data', 'formatted_data', 'gpkg', 'nc']
+        
     subdir_paths = {}
     for name in subdirs:
-        path = os.path.join(output_dir, name)
+        path = os.path.join(config['output_dir'], name)
         os.makedirs(path, exist_ok=True)
         subdir_paths[f'{name}_dir'] = path
 
     
     # Delimiter decode (\t etc.)
-        delimiter = config['delimiter'].encode().decode('unicode_escape')
+    delimiter = config['delimiter'].encode().decode('unicode_escape')
 
     
     # Build final config
     config = {
         **resolved_paths,
-        'output_dir':              output_dir,
+        'output_dir':              config['output_dir'],
         **subdir_paths,
         'clear_output_dir':        config['clear_output_dir'],
         'batch_process':           config['batch_process'],
@@ -324,8 +355,7 @@ def read_json_config():
         }
         lines = ["CONF PARAMS:"]
         for key, label in labels.items():
-            val = f"`{config[key]}`" if key == 'delimiter' else config[key]
-            lines.append(f"  {label:<25} {val}")
+            lines.append(f"  {label:<25} {config[key]}")
         print('\n'.join(lines))
 
     return config
@@ -358,6 +388,7 @@ def main():
     
     # parse user arguments
     config = read_json_config()
+
     
     # load NSIDC polar stereographic EPSG:3411 NetCDF template
     with xr.open_dataset(config['netcdf_template_file']) as ds:
@@ -374,220 +405,380 @@ def main():
     else:
         files = [config['sar_drift_file']]
         
-    
-    updated_files = []
-    for gfilter_path in files:
         
+    # initialize logger
+    logger, log_path = setup_logger(config['output_dir'])
+    logger.info(f"Run started | config version={config['version']}")
+    logger.info(f"Input directory: {config['sar_drift_directory']}")
+    logger.info(f"Found {len(files)} candidate files")
+        
+    
+    # read all files into one DataFrame
+    all_dfs = []
+    file_idx = 0
+    for gfilter_path in tqdm(files, "Reading gfilter files..."):
+        if '_0075000m_' in gfilter_path:
+            continue  # handled via 50km entry
+            
+        file_idx += 1
+        # if file_idx == 10:
+        #     break
+    
         basename, ext = os.path.splitext(gfilter_path)
         if '_' in ext:
             ext = ext.split('_')[0]
         normalized_gfilter_path = basename + ext
+    
+        gfilter_path_75km = normalized_gfilter_path.replace(
+            '_0050000m_', '_0075000m_'
+        )
+        # only consider 75km if path actually changed and file exists
+        use_75km = (
+            gfilter_path_75km != normalized_gfilter_path
+            and os.path.exists(gfilter_path_75km)
+        )
+        read_path = gfilter_path_75km if use_75km else gfilter_path
+    
+        df = util.read_sar_drift_data_file(
+            input_file=read_path,
+            config=config,
+            skip_rows=config['skip_rows_before_header']
+        )
+        df['_use_75km'] = use_75km
+        df['_source_file'] = os.path.basename(read_path)
+        logger.info(
+            f"Read: {os.path.basename(read_path)} | "
+            f"use_75km={use_75km} | rows={df.shape[0]}"
+        )
+        all_dfs.append(df)
+    
+
+    df_all = pd.concat(all_dfs, ignore_index=True)
+    # convert date columns to datetime once
+    df_all['Date1'] = pd.to_datetime(
+        df_all['Date1'],
+        format='%Y-%m-%d %H:%M:%S'
+    )
+    df_all['Date2'] = pd.to_datetime(
+        df_all['Date2'],
+        format='%Y-%m-%d %H:%M:%S'
+    )
+    logger.info(f"Combined: {df_all.shape[0]} rows from {len(all_dfs)} files")
+    
+    
+    # apply row-level filters per File1/File2 scene group
+    if int(config['version']) > 1:
+        accepted = []
+        for (file1, file2), df_scene in df_all.groupby(['File1', 'File2']):
+            scene_id = f"{file1}_{file2}"
+            use_75km = df_scene['_use_75km'].iloc[0]
+            initial_row_size = df_scene.shape[0]
+    
+            # remove invalid bearings and speeds
+            df_scene = df_scene[
+                (df_scene['Bear_deg'] != 0) & (df_scene['Speed_kmdy'] > 0)
+            ]
+            logger.info(
+                f"{scene_id} | after bearing/speed validity: {len(df_scene)} "
+                f"(dropped {initial_row_size - df_scene.shape[0]})"
+            )
+    
+            # remove invalid speeds
+            speed_thresh = 35.0 if use_75km else 25.0
+            row_count_before = df_scene.shape[0]
+            df_scene = df_scene[df_scene['Speed_kmdy'] < speed_thresh]
+            logger.info(
+                f"{scene_id} | after speed filter "
+                f"(Speed_kmdy >= {speed_thresh}): {df_scene.shape[0]} "
+                f"(dropped {row_count_before - df_scene.shape[0]})"
+            )
+    
+            # reject scene if < 60% have MaxCorr2 > MaxCorr1
+            pct_correct = (
+                df_scene['Maxcorr2'] > df_scene['Maxcorr1']
+            ).mean() * 100
+            if pct_correct < 60:
+                logger.warning(
+                    f"Reject scene: {scene_id} | "
+                    f"pct_correct={pct_correct:.1f}% (<60%)"
+                )
+                continue
+    
+            # remove rows where MaxCorr2 <= MaxCorr1
+            row_count_before = df_scene.shape[0]
+            df_scene = df_scene[df_scene['Maxcorr2'] > df_scene['Maxcorr1']]
+            logger.info(
+                f"{scene_id} | after Maxcorr2 > Maxcorr1: {df_scene.shape[0]} "
+                f"(dropped {row_count_before - df_scene.shape[0]})"
+            )
+    
+            # reject scene if too few observations
+            if len(df_scene) < config['ignore_vector_threshold']:
+                logger.warning(
+                    f"Reject scene: {scene_id} | "
+                    f"only {df_scene.shape[0]} observations "
+                    f"(threshold={config['ignore_vector_threshold']})"
+                )
+                continue
+    
+            logger.info(
+                f"Accepted scene: {scene_id} | final rows={df_scene.shape[0]}"
+            )
+            accepted.append(df_scene)
+    
+    
+        df_all = pd.concat(accepted, ignore_index=True)
+        df_all['Date1'] = pd.to_datetime(
+            df_all['Date1'],
+            format='%Y-%m-%d %H:%M:%S'
+        )
+        df_all['Date2'] = pd.to_datetime(
+            df_all['Date2'],
+            format='%Y-%m-%d %H:%M:%S'
+        )
+        logger.info(
+            f"After filtering: {df_all.shape[0]} rows across "
+            f"{len(accepted)} scenes"
+        )
+    
+    # save filtered combined CSV
+    if config['version'] == "00":
+        print('Saving combined DataFrame...')
+        df_all.to_csv(
+            os.path.join(
+                config['filtered_data_dir'],'filtered_combined.csv'
+            ),
+            index=False
+        )
+    
+    
+    # create date range groups for daily/scene output
+    print('Creating groups based on start day..')
+    df_all['date_range'] = (
+        pd.to_datetime(df_all['Date1']).dt.strftime('%Y%m%d')
+    )
+    
+    # log rows that span more than one calendar day
+    multi_day = (
+        pd.to_datetime(df_all['Date2']).dt.strftime('%Y%m%d') !=
+        df_all['date_range']
+    )
+    if multi_day.any():
+        multi_count = multi_day.sum()
+        logger.warning(
+            f"{multi_count} observations span more than one calendar day"
+        )
+        # log per scene
+        for (file1, file2), grp in df_all[multi_day].groupby(
+                ['File1', 'File2']
+            ):
+            max_span = grp['Date2'].max()- grp['Date1'].min()
+            if max_span > pd.Timedelta(days=1):
+                logger.warning(
+                    f"Multi-day scene: {file1}_{file2} | "
+                    f"rows={grp.shape[0]} | max_span={max_span}"
+                )
+    
+   
+    # create output: group by day, then by scene within each day
+    for day, df_day in tqdm(
+            df_all.groupby('date_range'), "Processing days..."
+        ):
+        scene_i_j = {}
+        nc_files = []
+        gpkg_files = []
+        daily_start_date = pd.to_datetime(df_day['Date1'].min())
+        daily_end_date = pd.to_datetime(df_day['Date2'].max())
+    
+    
+        # create output for each scene
+        for (file1, file2), df_scene in df_day.groupby(['File1', 'File2']):
+            pair_basename = f'{file1}_{file2}'
+            
+            logger.info(
+                f"Scene {pair_basename} | "
+                f"rows={len(df_scene)} | "
+                f"date_range={day}"
+            )
+            
+            output_path = os.path.join(
+                config['formatted_data_dir'],
+                f"formatted_{pair_basename}.csv"
+            )
+            df_scene.to_csv(output_path, index=False)
+            
+            nc_files.append(
+                os.path.join(config["nc_dir"], f'{pair_basename}.nc')
+            )
+            
+            gpkg_files.append(
+                os.path.join(config["gpkg_dir"], f'{pair_basename}.gpkg')
+            )
+        
+            """
+            Per OSI SAF, the dates in file names that have motion data
+            the dates in the file typically is the end date of the observation
+            period https://osisaf-hl.met.no/sites/osisaf-hl/files/user_manuals/
+            osisaf_pum_sea-ice-drift-lr_v1p9.pdf
+            (Page 25)
+            
+            Version `0` indicates first process wihtout cleaned data
+            
+            For multiple pairs in one period, have included start/end date/time
+            """
+            start_min = pd.to_datetime(df_scene['Date1'].min())
+            if daily_start_date is None or start_min < daily_start_date:
+                daily_start_date = start_min
+    
+            end_max = pd.to_datetime(df_scene['Date2'].max())
+            if daily_end_date is None or end_max > daily_end_date:
+                daily_end_date = end_max
+        
+            # continue # get right to concatenating
+    
+            # Detect outliers (will return all 00 if not active)
+            df_scene = util.outlier_search(
+                df=df_scene,
+                config=config,
+                base_name=pair_basename,
+                radius_km=config['neighbor_radius_km'],
+                min_neighbors=config['min_neighbors'],
+                md_neighbors=config['md_min_neighbors'],
+                z_score_level=config['z_score_level'],
+                chi_square_level=config['chi_square_level'],
+                passes=config['outlier_passes'] 
+            )
+    
+            
+            # Create NetCDF always
+            util.create_netcdf(
+                df=df_scene,
+                base_name=pair_basename,
+                config=config,
+                template_ds=template_ds,
+                scene_i_j=scene_i_j
+            )
+    
+    
+            if int(config['version']) > 1 or config['version'] == '00':
+                # Create shape file package for QGIS    
+                util.create_shape_package(
+                    df=df_scene,
+                    base_name=pair_basename,
+                    config=config
+                )
+    
+    
+            if int(config['version']) > 2 or config['version'] == '00':
+                # create individual PNG file from NetCDF
+                util.create_png(
+                    config=config,
+                    base_name=pair_basename
+                )
+    
+        
+            # Overlay SAR drift data vectors on geotiff image
+            # util.overlay_sar_drift_on_geotiff(
+            #     config=config,
+            #     gdf_lines=gdf_lines,
+            #     df_sar=df_sar,
+            #     base_name=data_file_basename
+            # )
+        
+
+        """
+        read through each scene_i_j dictionary items
+        ((i, j) coordinates in each scene)
+        Get the counts of each (i, j) coordinate found in the entire set of scenes
+        per time period
+        Show the count of each (i, j) coordinate and the scenes where they exist
+        """
+        
+        # df = pd.DataFrame(columns=['scene', 'item_count', 'items'])
+        # for idx, (scene, coords) in enumerate(scene_i_j.items()):
+        #     df.loc[idx] = [scene, len(coords), coords]
+        # df = df.sort_values('item_count', ascending=True)
+        # df.to_csv(os.path.join(config["output_dir"], 'scenes.csv'))
+    
+        
+        # from collections import Counter, defaultdict
+        # cell_counts = Counter()
+        # cell_scenes = defaultdict(list)
+        
+        # for scene, items in zip(df['scene'], df['items']):
+        #     uniq_cells = set(items)
+        #     cell_counts.update(uniq_cells)
+        #     for cell in uniq_cells:
+        #         cell_scenes[cell].append(scene)
+        # df_report = pd.DataFrame(columns=['Cell', 'Count', 'Scenes'])
+        # for idx, (i_j, count) in enumerate(cell_counts.most_common(50)):
+        #     df_report.loc[idx] = [i_j, count, cell_scenes[i_j]]
+        # df_report.to_csv(
+        #     os.path.join(config["output_dir"], 'scene_report.csv'),
+        #     index=False
+        # )
+    
             
         
-        """
-        Use 0075000m file instead of 0050000m.
-        Check as normalized .txt file name since 007500m doesn't have
-        _counter after .txt extension
-        """
-        gfilter_path_75km = normalized_gfilter_path.replace(
-            '_0050000m_',
-            '_0075000m_',
+        # combine all created daily files into one
+        daily_start_date_str = daily_start_date.strftime("%Y%m%d")
+        daily_end_date_str = daily_end_date.strftime("%Y%m%d")
+        
+        # multiple-layered netcdf 
+        daily_nc_path = os.path.join(
+            config["output_dir"],
+            f"SIVelocity_SAR_{daily_start_date_str}_{daily_end_date_str}"
+            f"_scenes_12km_NH_v{config['version']}.nc"
+        )
+        util.combine_daily_netcdf_files(
+            config=config,
+            nc_files=nc_files,
+            template_ds=template_ds,
+            daily_start_date=daily_start_date,
+            daily_end_date=daily_end_date,
+            daily_nc_path=daily_nc_path
         )
         
+        # one layer netcdf
+        daily_nc_path = os.path.join(
+            config["output_dir"],
+            f"SIVelocity_SAR_{daily_start_date_str}_{daily_end_date_str}"
+            f"_daily_12km_NH_v{config['version']}.nc"
+        )
+        util.combine_daily_netcdf_files(
+            config=config,
+            nc_files=nc_files,
+            template_ds=template_ds,
+            daily_start_date=daily_start_date,
+            daily_end_date=daily_end_date,
+            daily_nc_path=daily_nc_path,
+            multi_layered=False
+        )
         
-        if os.path.exists(gfilter_path_75km):
-            updated_files.append(gfilter_path_75km)
-        else:
-            # use original file name with counter after .txt_
-            updated_files.append(gfilter_path)
-
-        
-        if int(config['version']) > 1:
-            # get high-level content of data file
-            # Read SAR drift data file
-            df = util.read_sar_drift_data_file(
-                input_file=updated_files[-1], #file just appeneded
+        # GeoPackage
+        if int(config['version']) > 1 or config['version'] == '00':
+            daily_gpkg_path = os.path.join(
+                config["output_dir"],
+                f"SIVelocity_SAR_{daily_start_date_str}_{daily_end_date_str}"
+                f"_daily_12km_NH_v{config['version']}.gpkg"
+            )
+            util.combine_daily_geopackage(
+                gpkg_files=gpkg_files,
+                daily_gpkg_path=daily_gpkg_path,
                 config=config
             )
-            if df.shape[0] < config['ignore_vector_threshold']:
-                # ignore files with few observations
-                updated_files.pop()
-                continue
-        
-            
-            # skip 75km file if MaxCorr2 > MaxCorr1 for < 60% of the data
-            if '_0075000m_' in gfilter_path:
-                pct_correct = (df['Maxcorr2'] > df['Maxcorr1']).mean() * 100
-                if pct_correct < 60:
-                    print(
-                        "Reject file: "
-                        f"{os.path.basename(updated_files[-1])}\n"
-                        f"pct_correct={pct_correct:.1f}% (<60%)"
-                    )
-                    updated_files.pop()
-    
-    
-    scene_i_j = {}
-    daily_start_date, daily_end_date = None, None
-    for data_file in tqdm(updated_files, desc='Processing data files...'):
 
-        # set base name for output files
-        data_file_basename = os.path.splitext(
-            os.path.basename(data_file)
-        )[0]
-    
-           
-        # Read SAR drift data file
-        df_sar = util.read_sar_drift_data_file(
-            input_file=data_file,
-            config=config
-        )
-    
+        # save formatted CSV per day
         output_path = os.path.join(
             config['formatted_data_dir'],
-            f"formatted_{data_file_basename}.csv"
+            f"{daily_start_date_str}_{daily_end_date_str}.csv"
         )
-        df_sar.to_csv(output_path, index=False)
+        df_day.to_csv(output_path, index=False)
         
-        
-    
-        """
-        Per OSI SAF, the dates in file names that have motion data
-        the dates in the file typically is the end date of the observation
-        period https://osisaf-hl.met.no/sites/osisaf-hl/files/user_manuals/
-        osisaf_pum_sea-ice-drift-lr_v1p9.pdf
-        (Page 25)
-        
-        Version `0` indicates first process wihtout cleaned data
-        
-        For multiple pairs in one period, have included start/end date/time
-        """
-        start_min = pd.to_datetime(df_sar['Date1'].min())
-        if daily_start_date is None or start_min < daily_start_date:
-            daily_start_date = start_min
-
-        end_max = pd.to_datetime(df_sar['Date2'].max())
-        if daily_end_date is None or end_max > daily_end_date:
-            daily_end_date = end_max
-    
-        # continue # get right to concatenating
-
-        # Detect outliers (will return all 00 if not active)
-        df_sar = util.outlier_search(
-            df=df_sar,
-            config=config,
-            base_name=data_file_basename,
-            radius_km=config['neighbor_radius_km'],
-            min_neighbors=config['min_neighbors'],
-            md_neighbors=config['md_min_neighbors'],
-            z_score_level=config['z_score_level'],
-            chi_square_level=config['chi_square_level'],
-            passes=config['outlier_passes'] 
+        logger.info(
+            f"Day {daily_start_date_str}_{daily_end_date_str} complete | "
+            f"scenes={len(nc_files)}"
         )
-
-        
-        # Create NetCDF always
-        util.create_netcdf(
-            df=df_sar,
-            base_name=data_file_basename,
-            config=config,
-            template_ds=template_ds,
-            scene_i_j=scene_i_j
-        )
-
-
-        if int(config['version']) > 1 or config['version'] == '00':
-            # Create shape file package for QGIS    
-            util.create_shape_package(
-                df=df_sar,
-                base_name=data_file_basename,
-                config=config
-            )
-
-
-        if int(config['version']) > 2 or config['version'] == '00':
-            # create individual PNG file from NetCDF
-            util.create_png(
-                config=config,
-                base_name=data_file_basename
-            )
-
-    
-        # Overlay SAR drift data vectors on geotiff image
-        # util.overlay_sar_drift_on_geotiff(
-        #     config=config,
-        #     gdf_lines=gdf_lines,
-        #     df_sar=df_sar,
-        #     base_name=data_file_basename
-        # )
-        
-
-    """
-    read through each scene_i_j dictionary items
-    ((i, j) coordinates in each scene)
-    Get the counts of each (i, j) coordinate found in the entire set of scenes
-    per time period
-    Show the count of each (i, j) coordinate and the scenes where they exist
-    """
-    df = pd.DataFrame(columns=['scene', 'item_count', 'items'])
-    for idx, (scene, coords) in enumerate(scene_i_j.items()):
-        df.loc[idx] = [scene, len(coords), coords]
-    df = df.sort_values('item_count', ascending=True)
-    df.to_csv(r'output/scenes.csv')
-
-    
-    from collections import Counter, defaultdict
-    cell_counts = Counter()
-    cell_scenes = defaultdict(list)
-    
-    for scene, items in zip(df['scene'], df['items']):
-        uniq_cells = set(items)
-        cell_counts.update(uniq_cells)
-        for cell in uniq_cells:
-            cell_scenes[cell].append(scene)
-    df_report = pd.DataFrame(columns=['Cell', 'Count', 'Scenes'])
-    for idx, (i_j, count) in enumerate(cell_counts.most_common(50)):
-        df_report.loc[idx] = [i_j, count, cell_scenes[i_j]]
-    df_report.to_csv(r'output/scene_report.csv', index=False)
-
-        
-    
-    # combine all created netcdf files into one
-    nc_files = glob(os.path.join(config["output_dir"], 'nc', '*.nc'))
-    daily_start_date_str = daily_start_date.strftime("%Y%m%d")
-    daily_end_date_str = daily_end_date.strftime("%Y%m%d")
-    
-    # multiple layers
-    daily_nc_path = os.path.join(
-        config["output_dir"],
-        f"SIVelocity_SAR_{daily_start_date_str}_{daily_end_date_str}"
-        f"_scenes_12km_NH_v{config['version']}.nc"
-    )
-    util.combine_daily_netcdf_files(
-        config=config,
-        nc_files=nc_files,
-        template_ds=template_ds,
-        daily_start_date=daily_start_date,
-        daily_end_date=daily_end_date,
-        daily_nc_path=daily_nc_path
-    )
-    
-    
-    # one layer
-    daily_nc_path = os.path.join(
-        config["output_dir"],
-        f"SIVelocity_SAR_{daily_start_date_str}_{daily_end_date_str}"
-        f"_daily_12km_NH_v{config['version']}.nc"
-    )
-    util.combine_daily_netcdf_files(
-        config=config,
-        nc_files=nc_files,
-        template_ds=template_ds,
-        daily_start_date=daily_start_date,
-        daily_end_date=daily_end_date,
-        daily_nc_path=daily_nc_path,
-        multi_layered=False
-    )
     
     
 if __name__ == "__main__":

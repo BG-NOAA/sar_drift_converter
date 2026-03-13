@@ -31,30 +31,14 @@ variables:
 		direction_of_sea_ice_displacement:ioos_category = "SAR daily sea-ice drift" ;
 		direction_of_sea_ice_displacement:units = "degrees" ;
 		direction_of_sea_ice_displacement:grid_mapping = "spatial_ref" ;
-	float outlier_category(time, y, x) ;
+	short outlier_category(time, y, x) ;
 		outlier_category:long_name = "Outlier category code" ;
 		outlier_category:standard_name = "status_flag" ;
 		outlier_category:ioos_category = "quality_flag" ;
 		outlier_category:units = "1" ;
 		outlier_category:flag_values = 0s, 1s, 10s, 11s, 20s, 21s, 30s, 31s, 40s, 41s, 50s, 51s, 60s, 61s, 70s, 71s ;
 		outlier_category:comment = "Codes are displayed conceptually as 00, 01, 10, 11, 20, 21, 30, 31, 40, 41, 50, 51, 60, 61, 70 71." ;
-		outlier_category:flag_meanings =
-			"None (under neighbor threshold) \
-             None (equal to or above neighbor threshold) \
-             Distance (under neighbor threshold) \
-             Distance (equal to or above neighbor threshold) \
-             Bearing (under neighbor threshold) \
-             Bearing (equal to or above neighbor threshold) \
-             Mahalanobis distance (under neighbor threshold) \
-             Mahalanobis distance (equal to or above neighbor threshold) \
-             Distance and bearing (under neighbor threshold) \
-             Distance and bearing (equal to or above neighbor threshold) \
-             Mahalanobis distance and distance (under neighbor threshold) \
-             Mahalanobis distance and distance (equal to or above neighbor threshold) \
-             Mahalanobis distance and bearing (under neighbor threshold) \
-             Mahalanobis distance and bearing (equal to or above neighbor threshold) \
-             Mahalanobis distance, distance and bearing (under neighbor threshold) \
-             Mahalanobis distance, distance and bearing (equal to or above neighbor threshold)" ;
+		outlier_category:flag_meanings = "None_under None_above Distance_under Distance_above Bearing_under Bearing_above Mahalanobis_under Mahalanobis_above Distance_bearing_under Distance_bearing_above Mahalanobis_distance_under Mahalanobis_distance_above Mahalanobis_bearing_under Mahalanobis_bearing_above Mahalanobis_distance_bearing_under Mahalanobis_distance_bearing_above" ;
 		outlier_category:grid_mapping = "spatial_ref" ;		
 	double time(time) ;
 		time:standard_name = "time" ;

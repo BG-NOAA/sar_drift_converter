@@ -828,7 +828,7 @@ def _add_true_north(ax, xmin, xmax, ymin, ymax):
 # Data I/O
 #=========
 
-def read_sar_drift_data_file(input_file, config):
+def read_sar_drift_data_file(input_file, config, skip_rows=None):
     """
     Read and preprocess a SAR ice-drift text data file into a standardized
     DataFrame.
@@ -904,7 +904,7 @@ def read_sar_drift_data_file(input_file, config):
     # Read the SAR drift data file
     df = pd.read_csv(
         input_file, delimiter=config['delimiter'],
-        header=0, engine='c', skiprows=config['skip_rows_before_header']
+        header=0, engine='c', skiprows=skip_rows
     )
     df.columns = df.columns.str.strip()
     
@@ -912,10 +912,6 @@ def read_sar_drift_data_file(input_file, config):
     # Add the appropriate input file to a data frame
     # Julian seconds start from date 01-01-2000
     base_time = datetime(2000, 1, 1)
-
-    # Remove rows from Data Frame where orig_bearing = 0
-    # The values for these observations are incorrect
-    df = df[df['Bear_deg'] != 0]
 
     # Create new Date* columnc by converting Time_JS* columns to datetime
     df['Date1'] = df["Time1_JS"].apply(
@@ -951,15 +947,6 @@ def read_sar_drift_data_file(input_file, config):
     df['Speed_ms'] = (df['Speed_kmdy'] * 1000) / SECONDS_PER_DAY
     
     
-    # # convert to EPSG:3411 for shape file
-    # tf = _set_transformer()
-    # df['X1'], df['Y1'] = tf['4326_to_3411'].transform(
-    #     df['Lon1'].values, df['Lat1'].values
-    # )
-    # df['X2'], df['Y2'] = tf['4326_to_3411'].transform(
-    #     df['Lon2'].values, df['Lat2'].values
-    # )
-    
     # identify satellites for analysis
     df['Sat1'] = df["File1"].str.partition("_")[0]
     df['Sat2'] = df["File2"].str.partition("_")[0]
@@ -972,13 +959,14 @@ def outlier_search(df, config, base_name, radius_km,
                    min_neighbors, md_neighbors, z_score_level,
                    chi_square_level, passes):
     import numpy as np
+    import logging
     from scipy.spatial import cKDTree
     from sklearn.covariance import MinCovDet, LedoitWolf
     from scipy.stats import chi2
     
     if config['version'] == '01':
         # no outlier deteection required
-        df['outlier_category'] = '00'
+        df['outlier_category'] = '-9'
         return df
     
 
@@ -1317,103 +1305,35 @@ def outlier_search(df, config, base_name, radius_km,
             # update data frame
             out_df["outlier_category"] = (
                 base_cat.astype(str) + statistical_confidence_flag.astype(str)
-            )                    
+            )
+            
+            # log outlier counts per pass
+            total = len(out_df)
+            n_inliers = int((base_cat == 0).sum())
+            n_distance = int(mask_d.sum())
+            n_bearing = int(mask_b.sum())
+            n_md = int(mask_md.sum())
+            n_d_b = int(mask_d_b.sum())
+            n_md_d = int(mask_md_d.sum())
+            n_md_b = int(mask_md_b.sum())
+            n_md_d_b = int(mask_md_d_b.sum())
+            n_outliers = total - n_inliers
+            
+            logger = logging.getLogger('sar_drift')
+            logger.info(
+                f"Scene {base_name} | Pass {pass_idx + 1} | "
+                f"total={total} | inliers={n_inliers} | outliers={n_outliers} | "
+                f"distance={n_distance} | bearing={n_bearing} | "
+                f"mahalanobis={n_md} | dist+bear={n_d_b} | "
+                f"md+dist={n_md_d} | md+bear={n_md_b} | "
+                f"md+dist+bear={n_md_d_b}"
+            )
 
 
         ### TEST CASE 0782302767 ####
         
     
     return out_df
-
-
-def create_shape_package(df, base_name, config):
-    """
-    Create a GeoPackage containing drift line vectors for SAR drift data.
-
-    Builds LineString geometries from start to end coordinates and writes
-    them to a single layer within a GeoPackage. Longitudes in the 0-360
-    range are normalized to -180/180 before geometry creation.
-
-    Args:
-        df (pandas.DataFrame): Input DataFrame containing drift vectors.
-            Expected columns:
-                - 'Lon1', 'Lat1' (float): Starting longitude/latitude
-                                          (degrees).
-                - 'Lon2', 'Lat2' (float): Ending longitude/latitude (degrees).
-                Additional columns are preserved and written to the GeoPackage.
-        base_name (str): Base filename (without extension) used to name the
-            output GeoPackage file `<config['gpkg_dir']>/<base_name>.gpkg`.
-        config (dict): Configuration dictionary containing:
-                - 'gpkg_dir' (str): Output directory where the GeoPackage
-                                    is written.
-                - 'qml_file' (str): Path to the QML style file to embed.
-
-    Returns:
-        None
-
-    Notes:
-        - CRS is set to EPSG:4326 (geographic lat/lon).
-        - A helper column `geometry_type` is added with value 'line'.
-        - The QML style is embedded directly into the GeoPackage's
-          layer_styles table, so no QML file is needed by end users.
-    """
-
-    import os
-    import geopandas as gpd
-    from shapely.geometry import LineString
-    
-    # add X and Y for EPSG:3411 projection
-    df_local = df.copy()
-    
-    
-    tf = _set_transformer()
-    df_local['X1'], df_local['Y1'] = tf['4326_to_3413'].transform(
-        df_local['Lon1'].values,
-        df_local['Lat1'].values
-    )
-    
-    df_local['X2'], df_local['Y2'] = tf['4326_to_3413'].transform(
-        df_local['Lon2'].values,
-        df_local['Lat2'].values
-    )
-    
-    df_local['geometry_line'] = df_local.apply(
-        lambda row: LineString([
-            (row['X1'], row['Y1']),
-            (
-                row['X1'] + row['U_vel_ms'] * row['JS_Duration'],
-                row['Y1'] + row['V_vel_ms'] * row['JS_Duration']
-            )
-        ]),
-        axis=1
-    )
-    
-    # Create GeoDataFrame for lines (lines only)
-    gdf_line = gpd.GeoDataFrame(
-        df_local, geometry='geometry_line'
-    )
-    # Add a column to distinguish geometry type    
-    gdf_line['geometry_type'] = 'line'  
-    
-   
-    # Save as a single GeoPackage file (supports mixed geometries)
-    geopackage_file = f"{base_name}.gpkg"
-    output_file_path = os.path.join(
-        config['gpkg_dir'], f"{geopackage_file}"
-    )
-    
-    gdf_line = gdf_line.rename(
-        columns={'geometry_line': 'geometry'}
-    ).set_geometry('geometry')
-    gdf_line = gdf_line.set_crs(tf['crs_string_3411'])
-    gdf_line.to_file(output_file_path, layer='drift_lines', driver='GPKG')
-    
-
-    # embed .qml outlier layer style
-    _embed_qml_style(output_file_path, 'drift_lines', config['qml_file'])
-    
-    
-    # *0782308532*0782393500*
 
 
 def create_netcdf(df, base_name, config, template_ds, scene_i_j):
@@ -1484,6 +1404,7 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
     import pandas as pd
     from datetime import datetime
     import xarray as xr
+    import logging
    
     
     
@@ -1547,7 +1468,7 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
         )
         outlier_attrs = (
             meta_ds["outlier_category"].attrs.copy()
-        )        
+        )
         spatial_ref_attrs = meta_ds["spatial_ref"].attrs.copy()
         x_attrs = meta_ds["x"].attrs.copy()
         y_attrs = meta_ds["y"].attrs.copy()
@@ -1582,7 +1503,7 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
                 ),
                 "outlier_category": (
                     ("time", "y", "x"),
-                    np.full(grid_shape, "00", dtype='<U2'),
+                    np.full(grid_shape, -9, dtype=np.int16),
                     outlier_attrs,
                 ),                
                 "spatial_ref": (
@@ -1639,7 +1560,7 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
             ] = np.float32(row.Bear_deg)
             netcdf_grid["outlier_category"].values[
                 0, iy, ix
-            ] = row.outlier_category
+            ] = np.int16(row.outlier_category)
         
         
         # update scene_i_j
@@ -1668,30 +1589,138 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
             )
     
         
-        # Save to NetCDF with compression level 4
+        # Save to NetCDF with compression level 4     
         output_file_path = os.path.join(
             config['nc_dir'], f"{base_name}.nc"
         )
         netcdf_grid.to_netcdf(
             output_file_path, mode='w',
             encoding={
-                'sea_ice_speed': {'zlib': True, 'complevel': 4},
-                'sea_ice_x_displacement': {'zlib': True, 'complevel': 4},
-                'sea_ice_y_displacement': {'zlib': True, 'complevel': 4},
-                'direction_of_sea_ice_displacement': {
-                    'zlib': True, 'complevel': 4
+                'sea_ice_speed': {
+                    'zlib': True, 'complevel': 4, 'dtype': 'float32'
                 },
-                'outlier_category': {'dtype': 'S1'},
+                'sea_ice_x_displacement': {
+                    'zlib': True, 'complevel': 4, 'dtype': 'float32'
+                },
+                'sea_ice_y_displacement': {
+                    'zlib': True, 'complevel': 4, 'dtype': 'float32'
+                },
+                'direction_of_sea_ice_displacement': {
+                    'zlib': True, 'complevel': 4, 'dtype': 'float32'
+                },
+                'outlier_category': {
+                    'zlib': True, 'complevel': 4, 'dtype': 'int16',
+                    '_FillValue': np.int16(-9)
+                },
                 'spatial_ref': {'dtype': 'int32'}
             }
         )
+        
+        # log activity
+        logger = logging.getLogger('sar_drift_converter')
+        logger.info(f'Created NetCDF {output_file_path}')
         
     finally:
         # Ensure that these lines are executed even if an error occurs
         netcdf_grid.close()
         del netcdf_grid
-        
 
+
+def create_shape_package(df, base_name, config):
+    """
+    Create a GeoPackage containing drift line vectors for SAR drift data.
+
+    Builds LineString geometries from start to end coordinates and writes
+    them to a single layer within a GeoPackage. Longitudes in the 0-360
+    range are normalized to -180/180 before geometry creation.
+
+    Args:
+        df (pandas.DataFrame): Input DataFrame containing drift vectors.
+            Expected columns:
+                - 'Lon1', 'Lat1' (float): Starting longitude/latitude
+                                          (degrees).
+                - 'Lon2', 'Lat2' (float): Ending longitude/latitude (degrees).
+                Additional columns are preserved and written to the GeoPackage.
+        base_name (str): Base filename (without extension) used to name the
+            output GeoPackage file `<config['gpkg_dir']>/<base_name>.gpkg`.
+        config (dict): Configuration dictionary containing:
+                - 'gpkg_dir' (str): Output directory where the GeoPackage
+                                    is written.
+                - 'qml_file' (str): Path to the QML style file to embed.
+
+    Returns:
+        None
+
+    Notes:
+        - CRS is set to EPSG:4326 (geographic lat/lon).
+        - A helper column `geometry_type` is added with value 'line'.
+        - The QML style is embedded directly into the GeoPackage's
+          layer_styles table, so no QML file is needed by end users.
+    """
+
+    import os
+    import logging
+    import geopandas as gpd
+    from shapely.geometry import LineString
+    
+    # add X and Y for EPSG:3411 projection
+    df_local = df.copy()
+    
+    
+    tf = _set_transformer()
+    df_local['X1'], df_local['Y1'] = tf['4326_to_3413'].transform(
+        df_local['Lon1'].values,
+        df_local['Lat1'].values
+    )
+    
+    df_local['X2'], df_local['Y2'] = tf['4326_to_3413'].transform(
+        df_local['Lon2'].values,
+        df_local['Lat2'].values
+    )
+    
+    df_local['geometry_line'] = df_local.apply(
+        lambda row: LineString([
+            (row['X1'], row['Y1']),
+            (
+                row['X1'] + row['U_vel_ms'] * row['JS_Duration'],
+                row['Y1'] + row['V_vel_ms'] * row['JS_Duration']
+            )
+        ]),
+        axis=1
+    )
+    
+    # Create GeoDataFrame for lines (lines only)
+    gdf_line = gpd.GeoDataFrame(
+        df_local, geometry='geometry_line'
+    )
+    # Add a column to distinguish geometry type    
+    gdf_line['geometry_type'] = 'line'  
+    
+   
+    # Save as a single GeoPackage file (supports mixed geometries)
+    geopackage_file = f"{base_name}.gpkg"
+    output_file_path = os.path.join(
+        config['gpkg_dir'], f"{geopackage_file}"
+    )
+    
+    gdf_line = gdf_line.rename(
+        columns={'geometry_line': 'geometry'}
+    ).set_geometry('geometry')
+    gdf_line = gdf_line.set_crs(tf['crs_string_3411'])
+    gdf_line.to_file(output_file_path, layer='drift_lines', driver='GPKG')
+    
+
+    # embed .qml outlier layer style
+    _embed_qml_style(output_file_path, 'drift_lines', config['qml_file'])
+    
+    # log activity
+    logger = logging.getLogger('sar_drift_converter')
+    logger.info(f'Created GeoPackage {output_file_path}')
+    
+    
+    # *0782308532*0782393500*
+        
+    
 def create_png(config, base_name):
     """
     Create and save a PNG map of sea-ice drift vectors from a NetCDF file.
@@ -1911,7 +1940,8 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
         "sea_ice_speed",
         "sea_ice_x_displacement",
         "sea_ice_y_displacement",
-        "direction_of_sea_ice_displacement"
+        "direction_of_sea_ice_displacement",
+        "outlier_category"
     ]
     time_list = []
     update_log = []
@@ -1930,6 +1960,7 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
         direction_attrs = (
             meta_ds["direction_of_sea_ice_displacement"].attrs.copy()
         )
+        outlier_attrs = meta_ds["outlier_category"].attrs.copy()
         spatial_ref_attrs = meta_ds["spatial_ref"].attrs.copy()
         x_attrs = meta_ds["x"].attrs.copy()
         y_attrs = meta_ds["y"].attrs.copy()
@@ -1959,6 +1990,11 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
                     ("time", "y", "x"),
                     np.full(grid_shape, np.nan, dtype=np.float32),
                     direction_attrs,
+                ),
+                "outlier_category": (
+                    ("time", "y", "x"),
+                    np.full(grid_shape, -9, dtype=np.int16),
+                    outlier_attrs,
                 ),
                 "spatial_ref": (
                     (),
@@ -2010,7 +2046,11 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
         
         # merge each sliced NetCDF into the template grid        
         for nc_idx, (scene_time, nc_file) in enumerate(file_times):
-            with xr.open_dataset(nc_file, decode_times=False) as scene_ds:
+            with xr.open_dataset(
+                    nc_file,
+                    decode_times=False,
+                    mask_and_scale=False
+                ) as scene_ds:
                 # Note: decode_times=False helps keep units perserved
                 # rather than intepreted
                 scene_x = scene_ds['x'].values
@@ -2047,7 +2087,8 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
                     ref_vals = scene_ds[var_names[0]].isel(time=0).values
                     last_t = latest_time_grid[y_0:y_1+1, x_0:x_1+1]
                     valid = np.isfinite(ref_vals)
-                    newer = scene_time > last_t # only if timestamp is later not also the same
+                    # only if timestamp is later not also the same
+                    newer = scene_time > last_t 
                     write_mask = valid & newer
                 
                     if write_mask.any():
@@ -2101,17 +2142,27 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
             daily_nc_path,
             mode="w",
             encoding={
-                "sea_ice_speed": {"zlib": True, "complevel": 4},
-                "sea_ice_x_displacement": {"zlib": True, "complevel": 4},
-                "sea_ice_y_displacement": {"zlib": True, "complevel": 4},
+                "sea_ice_speed": {
+                    "zlib": True, "complevel": 4, "dtype": "float32"
+                },
+                "sea_ice_x_displacement": {
+                    "zlib": True, "complevel": 4, "dtype": "float32"
+                },
+                "sea_ice_y_displacement": {
+                    "zlib": True, "complevel": 4, "dtype": "float32"
+                },
                 "direction_of_sea_ice_displacement": {
-                    "zlib": True, "complevel": 4
+                    "zlib": True, "complevel": 4, "dtype": "float32"
+                },
+                "outlier_category": {
+                    "zlib": True, "complevel": 4, "dtype": "int16",
+                    "_FillValue": np.int16(-9)
                 },
                 "spatial_ref": {"dtype": "int32"},
-            },
+            }
         )
 
-        if update_log:
+        if update_log and config['version'] == '00':
             update_df = pd.DataFrame(update_log)
             df_filter = update_df['overwrite']
             update_df = update_df[df_filter].drop(columns='overwrite')
@@ -2127,6 +2178,41 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
             daily_grid.close()
             del daily_grid    
 
+
+def combine_daily_geopackage(gpkg_files, daily_gpkg_path, config):
+    """
+    Combine multiple scene GeoPackage files into one daily GeoPackage.
+
+    Parameters
+    ----------
+    gpkg_files (list[str]): Paths to scene GeoPackage files.
+    daily_gpkg_path (str): Path to the output daily GeoPackage file.
+    config (dict): Configuration dictionary.
+
+    Returns
+    -------
+    None
+    """
+    import logging
+    import geopandas as gpd
+
+    gdfs = []
+    for gpkg_file in gpkg_files:
+        gdf = gpd.read_file(gpkg_file, layer='drift_lines')
+        gdfs.append(gdf)
+
+
+    daily_gdf = gpd.pd.concat(gdfs, ignore_index=True)
+    daily_gdf = gpd.GeoDataFrame(daily_gdf, geometry='geometry')
+
+    daily_gdf.to_file(daily_gpkg_path, layer='drift_lines', driver='GPKG')
+    _embed_qml_style(daily_gpkg_path, 'drift_lines', config['qml_file'])
+
+    logger = logging.getLogger('sar_drift_converter')
+    logger.info(
+        f'Created daily GeoPackage {daily_gpkg_path} | '
+        f'scenes={len(gdfs)} | rows={len(daily_gdf)}'
+    )
 
 def overlay_sar_drift_on_geotiff(config, gdf_lines, df_sar, base_name):
     """
