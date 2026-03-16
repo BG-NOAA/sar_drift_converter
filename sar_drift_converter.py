@@ -99,23 +99,6 @@ def read_json_config():
                                             (e.g., ",", "\\t").
         - "skip_rows_before_header"(int):   Number of rows to skip before
                                             the header in the data file.
-        - "ignore_vector_threshold"(int):   Ignore data files where the number
-                                            of vector observations falls below
-                                            this threshold.
-        - "z_score_level"          (float): Z-score threshold for distance and
-                                            bearing outlier detection.
-        - "chi_square_level"       (float): Chi-square tail probability for
-                                            Mahalanobis distance thresholding.
-        - "neighbor_radius_km"     (float): Neighbor search radius in
-                                            kilometers.
-        - "min_neighbors"          (int):   Minimum neighbors required to mark
-                                            a z-score result as statistically
-                                            confident.
-        - "md_min_neighbors"       (int):   Minimum neighbors required to mark
-                                            a Mahalanobis distance result as
-                                            statistically confident.
-        - "outlier_passes"         (int):   Number of iterative passes to
-                                            remove outliers from the neighbor
                                             pool and recompute.
         - "use_geotiff"            (bool):  Use a supplied GeoTIFF file as
                                             background for output images.
@@ -131,8 +114,6 @@ def read_json_config():
                                             plots.
         - "quiver_scale_large_area"(float): Quiver arrow scale for large area
                                             plots.
-        - "precision"              (int):   Number of decimal places to retain
-                                            in outputs.
         - "verbose"                (bool):  Print detailed parameter info to
                                             the console.
         - "version"                (str):   Processing version; controls
@@ -170,6 +151,16 @@ def read_json_config():
     import os
     import shutil
     import json
+    from constants import (
+        IGNORE_VECTOR_THRESHOLD,
+        Z_SCORE_LEVEL,
+        CHI_SQUARE_LEVEL,
+        NEIGHBOR_RADIUS_KM,
+        MIN_NEIGHBORS,
+        MD_MIN_NEIGHBORS,
+        OUTLIER_PASSES,
+        PRECISION
+    )
 
 
     parser = argparse.ArgumentParser(description=(
@@ -192,12 +183,9 @@ def read_json_config():
         "sar_drift_directory", "sar_drift_filename",  "sar_geotiff_filename",
         "netcdf_cdl_file", "netcdf_template_file", "qml_file",
         "clear_output_dir", "batch_process", "delimiter",
-        "skip_rows_before_header", "ignore_vector_threshold", "z_score_level",
-        "chi_square_level", "neighbor_radius_km", "min_neighbors",
-        "md_min_neighbors", "outlier_passes", "use_geotiff",
-        "create_region_plot", "vector_stride", "inlier_vector_stride",
-        "quiver_scale_small_area", "quiver_scale_large_area", "precision",
-        "verbose", "version"
+        "skip_rows_before_header", "use_geotiff", "create_region_plot",
+        "vector_stride", "inlier_vector_stride", "quiver_scale_small_area",
+        "quiver_scale_large_area", "verbose", "version"
     }
     config_keys = set(config.keys())
     missing = required_json_keys - config_keys
@@ -222,16 +210,8 @@ def read_json_config():
         ("create_region_plot",        bool,  None, None),
         ("verbose",                   bool,  None, None),
         ("skip_rows_before_header",   int,   0,    True),
-        ("ignore_vector_threshold",   int,   1,    False),
-        ("min_neighbors",             int,   0,    True),
-        ("md_min_neighbors",          int,   0,    True),
-        ("outlier_passes",            int,   0,    True),
         ("vector_stride",             int,   1,    False),
         ("inlier_vector_stride",      int,   1,    False),
-        ("precision",                 int,   0,    True),
-        ("z_score_level",             float, 0.0,  False),
-        ("chi_square_level",          float, 0.0,  False),
-        ("neighbor_radius_km",        float, 0.0,  False),
         ("quiver_scale_small_area",   float, None, None),
         ("quiver_scale_large_area",   float, None, None),
     ]
@@ -304,20 +284,20 @@ def read_json_config():
         'batch_process':           config['batch_process'],
         'delimiter':               delimiter,
         'skip_rows_before_header': config['skip_rows_before_header'],
-        'ignore_vector_threshold': config['ignore_vector_threshold'],
-        'z_score_level':           config['z_score_level'],
-        'chi_square_level':        config['chi_square_level'],
-        'neighbor_radius_km':      config['neighbor_radius_km'],
-        'min_neighbors':           config['min_neighbors'],
-        'md_min_neighbors':        config['md_min_neighbors'],
-        'outlier_passes':          config['outlier_passes'],
+        'ignore_vector_threshold': IGNORE_VECTOR_THRESHOLD,
+        'z_score_level':           Z_SCORE_LEVEL,
+        'chi_square_level':        CHI_SQUARE_LEVEL,
+        'neighbor_radius_km':      NEIGHBOR_RADIUS_KM,
+        'min_neighbors':           MIN_NEIGHBORS,
+        'md_min_neighbors':        MD_MIN_NEIGHBORS,
+        'outlier_passes':          OUTLIER_PASSES,
+        'precision':               PRECISION,
         'use_geotiff':             config['use_geotiff'],
         'create_region_plot':      config['create_region_plot'],
         'vector_stride':           config['vector_stride'],
         'inlier_vector_stride':    config['inlier_vector_stride'],
         'quiver_scale_small_area': config['quiver_scale_small_area'],
         'quiver_scale_large_area': config['quiver_scale_large_area'],
-        'precision':               config['precision'],
         'verbose':                 config['verbose'],
         'version':                 config['version'],
     }
@@ -381,10 +361,14 @@ def main():
     # import sar_drift as sd
     import util
     import os
+    from datetime import datetime
     from glob import glob
     from tqdm import tqdm
     import pandas as pd
     import xarray as xr
+    
+    
+    run_start = datetime.utcnow()
     
     # parse user arguments
     config = read_json_config()
@@ -408,7 +392,9 @@ def main():
         
     # initialize logger
     logger, log_path = setup_logger(config['output_dir'])
-    logger.info(f"Run started | config version={config['version']}")
+    logger.info(
+        f"Run started | config version={config['version']} | {run_start}"
+    )
     logger.info(f"Input directory: {config['sar_drift_directory']}")
     logger.info(f"Found {len(files)} candidate files")
         
@@ -453,6 +439,7 @@ def main():
         all_dfs.append(df)
     
 
+    print('Saving all files into one DatFrame...')
     df_all = pd.concat(all_dfs, ignore_index=True)
     # convert date columns to datetime once
     df_all['Date1'] = pd.to_datetime(
@@ -478,20 +465,23 @@ def main():
             df_scene = df_scene[
                 (df_scene['Bear_deg'] != 0) & (df_scene['Speed_kmdy'] > 0)
             ]
-            logger.info(
-                f"{scene_id} | after bearing/speed validity: {len(df_scene)} "
-                f"(dropped {initial_row_size - df_scene.shape[0]})"
-            )
+            if initial_row_size != df_scene.shape[0]:
+                logger.info(
+                    f"{scene_id} | after bearing/speed validity: "
+                    f"{df_scene.shape[0]} (dropped "
+                    f"{initial_row_size - df_scene.shape[0]})"
+                )
     
             # remove invalid speeds
             speed_thresh = 35.0 if use_75km else 25.0
             row_count_before = df_scene.shape[0]
             df_scene = df_scene[df_scene['Speed_kmdy'] < speed_thresh]
-            logger.info(
-                f"{scene_id} | after speed filter "
-                f"(Speed_kmdy >= {speed_thresh}): {df_scene.shape[0]} "
-                f"(dropped {row_count_before - df_scene.shape[0]})"
-            )
+            if row_count_before != df_scene.shape[0]:
+                logger.info(
+                    f"{scene_id} | after speed filter "
+                    f"(Speed_kmdy >= {speed_thresh}): {df_scene.shape[0]} "
+                    f"(dropped {row_count_before - df_scene.shape[0]})"
+                )
     
             # reject scene if < 60% have MaxCorr2 > MaxCorr1
             pct_correct = (
@@ -507,13 +497,15 @@ def main():
             # remove rows where MaxCorr2 <= MaxCorr1
             row_count_before = df_scene.shape[0]
             df_scene = df_scene[df_scene['Maxcorr2'] > df_scene['Maxcorr1']]
-            logger.info(
-                f"{scene_id} | after Maxcorr2 > Maxcorr1: {df_scene.shape[0]} "
-                f"(dropped {row_count_before - df_scene.shape[0]})"
-            )
+            if row_count_before != df_scene.shape[0]:
+                logger.info(
+                    f"{scene_id} | after Maxcorr2 > Maxcorr1: "
+                    f"{df_scene.shape[0]} (dropped "
+                    f"{row_count_before - df_scene.shape[0]})"
+                )
     
             # reject scene if too few observations
-            if len(df_scene) < config['ignore_vector_threshold']:
+            if df_scene.shape[0] < config['ignore_vector_threshold']:
                 logger.warning(
                     f"Reject scene: {scene_id} | "
                     f"only {df_scene.shape[0]} observations "
@@ -526,7 +518,7 @@ def main():
             )
             accepted.append(df_scene)
     
-    
+        print('Updating filtered rows in one DataFrame...')
         df_all = pd.concat(accepted, ignore_index=True)
         df_all['Date1'] = pd.to_datetime(
             df_all['Date1'],
@@ -607,13 +599,6 @@ def main():
             )
             df_scene.to_csv(output_path, index=False)
             
-            nc_files.append(
-                os.path.join(config["nc_dir"], f'{pair_basename}.nc')
-            )
-            
-            gpkg_files.append(
-                os.path.join(config["gpkg_dir"], f'{pair_basename}.gpkg')
-            )
         
             """
             Per OSI SAF, the dates in file names that have motion data
@@ -651,6 +636,9 @@ def main():
     
             
             # Create NetCDF always
+            nc_files.append(
+                os.path.join(config["nc_dir"], f'{pair_basename}.nc')
+            )
             util.create_netcdf(
                 df=df_scene,
                 base_name=pair_basename,
@@ -662,6 +650,9 @@ def main():
     
             if int(config['version']) > 1 or config['version'] == '00':
                 # Create shape file package for QGIS    
+                gpkg_files.append(
+                    os.path.join(config["gpkg_dir"], f'{pair_basename}.gpkg')
+                )
                 util.create_shape_package(
                     df=df_scene,
                     base_name=pair_basename,
@@ -779,6 +770,12 @@ def main():
             f"Day {daily_start_date_str}_{daily_end_date_str} complete | "
             f"scenes={len(nc_files)}"
         )
+    
+    run_end = datetime.utcnow() 
+    elapsed = run_end - run_start
+    logger.info(
+        f"Run complete | {run_end} | elapsed={elapsed}"
+    )
     
     
 if __name__ == "__main__":

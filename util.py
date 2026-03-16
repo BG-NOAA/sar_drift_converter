@@ -1319,14 +1319,14 @@ def outlier_search(df, config, base_name, radius_km,
             n_md_d_b = int(mask_md_d_b.sum())
             n_outliers = total - n_inliers
             
-            logger = logging.getLogger('sar_drift')
+            logger = logging.getLogger('sar_drift_converter')
             logger.info(
                 f"Scene {base_name} | Pass {pass_idx + 1} | "
-                f"total={total} | inliers={n_inliers} | outliers={n_outliers} | "
-                f"distance={n_distance} | bearing={n_bearing} | "
-                f"mahalanobis={n_md} | dist+bear={n_d_b} | "
-                f"md+dist={n_md_d} | md+bear={n_md_b} | "
-                f"md+dist+bear={n_md_d_b}"
+                f"total={total} | inliers={n_inliers} | "
+                f"outliers={n_outliers} | distance={n_distance} | "
+                f"bearing={n_bearing} | mahalanobis={n_md} | "
+                f"dist+bear={n_d_b} | md+dist={n_md_d} | "
+                f"md+bear={n_md_b} | md+dist+bear={n_md_d_b}"
             )
 
 
@@ -1412,7 +1412,26 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
     df_copy = df.copy()
     df_copy['Date1'] = pd.to_datetime(df_copy['Date1'])
     df_copy['Date2'] = pd.to_datetime(df_copy['Date2'])
-
+    
+    # if version 01, flag bad bearing/distance and Maxcorr1 > Maxcorr2
+    if config['version'] in ['00', '01']:
+        # bearing check: 0 if valid, 1 if invalid
+        df_filter = (df_copy['Bear_deg'] != 0) & (df_copy['Speed_kmdy'] > 0)
+        df_copy['bearing_error'] = (~df_filter).astype(int)
+        
+        # speed check: 0 if valid, 1 if invalid
+        speed_thresh = 35.0 if df_copy['_use_75km'].iloc[0] else 25.0
+        df_filter = (df_copy['Speed_kmdy'] < speed_thresh)
+        df_copy['speed_error'] = (~df_filter).astype(int)
+    
+        # Maxcorr2 > Maxcorr1 check: 0 if valid: 1 if invalid
+        df_filter = (df_copy['Maxcorr1'] > df_copy['Maxcorr2'])
+        df_copy['measurement_error'] = df_filter.astype(int)
+    else:
+        # set to -9 default
+        df_copy['bearing_error'] = -9
+        df_copy['speed_error'] = -9
+        df_copy['measurement_error'] = -9
     
     # take the starting longitude and latitude that correspond
     # with the start date
@@ -1469,6 +1488,15 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
         outlier_attrs = (
             meta_ds["outlier_category"].attrs.copy()
         )
+        bearing_error_attrs = (
+            meta_ds["bearing_error"].attrs.copy()
+        )
+        speed_error_attrs = (
+            meta_ds["speed_error"].attrs.copy()
+        )
+        measurement_error_attrs = (
+            meta_ds["measurement_error"].attrs.copy()
+        )
         spatial_ref_attrs = meta_ds["spatial_ref"].attrs.copy()
         x_attrs = meta_ds["x"].attrs.copy()
         y_attrs = meta_ds["y"].attrs.copy()
@@ -1505,7 +1533,22 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
                     ("time", "y", "x"),
                     np.full(grid_shape, -9, dtype=np.int16),
                     outlier_attrs,
-                ),                
+                ),
+                "bearing_error": (
+                    ("time", "y", "x"),
+                    np.full(grid_shape, -9, dtype=np.int16),
+                    bearing_error_attrs,
+                ),
+                "speed_error": (
+                    ("time", "y", "x"),
+                    np.full(grid_shape, -9, dtype=np.int16),
+                    speed_error_attrs,
+                ),
+                "measurement_error": (
+                    ("time", "y", "x"),
+                    np.full(grid_shape, -9, dtype=np.int16),
+                    measurement_error_attrs,
+                ),
                 "spatial_ref": (
                     (),
                     np.int32(0),
@@ -1561,6 +1604,15 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
             netcdf_grid["outlier_category"].values[
                 0, iy, ix
             ] = np.int16(row.outlier_category)
+            netcdf_grid["bearing_error"].values[
+                0, iy, ix
+            ] = np.int16(row.bearing_error)
+            netcdf_grid["speed_error"].values[
+                0, iy, ix
+            ] = np.int16(row.speed_error)
+            netcdf_grid["measurement_error"].values[
+                0, iy, ix
+            ] = np.int16(row.measurement_error)
         
         
         # update scene_i_j
@@ -1612,6 +1664,18 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
                     'zlib': True, 'complevel': 4, 'dtype': 'int16',
                     '_FillValue': np.int16(-9)
                 },
+                'bearing_error': {
+                    'zlib': True, 'complevel': 4, 'dtype': 'int16',
+                    '_FillValue': np.int16(-9)
+                },
+                'speed_error': {
+                    'zlib': True, 'complevel': 4, 'dtype': 'int16',
+                    '_FillValue': np.int16(-9)
+                },
+                'measurement_error': {
+                    'zlib': True, 'complevel': 4, 'dtype': 'int16',
+                    '_FillValue': np.int16(-9)
+                },                
                 'spatial_ref': {'dtype': 'int32'}
             }
         )
@@ -1941,7 +2005,10 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
         "sea_ice_x_displacement",
         "sea_ice_y_displacement",
         "direction_of_sea_ice_displacement",
-        "outlier_category"
+        "outlier_category",
+        "bearing_error",
+        "speed_error",
+        "measurement_error"
     ]
     time_list = []
     update_log = []
@@ -1961,6 +2028,9 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
             meta_ds["direction_of_sea_ice_displacement"].attrs.copy()
         )
         outlier_attrs = meta_ds["outlier_category"].attrs.copy()
+        bearing_error_attrs = meta_ds["bearing_error"].attrs.copy()
+        speed_error_attrs = meta_ds["speed_error"].attrs.copy()
+        measurement_error_attrs = meta_ds["measurement_error"].attrs.copy()
         spatial_ref_attrs = meta_ds["spatial_ref"].attrs.copy()
         x_attrs = meta_ds["x"].attrs.copy()
         y_attrs = meta_ds["y"].attrs.copy()
@@ -1995,6 +2065,21 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
                     ("time", "y", "x"),
                     np.full(grid_shape, -9, dtype=np.int16),
                     outlier_attrs,
+                ),
+                "bearing_error": (
+                    ("time", "y", "x"),
+                    np.full(grid_shape, -9, dtype=np.int16),
+                    bearing_error_attrs,
+                ),
+                "speed_error": (
+                    ("time", "y", "x"),
+                    np.full(grid_shape, -9, dtype=np.int16),
+                    speed_error_attrs,
+                ),
+                "measurement_error": (
+                    ("time", "y", "x"),
+                    np.full(grid_shape, -9, dtype=np.int16),
+                    measurement_error_attrs,
                 ),
                 "spatial_ref": (
                     (),
@@ -2037,7 +2122,11 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
         """
         file_times = []
         for nc_file in nc_files:
-            with xr.open_dataset(nc_file, decode_times=False) as scene_ds:
+            with xr.open_dataset(
+                    nc_file,
+                    decode_times=False,
+                    mask_and_scale=False
+                ) as scene_ds:
                 file_times.append(
                     (float(scene_ds['time'].values[0]), nc_file)
                 )
@@ -2158,6 +2247,18 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
                     "zlib": True, "complevel": 4, "dtype": "int16",
                     "_FillValue": np.int16(-9)
                 },
+                "bearing_error": {
+                    "zlib": True, "complevel": 4, "dtype": "int16",
+                    "_FillValue": np.int16(-9)
+                },
+                "speed_error": {
+                    "zlib": True, "complevel": 4, "dtype": "int16",
+                    "_FillValue": np.int16(-9)
+                },
+                "measurement_error": {
+                    "zlib": True, "complevel": 4, "dtype": "int16",
+                    "_FillValue": np.int16(-9)
+                },                
                 "spatial_ref": {"dtype": "int32"},
             }
         )
@@ -2213,6 +2314,7 @@ def combine_daily_geopackage(gpkg_files, daily_gpkg_path, config):
         f'Created daily GeoPackage {daily_gpkg_path} | '
         f'scenes={len(gdfs)} | rows={len(daily_gdf)}'
     )
+
 
 def overlay_sar_drift_on_geotiff(config, gdf_lines, df_sar, base_name):
     """
