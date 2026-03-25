@@ -159,7 +159,8 @@ def read_json_config():
         MIN_NEIGHBORS,
         MD_MIN_NEIGHBORS,
         OUTLIER_PASSES,
-        PRECISION
+        BEARING_PRECISION,
+        SPEED_PRECISION
     )
 
 
@@ -254,6 +255,7 @@ def read_json_config():
     # Output directory setup
     config['output_dir'] = os.path.normpath(f"v{config['version']}")
     if os.path.exists(config['output_dir']) and config['clear_output_dir']:
+        print(f"Clearing output directory --> {config['output_dir']}")
         shutil.rmtree(config['output_dir'])
         
 
@@ -291,7 +293,8 @@ def read_json_config():
         'min_neighbors':           MIN_NEIGHBORS,
         'md_min_neighbors':        MD_MIN_NEIGHBORS,
         'outlier_passes':          OUTLIER_PASSES,
-        'precision':               PRECISION,
+        'bearing_precision':       BEARING_PRECISION,
+        'speed_precision':         SPEED_PRECISION,
         'use_geotiff':             config['use_geotiff'],
         'create_region_plot':      config['create_region_plot'],
         'vector_stride':           config['vector_stride'],
@@ -299,7 +302,7 @@ def read_json_config():
         'quiver_scale_small_area': config['quiver_scale_small_area'],
         'quiver_scale_large_area': config['quiver_scale_large_area'],
         'verbose':                 config['verbose'],
-        'version':                 config['version'],
+        'version':                 config['version']
     }
 
     
@@ -330,8 +333,9 @@ def read_json_config():
             'inlier_vector_stride':   'inlier vector stride',
             'quiver_scale_small_area':'quiver scale small area',
             'quiver_scale_large_area':'quiver scale large area',
-            'precision':              'precision',
-            'version':                'version',
+            'bearing_precision':      'bearing precision',
+            'speed_precision':        'speed precision',
+            'version':                'version'
         }
         lines = ["CONF PARAMS:"]
         for key, label in labels.items():
@@ -407,7 +411,7 @@ def main():
             continue  # handled via 50km entry
             
         file_idx += 1
-        # if file_idx == 10:
+        # if file_idx == 2:
         #     break
     
         basename, ext = os.path.splitext(gfilter_path)
@@ -542,7 +546,7 @@ def main():
             ),
             index=False
         )
-    
+
     
     # create date range groups for daily/scene output
     print('Creating groups based on start day..')
@@ -557,7 +561,7 @@ def main():
     )
     if multi_day.any():
         multi_count = multi_day.sum()
-        logger.warning(
+        logger.info(
             f"{multi_count} observations span more than one calendar day"
         )
         # log per scene
@@ -566,7 +570,7 @@ def main():
             ):
             max_span = grp['Date2'].max()- grp['Date1'].min()
             if max_span > pd.Timedelta(days=1):
-                logger.warning(
+                logger.info(
                     f"Multi-day scene: {file1}_{file2} | "
                     f"rows={grp.shape[0]} | max_span={max_span}"
                 )
@@ -619,7 +623,7 @@ def main():
             if daily_end_date is None or end_max > daily_end_date:
                 daily_end_date = end_max
         
-            # continue # get right to concatenating
+
     
             # Detect outliers (will return all 00 if not active)
             df_scene = util.outlier_search(
@@ -648,7 +652,7 @@ def main():
             )
     
     
-            if int(config['version']) > 1 or config['version'] == '00':
+            if config['version'] in ['00', '02', '03']:
                 # Create shape file package for QGIS    
                 gpkg_files.append(
                     os.path.join(config["gpkg_dir"], f'{pair_basename}.gpkg')
@@ -660,7 +664,7 @@ def main():
                 )
     
     
-            if int(config['version']) > 2 or config['version'] == '00':
+            if config['version'] in ['00', '02']:
                 # create individual PNG file from NetCDF
                 util.create_png(
                     config=config,
@@ -680,9 +684,10 @@ def main():
         """
         read through each scene_i_j dictionary items
         ((i, j) coordinates in each scene)
-        Get the counts of each (i, j) coordinate found in the entire set of scenes
-        per time period
-        Show the count of each (i, j) coordinate and the scenes where they exist
+        Get the counts of each (i, j) coordinate found in the entire
+        set of scenes per time period
+        Show the count of each (i, j) coordinate and the scenes where
+        they exist
         """
         
         # df = pd.DataFrame(columns=['scene', 'item_count', 'items'])
@@ -746,8 +751,9 @@ def main():
             multi_layered=False
         )
         
+        
         # GeoPackage
-        if int(config['version']) > 1 or config['version'] == '00':
+        if config['version'] in ['00', '02', '03']:
             daily_gpkg_path = os.path.join(
                 config["output_dir"],
                 f"SIVelocity_SAR_{daily_start_date_str}_{daily_end_date_str}"
@@ -770,6 +776,11 @@ def main():
             f"Day {daily_start_date_str}_{daily_end_date_str} complete | "
             f"scenes={len(nc_files)}"
         )
+    
+    
+    # create json files for PolarWatch STAC
+    util.create_json_for_stac(config)
+    
     
     run_end = datetime.utcnow() 
     elapsed = run_end - run_start

@@ -58,12 +58,14 @@ MD_MIN_NEIGHBORS        (int):   Minimum neighbors required to mark
 OUTLIER_PASSES          (int):   Number of iterative passes to
                                  remove outliers from the neighbor
                                  pool and recompute.
-PRECISION               (int):   Number of decimal places to retain
-                                 in outputs.
+BEARING_PRECISION       (int):   Number of decimal places to retain
+                                 in Bear_deg.
+SPEED_PRECISION         (int):   Number of decimal places to retain
+                                 in Speed_kmdy.
 """
 
 # Filtering thresholds
-IGNORE_VECTOR_THRESHOLD = 25
+IGNORE_VECTOR_THRESHOLD = 1
 Z_SCORE_LEVEL = 2.75
 CHI_SQUARE_LEVEL = 0.975
 
@@ -74,4 +76,5 @@ MD_MIN_NEIGHBORS = 24
 OUTLIER_PASSES = 3
 
 # Rounding
-PRECISION = 3
+BEARING_PRECISION = 0
+SPEED_PRECISION = 1

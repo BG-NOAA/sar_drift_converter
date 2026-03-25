@@ -194,8 +194,8 @@ def _polar_lonlat_to_ij(longitude, latitude, grid_size, hemisphere):
     Args:
         longitude (float): longitude or longitude array in degrees
         latitude (float): latitude or latitude array in degrees (positive)
-        grid_size (float): 6.25, 12.5 or 25; the grid_size cell dimensions in km
-        hemisphere ('north' or 'south'): Northern or Southern hemisphere
+        grid_size (float): 6.25, 12.5 or 25; the grid_size cell dimensions in
+        km hemisphere ('north' or 'south'): Northern or Southern hemisphere
 
     Returns:
         If longitude and latitude are scalars then the result is a
@@ -570,6 +570,31 @@ def _embed_qml_style(gpkg_path, layer_name, qml_path):
     conn.close()
 
 
+def _parse_datetime_from_path(file_path):
+    """
+    Extract start and end datetimes from a SAR pair filename.
+    Returns start_datetime, end_datetime
+    """
+
+    matches = DATE_PATTERN.findall(file_path)
+    if len(matches) < 2:
+        raise ValueError(
+            f"Could not find two date tokens in filename: {file_path}"
+        )
+
+    year = matches[0][0:4]
+    month = matches[0][4:6]
+    day = matches[0][6:8]
+    start_date = f"{year}-{month}-{day}T00:00:00+00:00"
+    
+    year = matches[1][0:4]
+    month = matches[1][4:6]
+    day = matches[1][6:8]
+    end_date = f"{year}-{month}-{day}T00:00:00+00:00"
+    
+    return start_date, end_date
+
+
 #=============
 # Calculations
 #=============
@@ -887,6 +912,7 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
           'Speed_kmdy', 'File1', and 'File2'.
     """
     
+    import numpy as np
     import pandas as pd
     from datetime import datetime, timedelta
     
@@ -943,9 +969,42 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
     
     
     # convert speed units to m/s-1
-    SECONDS_PER_DAY = 86400.0
-    df['Speed_ms'] = (df['Speed_kmdy'] * 1000) / SECONDS_PER_DAY
+    # SECONDS_PER_DAY = 86400.0
+    # cols = [
+    #     'U_vel_ms', 'V_vel_ms',
+    #     'computed_speed_ms',
+    #     'converted_speed_ms_5_decimals',
+    #     'converted_speed_ms_1_decimal',
+    #     'Speed_kmdy_orig',
+    #     'Speed_kmdy_rounded'
+    # ]
+    # df_compare = pd.DataFrame(columns=cols)
+    # df_compare['U_vel_ms'] = df['U_vel_ms'].values
+    # df_compare['V_vel_ms'] = df['V_vel_ms'].values
+    # df_compare['computed_speed_ms'] = np.sqrt(df['U_vel_ms']**2 + df['V_vel_ms']**2)
+    # df_compare['converted_speed_ms_5_decimals'] = np.round(df['Speed_kmdy'] * 1000 / SECONDS_PER_DAY, 5)
+    # df_compare['converted_speed_ms_1_decimal'] = np.round(np.round(df['Speed_kmdy'], 1) * 1000 / SECONDS_PER_DAY, 5)
+    # df_compare['Speed_kmdy_orig'] = df['Speed_kmdy']
+    # df_compare['Speed_kmdy_rounded'] = np.round(df['Speed_kmdy'], 1)
+    # df_compare.to_csv(r'v00/comparison.csv', index=False)
     
+    # exit()
+    
+    # convert speed units to m/s-1
+    SECONDS_PER_DAY = 86400.0
+    df['Speed_ms'] = np.round(
+        (df['Speed_kmdy'] * 1000) / SECONDS_PER_DAY,
+        config['speed_precision']
+    )
+    
+    # round volicities
+    df['U_vel_ms'] = np.round(df['U_vel_ms'], config['speed_precision'])
+    df['V_vel_ms'] = np.round(df['V_vel_ms'], config['speed_precision'])
+    
+    # round bearing
+    df['Bear_deg'] = np.round(
+        df['Bear_deg'], config['bearing_precision']
+    )
     
     # identify satellites for analysis
     df['Sat1'] = df["File1"].str.partition("_")[0]
@@ -1413,6 +1472,19 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
     df_copy['Date1'] = pd.to_datetime(df_copy['Date1'])
     df_copy['Date2'] = pd.to_datetime(df_copy['Date2'])
     
+    # use Time1_JS min as scene start time
+    time_sec = float(df_copy['Time1_JS'].min())
+    time_array = np.array([time_sec], dtype='float64')
+    
+    # time bounds: start and end of observation period
+    time_bounds = np.array([
+        [float(df_copy['Time1_JS'].min()),
+         float(df_copy['Time2_JS'].max())]
+    ], dtype='float64')
+    
+    min_time = df_copy['Date1'].min()
+    max_time = df_copy['Date2'].max()
+    
     # if version 01, flag bad bearing/distance and Maxcorr1 > Maxcorr2
     if config['version'] in ['00', '01']:
         # bearing check: 0 if valid, 1 if invalid
@@ -1465,13 +1537,6 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
         # convert to "seconds since 1970-01-01 00:00:00"
         # take min time since using Lon1/Lat1
 
-        epoch = pd.Timestamp("1970-01-01 00:00:00")
-        min_time = df_copy['Date1'].min()
-        max_time = df_copy['Date2'].max()        
-        time_sec = (min_time - epoch).total_seconds()
-        time_array = np.array([time_sec], dtype='float64')
-        
-        
         # set NetCDF standard attributes
         meta_ds = _set_metadata(config)
         
@@ -1512,55 +1577,60 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
                 "sea_ice_speed": (
                     ("time", "y", "x"),
                     np.full(grid_shape, np.nan, dtype=np.float32),
-                    sea_ice_speed_attrs,
+                    sea_ice_speed_attrs
                 ),
                 "sea_ice_x_displacement": (
                     ("time", "y", "x"),
                     np.full(grid_shape, np.nan, dtype=np.float32),
-                    sea_ice_x_attrs,
+                    sea_ice_x_attrs
                 ),
                 "sea_ice_y_displacement": (
                     ("time", "y", "x"),
                     np.full(grid_shape, np.nan, dtype=np.float32),
-                    sea_ice_y_attrs,
+                    sea_ice_y_attrs
                 ),
                 "direction_of_sea_ice_displacement": (
                     ("time", "y", "x"),
                     np.full(grid_shape, np.nan, dtype=np.float32),
-                    direction_attrs,
+                    direction_attrs
                 ),
                 "outlier_category": (
                     ("time", "y", "x"),
                     np.full(grid_shape, -9, dtype=np.int16),
-                    outlier_attrs,
+                    outlier_attrs
                 ),
                 "bearing_error": (
                     ("time", "y", "x"),
                     np.full(grid_shape, -9, dtype=np.int16),
-                    bearing_error_attrs,
+                    bearing_error_attrs
                 ),
                 "speed_error": (
                     ("time", "y", "x"),
                     np.full(grid_shape, -9, dtype=np.int16),
-                    speed_error_attrs,
+                    speed_error_attrs
                 ),
                 "measurement_error": (
                     ("time", "y", "x"),
                     np.full(grid_shape, -9, dtype=np.int16),
-                    measurement_error_attrs,
+                    measurement_error_attrs
                 ),
                 "spatial_ref": (
                     (),
                     np.int32(0),
-                    spatial_ref_attrs,
+                    spatial_ref_attrs
                 ),
+                "time_bnds": (
+                    ("time", "nv"),
+                    time_bounds
+                )
             },
             coords={
                 "time": ("time", time_array, time_attrs),
+                "nv": [0, 1],
                 "x": ("x", x_coords, x_attrs),
-                "y": ("y", y_coords, y_attrs),
+                "y": ("y", y_coords, y_attrs)
             },
-            attrs=global_attrs,
+            attrs=global_attrs
         )
 
         # update date and time
@@ -1675,7 +1745,8 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
                 'measurement_error': {
                     'zlib': True, 'complevel': 4, 'dtype': 'int16',
                     '_FillValue': np.int16(-9)
-                },                
+                },
+                'time_bnds': {'dtype': 'float64'},
                 'spatial_ref': {'dtype': 'int32'}
             }
         )
@@ -1728,16 +1799,21 @@ def create_shape_package(df, base_name, config):
     from shapely.geometry import LineString
     
     # add X and Y for EPSG:3411 projection
-    df_local = df.copy()
-    
+    needed_cols = [
+        'File1', 'File2', 'Date1', 'Date2', 'JS_Duration', 'Time1_JS',
+        'Lon1', 'Lat1', 'Lon2', 'Lat2', 'Sat1', 'Sat2',
+        'U_vel_ms', 'V_vel_ms', 'Speed_ms', 'Bear_deg',
+        'outlier_category'
+    ]
+    df_local = df[needed_cols].copy()
     
     tf = _set_transformer()
-    df_local['X1'], df_local['Y1'] = tf['4326_to_3413'].transform(
+    df_local['X1'], df_local['Y1'] = tf['4326_to_3411'].transform(
         df_local['Lon1'].values,
         df_local['Lat1'].values
     )
     
-    df_local['X2'], df_local['Y2'] = tf['4326_to_3413'].transform(
+    df_local['X2'], df_local['Y2'] = tf['4326_to_3411'].transform(
         df_local['Lon2'].values,
         df_local['Lat2'].values
     )
@@ -1753,6 +1829,29 @@ def create_shape_package(df, base_name, config):
         axis=1
     )
     
+    
+    # rename the columns to match NetCDF variable names
+    df_local.rename(columns=
+              {
+                  'X1': 'longitude',
+                  'Y1': 'latitude',
+                  'Time1_JS': 'time',
+                  'JS_Duration': 'duration_s',
+                  'Speed_ms': 'sea_ice_speed',
+                  'U_vel_ms': 'sea_ice_x_displacement',
+                  'V_vel_ms': 'sea_ice_y_displacement',
+                  'Bear_deg': 'direction_of_sea_ice_displacement',
+                  'Sat1': 'sensor1',
+                  'Sat2': 'sensor2'
+              },
+              inplace=True
+    )
+    df_local.drop(
+        ['Lon1', 'Lon2', 'Lat1', 'Lat2', 'X2', 'Y2'],
+        axis=1,
+        inplace=True
+    )
+    
     # Create GeoDataFrame for lines (lines only)
     gdf_line = gpd.GeoDataFrame(
         df_local, geometry='geometry_line'
@@ -1760,6 +1859,14 @@ def create_shape_package(df, base_name, config):
     # Add a column to distinguish geometry type    
     gdf_line['geometry_type'] = 'line'  
     
+    # change order of columns
+    column_order = [
+        'longitude','latitude', 'time','duration_s',
+        'sea_ice_x_displacement','sea_ice_y_displacement',
+        'sea_ice_speed','direction_of_sea_ice_displacement',
+        'sensor1', 'sensor2', 'geometry_line'
+    ]
+    df_local = df_local[column_order]
    
     # Save as a single GeoPackage file (supports mixed geometries)
     geopackage_file = f"{base_name}.gpkg"
@@ -1971,36 +2078,32 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
     import pandas as pd
     import xarray as xr
     from datetime import datetime
-
+    
     # template grid settings
-    # each scene netcdf file will be its own layer
     x_coords = template_ds["x"].values
     y_coords = template_ds["y"].values
-
-
+    
     # time defaults for output daily file
-    min_time = pd.to_datetime(daily_start_date, format="%Y%m%d")
-    max_time = pd.to_datetime(daily_end_date, format="%Y%m%d")   
+    min_time = pd.Timestamp(daily_start_date)
+    max_time = pd.Timestamp(daily_end_date)
+    
     if multi_layered:
         n_time = len(nc_files)
     else:
         n_time = 1
-    time_array = np.arange(n_time, dtype='float64')
     
     # finalize grid shape
     grid_shape = (n_time, template_ds.sizes["y"], template_ds.sizes["x"])
     
-    # track last_write time per cell
+    # track last_write time per cell (single-layer only)
     latest_time_grid = np.full(
         (template_ds.sizes["y"], template_ds.sizes["x"]),
         -np.inf,
         dtype=np.float64
-    ) 
-
-
-    # set defaults
-    daily_grid = None
-    var_names =  [
+    )
+    
+    # variables to merge spatially
+    var_names = [
         "sea_ice_speed",
         "sea_ice_x_displacement",
         "sea_ice_y_displacement",
@@ -2010,16 +2113,15 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
         "speed_error",
         "measurement_error"
     ]
+    
+    daily_grid = None
     time_list = []
     update_log = []
     
-
     try:
-        # ---------------------------------------------------------
-        # Build output dataset from CDL metadata
-        # ---------------------------------------------------------
+        # build output dataset from CDL metadata
         meta_ds = _set_metadata(config)
-
+    
         global_attrs = meta_ds.attrs.copy()
         sea_ice_speed_attrs = meta_ds["sea_ice_speed"].attrs.copy()
         sea_ice_x_attrs = meta_ds["sea_ice_x_displacement"].attrs.copy()
@@ -2035,10 +2137,14 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
         x_attrs = meta_ds["x"].attrs.copy()
         y_attrs = meta_ds["y"].attrs.copy()
         time_attrs = meta_ds["time"].attrs.copy()
-
+    
         meta_ds.close()
         del meta_ds
-        
+    
+        # placeholder time and bounds — updated after merge loop
+        time_array = np.zeros(n_time, dtype='float64')
+        time_bounds = np.zeros((n_time, 2), dtype='float64')
+    
         daily_grid = xr.Dataset(
             data_vars={
                 "sea_ice_speed": (
@@ -2086,15 +2192,20 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
                     np.int32(0),
                     spatial_ref_attrs,
                 ),
+                "time_bnds": (
+                    ("time", "nv"),
+                    time_bounds,
+                ),
             },
             coords={
                 "time": ("time", time_array, time_attrs),
+                "nv": [0, 1],
                 "x": ("x", x_coords, x_attrs),
                 "y": ("y", y_coords, y_attrs),
             },
             attrs=global_attrs,
         )
-        
+    
         # update global attrs
         daily_grid.attrs["date_created"] = (
             datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -2105,66 +2216,60 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
         daily_grid.attrs["time_coverage_end"] = (
             max_time.strftime("%Y-%m-%dT23:59:59Z")
         )
-        
         daily_grid.attrs["title"] = (
             "Daily Northern Hemisphere SAR sea-ice velocity mosaic"
         )
-        
-        
-        """
-        For single-layer daily mosaics, deterministic "latest wins" behavior
-        for overlapping cells. Do a lightweight first pass to read each
-        scene's timestamp, then sort by time (ascending) so later scenes
-        are the newest.
-        
-        For multi-layer output, sorting is optional but keeps layers
-        ordered by time.
-        """
+
+    
+        # sort scene files by time
         file_times = []
         for nc_file in nc_files:
             with xr.open_dataset(
-                    nc_file,
-                    decode_times=False,
-                    mask_and_scale=False
-                ) as scene_ds:
+                nc_file, decode_times=False, mask_and_scale=False
+            ) as scene_ds:
                 file_times.append(
                     (float(scene_ds['time'].values[0]), nc_file)
                 )
         file_times.sort(key=lambda x: x[0])
+    
         
-        
-        # merge each sliced NetCDF into the template grid        
+        # merge each scene into the daily grid
         for nc_idx, (scene_time, nc_file) in enumerate(file_times):
             with xr.open_dataset(
-                    nc_file,
-                    decode_times=False,
-                    mask_and_scale=False
-                ) as scene_ds:
-                # Note: decode_times=False helps keep units perserved
-                # rather than intepreted
+                nc_file, decode_times=False, mask_and_scale=False
+            ) as scene_ds:
+    
                 scene_x = scene_ds['x'].values
                 scene_y = scene_ds['y'].values
-                
+                t_idx = nc_idx if multi_layered else 0
+    
+                # read scene time bounds from its time_bnds variable
+                scene_bnds = scene_ds['time_bnds'].values  # shape (1, 2)
+                scene_start = float(scene_bnds[0, 0])
+                scene_end = float(scene_bnds[0, 1])
+    
                 if multi_layered:
+                    # each scene gets its own time layer
                     time_list.append(float(scene_ds['time'].values[0]))
-                    t_idx = nc_idx
+                    time_bounds[t_idx, 0] = scene_start
+                    time_bounds[t_idx, 1] = scene_end
                 else:
-                    t_idx = 0
-                
-                """
-                get the start and end x/y to place on template;
-                there will be an exact match since the scene was create
-                from the template
-                """                
+                    # single layer: keep earliest start, latest end
+                    if time_bounds[0, 0] == 0 or \
+                    scene_start < time_bounds[0, 0]:
+                        time_bounds[0, 0] = scene_start
+                    if scene_end > time_bounds[0, 1]:
+                        time_bounds[0, 1] = scene_end
+    
+                # get x/y placement indices on template grid
                 x_start = int(np.where(x_coords == scene_x[0])[0][0])
                 x_end   = int(np.where(x_coords == scene_x[-1])[0][0])
                 y_start = int(np.where(y_coords == scene_y[0])[0][0])
                 y_end   = int(np.where(y_coords == scene_y[-1])[0][0])
-                
-                # ensure indices are ordered
+    
                 x_0, x_1 = min(x_start, x_end), max(x_start, x_end)
                 y_0, y_1 = min(y_start, y_end), max(y_start, y_end)
-        
+    
                 if multi_layered:
                     for var_name in var_names:
                         scene_vals = scene_ds[var_name].isel(time=0).values
@@ -2172,29 +2277,25 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
                             t_idx, y_0:y_1+1, x_0:x_1+1
                         ] = scene_vals
                 else:
-                    # Compute write_mask once using the first variable
                     ref_vals = scene_ds[var_names[0]].isel(time=0).values
                     last_t = latest_time_grid[y_0:y_1+1, x_0:x_1+1]
                     valid = np.isfinite(ref_vals)
-                    # only if timestamp is later not also the same
-                    newer = scene_time > last_t 
+                    newer = scene_time > last_t
                     write_mask = valid & newer
-                
+    
                     if write_mask.any():
-                        # Log (i,j) updates once — not per variable
                         local_rows, local_cols = np.where(write_mask)
                         for lr, lc in zip(local_rows, local_cols):
                             old_ts = last_t[lr, lc]
                             update_log.append({
                                 "i":             y_0 + lr,
                                 "j":             x_0 + lc,
-                                "old_timestamp": last_t[lr, lc],
+                                "old_timestamp": old_ts,
                                 "new_timestamp": scene_time,
                                 "nc_file":       nc_file,
-                                "overwrite": old_ts != -np.inf # filter later
+                                "overwrite":     old_ts != -np.inf
                             })
-                
-                        # Apply write_mask to all variables in one pass
+    
                         for var_name in var_names:
                             scene_vals = scene_ds[var_name].isel(time=0).values
                             target = daily_grid[var_name].values[
@@ -2204,29 +2305,36 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
                             daily_grid[var_name].values[
                                 0, y_0:y_1+1, x_0:x_1+1
                             ] = target
-                
-                        # Update timestamp tracker once after all variables
-                        # are written
+    
                         latest_time_grid[
                             y_0:y_1+1, x_0:x_1+1
                         ][write_mask] = scene_time
-                        
-                
-        # update time array as found in sliced NetCDF files
-        if multi_layered:
-            time_array = np.array(time_list, dtype='float64')
-        else:
-            daily_time_sec = (
-                pd.to_datetime(daily_start_date, format="%Y%m%d")
-                - pd.Timestamp("1970-01-01 00:00:00")
-            ).total_seconds()
-            time_array = np.array([daily_time_sec], dtype="float64")
-            
-        daily_grid = daily_grid.assign_coords(
-            time=('time', time_array, daily_grid['time'].attrs)
-        )
+    
 
-        # save daily NetCDF (compression level 4)
+        # Update time coordinate and bounds after merge
+        if multi_layered:
+            final_time_array = np.array(time_list, dtype='float64')
+        else:
+            # use scene start (first bound) as the time coordinate
+            final_time_array = np.array([time_bounds[0, 0]], dtype='float64')
+    
+        daily_grid = daily_grid.assign_coords(
+            time=('time', final_time_array, daily_grid['time'].attrs)
+        )
+        # write populated time_bounds into the dataset
+        daily_grid['time_bnds'].values[:] = time_bounds
+    
+        # pop _FillValue from int16 variable attrs before writing
+        for var in [
+                'outlier_category', 'bearing_error',
+                'speed_error', 'measurement_error'
+            ]:
+            daily_grid[var].attrs.pop('_FillValue', None)
+            daily_grid[var].encoding['_FillValue'] = np.int16(-9)
+            daily_grid[var].encoding['dtype'] = np.int16
+    
+
+        # Save to NetCDF
         daily_grid.to_netcdf(
             daily_nc_path,
             mode="w",
@@ -2258,26 +2366,24 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
                 "measurement_error": {
                     "zlib": True, "complevel": 4, "dtype": "int16",
                     "_FillValue": np.int16(-9)
-                },                
+                },
+                "time_bnds": {"dtype": "float64"},
                 "spatial_ref": {"dtype": "int32"},
             }
         )
-
+    
         if update_log and config['version'] == '00':
             update_df = pd.DataFrame(update_log)
             df_filter = update_df['overwrite']
             update_df = update_df[df_filter].drop(columns='overwrite')
             update_df = update_df.sort_values(['i', 'j'])
-            log_path = os.path.join(
-                config['output_dir'],
-                'cell_update_log.csv'
-            )
+            log_path = os.path.join(config['output_dir'], 'cell_update_log.csv')
             update_df.to_csv(log_path, index=False)
-
+    
     finally:
         if daily_grid is not None:
             daily_grid.close()
-            del daily_grid    
+            del daily_grid 
 
 
 def combine_daily_geopackage(gpkg_files, daily_gpkg_path, config):
@@ -2591,3 +2697,399 @@ def overlay_sar_drift_on_geotiff(config, gdf_lines, df_sar, base_name):
     fig.savefig(png_file, bbox_inches='tight', dpi=300)
     plt.close(fig)
         
+
+#==============
+# JSON for STAC
+#==============
+import json
+import re
+
+DATE_PATTERN = re.compile(r"_(\d{8})")
+BBOX = [-180, 60, 180, 90]
+GEOMETRY = {
+    "type": "Polygon",
+    "coordinates": [[
+        [-180, 60],
+        [ 180, 60],
+        [ 180, 90],
+        [-180, 90],
+        [-180, 60]
+    ]]
+}
+
+
+def create_json_for_output_file(config, file_url, base_name, ext, data_type):
+    start_dt, end_dt = _parse_datetime_from_path(base_name)
+    
+    return {
+        "type": "Feature",
+        "stac_version": "1.0.0",
+        "stac_extensions": [
+            "https://stac-extensions.github.io/projection/v1.1.0/schema.json"
+        ],
+        "id": base_name,
+        "collection": f"sar_drift_ice_velocities_v{config['version']}",
+        "geometry": GEOMETRY,
+        "bbox":BBOX,
+        "properties": {
+            "datetime": start_dt,
+            "start_datetime": start_dt,
+            "end_datetime": end_dt,
+            "proj:epsg": 3411
+        },
+        "links": [
+            {
+                "rel": "collection",
+                "href": "./collection.json",
+                "type": "application/json"
+            },
+            {
+                "rel": "parent",
+                "href": "./collection.json",
+                "type": "application/json"
+            },
+            {
+                "rel": "root",
+                "href": "../../catalog.json",
+                "type": "application/json"
+            }
+        ],
+        "assets": {
+            "data": {
+                "href": file_url,
+                "type": data_type,
+                "title": f'{base_name}.{ext}',
+                "roles": ["data"],
+                "pw:service_type": "http"
+            }
+        }
+    }
+
+
+def make_item(collection_id, file_url, base_name, ext, data_type):
+    start_dt, end_dt = _parse_datetime_from_path(base_name)
+
+    return {
+        "type": "Feature",
+        "stac_version": "1.0.0",
+        "stac_extensions": [
+            "https://stac-extensions.github.io/projection/v1.1.0/schema.json"
+        ],
+        "id": f'{base_name}.{ext}',
+        "collection": collection_id,
+        "geometry": GEOMETRY,
+        "bbox": BBOX,
+        "properties": {
+            "datetime": start_dt,
+            "start_datetime": start_dt,
+            "end_datetime": end_dt,
+            "proj:epsg": 3411
+        },
+        "links": [
+            {
+                "rel": "collection",
+                "href": "./collection.json",
+                "type": "application/json"
+            },
+            {
+                "rel": "parent",
+                "href": "./collection.json",
+                "type": "application/json"
+            },
+            {
+                "rel": "root",
+                "href": "../../catalog.json",
+                "type": "application/json"
+            }
+        ],
+        "assets": {
+            "data": {
+                "href": file_url,
+                "type": data_type,
+                "title": f'{base_name}.{ext}',
+                "roles": ["data"],
+                "pw:service_type": "http"
+            }
+        }
+    }
+
+
+def update_catalog_json(config, rel_items):
+    dates = [item["title"] for item in rel_items]
+    date_min, date_max = min(dates)[:10], max(dates)[:10]
+    
+    return {
+        "type": "Collection",
+        "id": f"sar_drift_ice_velocities_v{config['version']}",
+        "stac_version": "1.0.0",
+        "stac_extensions": [
+            "https://stac-extensions.github.io/scientific/v1.0.0/schema.json",
+            "https://stac-extensions.github.io/projection/v1.1.0/schema.json"
+            ],
+        "title":
+            "SAR drift derived sea ice velocities in Arctic region - "
+            f"Version {config['version']}.",
+        "description": 
+            "Analysis on daily images taken by satellite sensors that "
+            "measures sea ice drift bearing and velocity. The images "
+            "have a Fourier transformation that distinguished prominent "
+            "features and measures the change between the daily "
+            "satellite images. NetCDF output haved been filtered and "
+            "outliers detected. If the speed in km/day and bearing are "
+            "both zero, the observation was discarded. If the first max "
+            "correlation values is greater than the second max "
+            "correlation value, the observation was discarded. If the "
+            "observation file has more than 60% of its records where max "
+            "correlation 1 is greater than max correlation 2, the entire "
+            "file is discarded. Outlier categories applied using two "
+            "outlier passes identifying Mahalanobis and z-score "
+            "thresholds. Both NetCDF and GeoPackage files created.",
+        "license": "proprietary",
+        "keywords": [
+            "algorithms",
+            "altimetry",
+            "Arctic",
+            "EARTH SCIENCE>CLIMATE INDICATORS>CRYOSPHERIC "
+            "INDICATORS>SEA ICE VELOCITY",
+            "remote sensing",
+            "sea ice",
+            "velocity"
+        ],
+        "providers": [
+            {
+                "name": "NOAA NESDIS STAR",
+                "roles": [
+                    "producer",
+                    "processor"
+                ]
+            }
+        ],
+        "extent": {
+            "spatial": {
+                "bbox": BBOX
+            },
+            "temporal": {
+                "interval": [
+                    [
+                        f"{date_min}T00:00:00+00:00",
+                        f"{date_max}T00:00:00+00:00"
+                    ]
+                ]
+            }
+        },
+        "summaries": {
+            "platform": [
+                "ICESat-2, CryoSat-2"
+            ],
+            "instruments": [
+                ""
+            ],
+            "proj:epsg": [
+                3411
+            ]
+        },
+        "links": [
+            {
+                "rel": "self",
+                "href": (
+                    "./collections/sar_drift_ice_velocities_v"
+                    f"{config['version']}/collection.json"
+                ),
+                "type": "application/json",
+                "title": "This collection"
+            },
+            {
+                "rel": "root",
+                "href": "../../catalog.json",
+                "type": "application/json",
+                "title": "STAC Catalog"
+            },
+            {
+                "rel": "parent",
+                "href": "../../catalog.json",
+                "type": "application/json",
+                "title": "STAC Catalog"
+            },
+            {
+                "rel": "about",
+                "href": "https://www.star.nesdis.noaa.gov/socd/mecb/sar/",
+                "type": "text/html",
+                "title": "ERDDAP Data Access Form"
+            },
+            {
+                "rel": "describedby",
+                "href": "https://www.star.nesdis.noaa.gov/socd/mecb/sar/",
+                "type": "text/html",
+                "title": "ERDDAP Dataset Information"
+            },
+            *rel_items
+        ],
+        "assets": {
+            "data": {
+                "href": (
+                    "https://www.star.nesdis.noaa.gov/socd/mecb/sar/"
+                    "sea_ice_drift_vectors.php"
+                ),
+                "type": "text/html",
+                "title": "HTTPS data directory",
+                "roles": [
+                    "data"
+                ],
+                "pw:service_type": "https",
+                "pw:base_url": (
+                    "https://www.star.nesdis.noaa.gov/socd/mecb/sar/"
+                    "sea_ice_drift_vectors.php"
+                )
+            }
+        },
+        "item_assets": {
+            "LaRA_sd_5yr": {
+                "type": "application/x-netcdf",
+                "title": "SAR Drift ice velocities",
+                "roles": [
+                    "data"
+                ]
+            },
+            "grid_lat": {
+                "type": "application/x-netcdf",
+                "title": "grid_lat",
+                "roles": [
+                    "data"
+                ]
+            },
+            "grid_lon": {
+                "type": "application/x-netcdf",
+                "title": "grid_lon",
+                "roles": [
+                    "data"
+                ]
+            }
+        },
+        "pw:service_type": "https",
+        "pw:conventions": "CF-1.6, ACDD-1.3, COARDS",
+        "pw:naming_authority": "",
+        "pw:standard_name_vocabulary": "CF Standard Name Table v70",
+        "pw:processing_level": "NOAA Level 3",
+        "pw:resolution_spatial": "",
+        "pw:resolution_temporal": "P1M",
+        "pw:license_text": "Creative Commons CC0 (CC 1.0)",
+        "pw:creator_name": "NOAA NESDIS STAR",
+        "pw:creator_email": "christopher dot jackson@noaa.gov",
+        "proj:epsg": 3411,
+        "proj:proj4": (
+            "+proj=stere +lat_0=90 +lat_ts=70 +lon_0=-45 +x_0=0 "
+            "+y_0=0 +a=6378273 +b=6356889.449 +units=m +no_defs +type=crs"
+        )
+    }
+
+                
+def create_json_for_stac(config):
+    from glob import glob
+    
+    
+    # build NetCDF file list
+    nc_files = sorted(glob(os.path.join(config['output_dir'], "*.nc")))
+    data_list = [
+        {
+            "type": "application/x-netcdf",
+            "files": nc_files,
+        }
+    ]
+    
+    
+    # build GeoPackage file list
+    if config['version'] in ['02', '03']:
+        gpkg_files = sorted(glob(os.path.join(config['output_dir'], "*.gpkg")))
+        data_list.append(
+            {
+                "type": "application/vnd.sqlite3",
+                "files": gpkg_files,
+            }
+        )
+
+
+    # build HTML file list
+    if config['version'] == '03':
+        html_files = sorted(glob(os.path.join(config['output_dir'], "*.html")))
+        data_list.append(
+            {
+                "type": "text/html",
+                "files": html_files,
+            }
+        )
+
+
+    items, rel_items = [], []
+    for entry in data_list:
+        data_type = entry['type']
+        for data_file in entry['files']:
+            base_name, ext = os.path.splitext(os.path.basename(data_file))
+            ext = ext.replace('.', '')
+            file_url = f"http://localhost:8001/{base_name}.{ext}"
+
+            json_output_file = create_json_for_output_file(
+                config=config,
+                file_url=file_url,
+                base_name=base_name,
+                ext=ext,
+                data_type=data_type
+            )
+
+            
+            output_path = os.path.join(
+                'D:\\', 'NOAA', 'GitHub', 'polarwatch', 'stac', 'collections',
+                f'sar_drift_ice_velocities_v{config["version"]}',
+                f'{base_name}_{ext}.json'
+            )
+            with open(output_path, 'w') as f:
+                json.dump(json_output_file, f, indent=2)
+                
+                
+            item = make_item(
+                collection_id=f'sar_drift_ice_velocities_v{config["version"]}',
+                file_url=file_url,
+                base_name=base_name,
+                ext=ext,
+                data_type=data_type
+                
+            )
+            items.append(item)
+            
+            
+            start_dt, _ = _parse_datetime_from_path(data_file)
+            rel_item = {
+                 "rel": "item",
+                 "href": f"./{base_name}_{ext}.json",
+                 "type": "application/geo+json",
+                 "title": start_dt
+            }
+            rel_items.append(rel_item)
+
+
+    feature_collection = {
+        "type": "FeatureCollection",
+        "features": items,
+        "numberReturned": len(items)
+    }
+
+
+    # write items.json
+    output_path = os.path.join(
+        'D:\\', 'NOAA', 'GitHub', 'polarwatch', 'stac', 'collections',
+        f'sar_drift_ice_velocities_v{config["version"]}', 'items.json'
+    )
+    with open(output_path, "w") as f:
+        json.dump(feature_collection, f, indent=2)
+    print(f"Written {len(items)} items to {output_path}")    
+               
+    # write collection.json
+    collection = update_catalog_json(config, rel_items)
+    collection_path = os.path.join(
+        'D:\\', 'NOAA', 'GitHub', 'polarwatch', 'stac', 'collections',
+        f'sar_drift_ice_velocities_v{config["version"]}', 'collection.json'
+    )
+    with open(collection_path, 'w') as f:
+        json.dump(collection, f, indent=2)
+    print(f"Written collection.json to {collection_path}")        
+
+    

@@ -3,6 +3,7 @@ dimensions:
 	time = UNLIMITED ; // (0 currently)
 	y = 361 ;
 	x = 361 ;
+	nv = 2 ;
 variables:
 	float sea_ice_speed(time, y, x) ;
 		sea_ice_speed:long_name = "Sea ice speed" ;
@@ -69,15 +70,19 @@ variables:
 		measurement_error:flag_values = 0s, 1s ;
 		measurement_error:flag_meanings = "valid invalid" ;
 		measurement_error:comment = "1 if Maxcorr1 > Maxcorr2 (bad correlation match), 0 otherwise." ;
-    measurement_error:grid_mapping = "spatial_ref" ;		
+		measurement_error:grid_mapping = "spatial_ref" ;
 	double time(time) ;
 		time:standard_name = "time" ;
-		time:long_name = "Centered Time" ;
-		time:units = "seconds since 1970-01-01 00:00:00 UTC" ;
+		time:long_name = "Start Time" ;
+		time:units = "seconds since 2000-01-01 12:00:00 UTC" ;
 		time:calendar = "standard" ;
 		time:axis = "T" ;
+		time:bounds = "time_bnds" ;
 		time:CoordinateAxisType = "Time" ;
-		time:comment = "This is the 00Z reference time. Note that products are nowcasted to be valid specifically at the time given here." ;
+		time:comment = "Start time of the SAR scene observation pair. See time_bnds for the full observation interval." ;
+	double time_bnds(time, nv) ;
+		time_bnds:long_name = "time bounds" ;
+		time_bnds:units = "seconds since 2000-01-01 12:00:00 UTC" ;		
 	double x(x) ;
 		x:standard_name = "projection_x_coordinate" ;
 		x:long_name = "x coordinate of projection" ;
