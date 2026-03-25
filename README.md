@@ -1,10 +1,11 @@
 # SAR Drift Converter & Outlier Tools
 
-This repository converts **SAR sea‑ice drift “gfilter” text outputs** into GIS- and analysis-ready products:
+This repository converts **SAR sea‑ice drift "gfilter" text outputs** into GIS- and analysis-ready products:
 
 - **Formatted CSV** (cleaned/consistent columns)
 - **GeoPackage (`.gpkg`)** with start points, end points, and drift lines (EPSG:3411)
 - **NetCDF (`.nc`)** on a regular grid with metadata populated from a **CDL template**
+- **STAC JSON** (`collection.json`, `items.json`, per-file `.json`) for catalog integration
 - Optional utilities: vector PNGs, GeoTIFF overlays, and outlier detection (standard deviation or Mahalanobis)
 
 ---
@@ -52,7 +53,7 @@ All runs are driven by a JSON config file.
 - `gpkg_dir` (str): folder for GeoPackages
 - `nc_dir` (str): folder for NetCDF
 - `nc_cdl_template_file` (str): CDL template used to populate metadata
-- `precision` (int): number of significant digits for nuermic values in data and computations
+- `precision` (int): number of significant digits for numeric values in data and computations
 
 ### Optional plotting / overlays
 - `use_geotiff` (bool): enable GeoTIFF overlay workflow (see note below)
@@ -111,6 +112,59 @@ Output filenames are derived from the input basename.
 
 ---
 
+### Generate STAC JSON
+
+After producing output files, `create_json_for_stac(config)` generates the full STAC catalog structure for the collection. It is called automatically at the end of a converter run.
+
+It produces:
+
+- **Per-file item JSON** (e.g. `SIVelocity_SAR_20241014_20241015_daily_12km_NH_v01_nc.json`) — one per output file (NetCDF, GeoPackage, and/or HTML depending on version)
+- **`items.json`** — a GeoJSON `FeatureCollection` of all items
+- **`collection.json`** — the STAC collection with temporal extent derived from the output files
+
+All files are written to:
+```
+polarwatch/stac/collections/sar_drift_ice_velocities_v{version}/
+```
+
+#### File types per version
+
+| Version | NetCDF | GeoPackage | HTML |
+|---------|--------|------------|------|
+| `01` | ✓ | | |
+| `02` | ✓ | ✓ | |
+| `03` | ✓ | ✓ | ✓ |
+
+#### Asset MIME types
+
+| Extension | `type` |
+|-----------|--------|
+| `.nc` | `application/x-netcdf` |
+| `.gpkg` | `application/vnd.sqlite3` |
+| `.html` | `text/html` |
+
+#### Serving files locally
+
+Asset `href` values are set to `http://localhost:8001/<filename>`. To make files accessible, run a second HTTP server from the output directory:
+
+```bash
+cd D:\NOAA\GitHub\sar_drift_converter\v01
+python -m http.server 8001
+```
+
+> **Note:** `file:///` URLs are blocked by browsers even on localhost. The `http://localhost` approach is required for download links to work in the STAC viewer.
+
+#### Date parsing
+
+Start and end datetimes are parsed from output filenames using the pattern `_YYYYMMDD_`. For example:
+
+```
+SIVelocity_SAR_20241014_20241015_daily_12km_NH_v01.nc
+                ↑ start     ↑ end
+```
+
+---
+
 ## Outputs
 
 Given an input like:
@@ -121,9 +175,12 @@ RCM1_SHUB_2024_10_15_02_13_41_..._vel_1.01d_0050000m_0000500m.txt_0
 
 you should expect (directories from `config.json`):
 
-- formatted_data/<basename>.csv
-- gpkg/<basename>.gpkg
-- nc/<basename>.nc
+- `formatted_data/<basename>.csv`
+- `gpkg/<basename>.gpkg`
+- `nc/<basename>.nc`
+- `polarwatch/stac/collections/sar_drift_ice_velocities_v{version}/<basename>_nc.json`
+- `polarwatch/stac/collections/sar_drift_ice_velocities_v{version}/items.json`
+- `polarwatch/stac/collections/sar_drift_ice_velocities_v{version}/collection.json`
 
 ---
 
@@ -140,6 +197,7 @@ Key ideas:
 - Neighbors are found **within each "scene"** (grouped by `File1`, `File2`)
 - Neighborhoods are computed with a **radius search** (km) using `cKDTree.query_ball_point`
 - `outlier_category` (under / meets neighbor threshold) encodes **type** and **statistical confidence**:
+
 | Code | Outlier Type | Neighbor Threshold Met |
 |------|-------------|----------------------|
 | `00` | None | No |
@@ -162,7 +220,7 @@ Key ideas:
 ### Iterative option
 
 For each pass in `outlier_passes`, only vectors with `outlier_category in ["00", "01"]`
-are used as the pool whenrecomputing neighbors each iteration. This prevents already-flagged
+are used as the pool when recomputing neighbors each iteration. This prevents already-flagged
 vectors from influencing local statistics while still keeping all original rows in the output
 (for geopackage tracking). By default, iterations will be set to one extra pass after the
 first outlier check.
@@ -185,8 +243,8 @@ These require `matplotlib` and `cartopy` (and GeoTIFF tooling where applicable).
 - **Quiver units:** `dx/dy` are in **meters** if built from EPSG:3411 coordinates.
   Adjust `scale` and `width` accordingly.
 - **Zero std:** guard against `dist_std==0` or `bear_std==0` to avoid divide-by-zero.
-- **“Pick up sticks” scenes:** If a scene has many invalid vectors (e.g., low correlation),
-  it’s often best to discard that scene. Use `ignore_vector_threshold` and/or
+- **"Pick up sticks" scenes:** If a scene has many invalid vectors (e.g., low correlation),
+  it's often best to discard that scene. Use `ignore_vector_threshold` and/or
   a "% correct" rule (e.g., `(Maxcorr2 > Maxcorr1)` fraction) upstream.
 
 ---
@@ -197,4 +255,6 @@ These require `matplotlib` and `cartopy` (and GeoTIFF tooling where applicable).
 2. Run `python sar_drift_converter.py`
 3. Open `.gpkg` in QGIS (EPSG:3411) to verify vector placement
 4. Validate `.nc` metadata and grid
-5. Enable outlier/plotting utilities as needed
+5. Start local file server (`python -m http.server 8001`) from the output directory
+6. Open STAC viewer at `http://localhost:8000` and verify collection and item links
+7. Enable outlier/plotting utilities as needed
