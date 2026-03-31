@@ -22,10 +22,8 @@ __pycache__
 **/*.log
 
 # Ignored folders
-v00
-v01
-v02
-v03
+level_output
+SIVelocity_SAR
 input
 misc
 npz

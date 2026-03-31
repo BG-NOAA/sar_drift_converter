@@ -59,7 +59,7 @@ os.environ["PROJ_LIB"] = str(proj_dir)   # backward compatibility
 from pyproj.datadir import set_data_dir
 set_data_dir(str(proj_dir))
 
-from pyproj import CRS, Transformer
+from pyproj import CRS, Transformer, Geod
 
 
 ######################################################
@@ -368,7 +368,7 @@ def _set_metadata(config):
 
     
     ncgen_ofile_nc = os.path.join(
-        cdl_file_dir, f"{cdl_file_basename}.nc"
+        cdl_file_dir, f"{cdl_file_basename}_{config['level']}.nc"
         )
     
     
@@ -391,6 +391,92 @@ def _set_metadata(config):
         )
         
     return xr.open_dataset(ncgen_ofile_nc, decode_times=False)
+
+
+def _calculate_drift_daily(lat1, lon1, lat2, lon2, duration_s):
+    """
+    Compute sea-ice drift kinematics from start/end geographic coordinates.
+ 
+    Projects start and end positions from EPSG:4326 to EPSG:3413 (NSIDC Sea
+    Ice Polar Stereographic North), computes Cartesian displacement components,
+    and derives speed and bearing using a WGS84 geodesic inverse calculation.
+ 
+    Args:
+        lat1 (array-like): Starting latitudes in decimal degrees (EPSG:4326).
+        lon1 (array-like): Starting longitudes in decimal degrees (EPSG:4326).
+        lat2 (array-like): Ending latitudes in decimal degrees (EPSG:4326).
+        lon2 (array-like): Ending longitudes in decimal degrees (EPSG:4326).
+        duration_s (array-like): Observation duration in seconds
+                                  (Time2_JS − Time1_JS).
+ 
+    Returns:
+        dict: Dictionary of derived drift quantities with the following keys:
+ 
+            Projected coordinates (EPSG:3413, metres):
+                - 'X1' : x-coordinate of start position
+                - 'Y1' : y-coordinate of start position
+                - 'X2' : x-coordinate of end position
+                - 'Y2' : y-coordinate of end position
+ 
+            Displacement (EPSG:3413, metres):
+                - 'dx' : X2 − X1
+                - 'dy' : Y2 − Y1
+ 
+            Geodesic quantities:
+                - 'distance'  : geodesic distance between start and end (m)
+                - 'bearing'   : forward azimuth from start to end (degrees)
+ 
+            Velocity components (EPSG:3413):
+                - 'u_vel_ms' : dx / duration_s  (m s⁻¹)
+                - 'v_vel_ms' : dy / duration_s  (m s⁻¹)
+ 
+            Speed:
+                - 'speed_ms'   : distance / duration_s (m s⁻¹)
+                - 'speed_kmdy' : (distance / 1000) / (duration_s / 86400)
+                                  (km day⁻¹)
+ 
+    Notes:
+        - Projection is performed with `pyproj.Transformer` using
+          `always_xy=True`, so longitude is passed before latitude.
+        - Geodesic distance and forward azimuth are computed with
+          `pyproj.Geod(ellps='WGS84').inv(lon1, lat1, lon2, lat2)`.
+        - `u_vel_ms` and `v_vel_ms` are Cartesian velocity components in
+          EPSG:3413 projection space. In this projection the x-axis points
+          roughly eastward and the y-axis roughly northward, but note that
+          the source file's `U_vel_ms` / `V_vel_ms` fields use the opposite
+          convention (U drives Y, V drives X). The values returned here are
+          computed directly from projected displacements and are
+          self-consistent.
+          
+    Coauthor:
+        Ludo Brucker, ludovic.brucker@noaa.gov        
+    """    
+    import numpy as np
+   
+    SECONDS_PER_DAY = 60 * 60 * 24
+    tf = Transformer.from_crs('EPSG:4326', 'EPSG:3413', always_xy=True)
+    
+    x1, y1 = tf.transform(lon1, lat1)
+    x2, y2 = tf.transform(lon2, lat2)
+   
+
+    dx, dy = np.subtract((x2, y2),(x1, y1))
+
+    geod = Geod(ellps='WGS84')
+    fwd_azimuth, _ , distance = geod.inv(lon1, lat1, lon2, lat2)
+    
+    return {
+        'X1': x1, 'Y1': y1,
+        'X2': x2, 'Y2': y2,
+        'dx': dx,
+        'dy': dy,
+        'distance': distance,
+        'bearing': fwd_azimuth,
+        'u_vel_ms': dx / duration_s,
+        'v_vel_ms': dy / duration_s,
+        'speed_ms': distance / duration_s,
+        'speed_kmdy': (distance / 1000) / (duration_s / SECONDS_PER_DAY)
+    }
 
 
 def _read_geotiff_rasterio(geotiff_file):
@@ -568,32 +654,6 @@ def _embed_qml_style(gpkg_path, layer_name, qml_path):
 
     conn.commit()    
     conn.close()
-
-
-def _parse_datetime_from_path(file_path):
-    """
-    Extract start and end datetimes from a SAR pair filename.
-    Returns start_datetime, end_datetime
-    """
-
-    matches = DATE_PATTERN.findall(file_path)
-    if len(matches) < 2:
-        raise ValueError(
-            f"Could not find two date tokens in filename: {file_path}"
-        )
-
-    year = matches[0][0:4]
-    month = matches[0][4:6]
-    day = matches[0][6:8]
-    start_date = f"{year}-{month}-{day}T00:00:00+00:00"
-    
-    year = matches[1][0:4]
-    month = matches[1][4:6]
-    day = matches[1][6:8]
-    end_date = f"{year}-{month}-{day}T00:00:00+00:00"
-    
-    return start_date, end_date
-
 
 #=============
 # Calculations
@@ -857,59 +917,94 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
     """
     Read and preprocess a SAR ice-drift text data file into a standardized
     DataFrame.
-
+ 
     This function loads a SAR drift data file (CSV-like text) using parsing
-    rules provided in `config`, cleans column names, removes known-bad
-    observations, and derives additional time, duration, unit-converted
-    velocity, and satellite fields.
-
+    rules provided in `config`, cleans column names, and derives projected
+    coordinates, displacement, velocity, speed, and sensor identifier fields.
+    Several raw source columns are renamed for consistency with NetCDF/
+    GeoPackage output naming, and columns that are not needed downstream
+    are dropped.
+ 
     Processing steps:
-        - Read the file with `pandas.read_csv()` using delimiter and
-          header offsets from `config`.
-        - Strip whitespace from column names.
-        - Remove rows where `Bear_deg == 0` (known invalid bearings/records).
-        - Normalize longitudes from 0–360 to -180/180 range for
-          `Lon1` and `Lon2`.
-        - Convert SAR "Julian seconds" timestamps (seconds since 2000-01-01)
-          in `Time1_JS` and `Time2_JS` to human-readable `Date1` and `Date2`.
-        - Compute duration between start and end times in both timedelta
-          string form (`Duration`) and raw seconds (`JS_Duration`).
-        - Convert speed from km/day to m s⁻¹:
-            - `Speed_kmdy` -> `Speed_ms`
-        - Extract satellite identifiers from `File1` and `File2`
-          into `Sat1` and `Sat2`.
-
+        1. Read the file with `pandas.read_csv()` using delimiter and header
+           offsets from `config`.
+        2. Strip whitespace from column names.
+        3. Convert Julian seconds timestamps (`Time1_JS`, `Time2_JS`) to
+           human-readable datetime strings (`date_start`, `date_end`).
+        4. Compute observation duration in seconds (`duration_s`).
+        5. Project start/end lat/lon to EPSG:3413 and compute displacement,
+           velocity, speed, and bearing via `_calculate_drift_daily`.
+        6. Extract sensor identifiers from `File1`/`File2` into `sensor1`/
+           `sensor2`.
+        7. Rename geographic coordinate columns:
+               Lat1 → latitude_1,  Lon1 → longitude_1
+               Lat2 → latitude_2,  Lon2 → longitude_2
+        8. Drop source columns that are not used in any output:
+               Time1_JS, Time2_JS, U_vel_ms, V_vel_ms, Speed_kmdy, Bear_deg,
+               img1_mean, img1_std, img2_mean, img2_std, img1s_mean, img1s_std,
+               Npnt, Offset1, Offset2
+ 
     Args:
         input_file (str or pathlib.Path): Path to the SAR drift data file
                                           to read.
-        config (dict): Parsing configuration. Expected keys:
+        config (dict): Parsing and precision configuration. Expected keys:
             - 'delimiter' (str): Field delimiter passed to `pd.read_csv`.
             - 'skip_rows_before_header' (int): Number of rows to skip before
               the header row.
-
+            - 'speed_precision' (int): Decimal places for speed and
+              displacement rounding.
+            - 'bearing_precision' (int): Decimal places for bearing rounding.
+ 
     Returns:
-        pandas.DataFrame: Cleaned and enriched SAR drift DataFrame containing
-        original fields plus derived columns including:
-            - 'Date1', 'Date2' (str): Start/end timestamps in
-                                      '%Y-%m-%d %H:%M:%S'.
-            - 'Duration' (str): Duration as a timedelta string.
-            - 'JS_Duration' (numeric): Duration in seconds
-                                       (Time2_JS - Time1_JS).
-            - 'Speed_ms' (float): Speed converted from km/day to m s⁻¹.
-            - 'Sat1', 'Sat2' (str): Satellite identifiers extracted
-                                    from File1/File2.
-
+        pandas.DataFrame: Cleaned and enriched SAR drift DataFrame. Raw source
+        columns are preserved (except those listed as dropped above) together
+        with the following derived and renamed columns:
+ 
+        Renamed geographic coordinates:
+            - 'latitude_1'  (float): Starting latitude  (degrees, from Lat1)
+            - 'longitude_1' (float): Starting longitude (degrees, from Lon1)
+            - 'latitude_2'  (float): Ending latitude    (degrees, from Lat2)
+            - 'longitude_2' (float): Ending longitude   (degrees, from Lon2)
+ 
+        Derived timestamps and duration:
+            - 'date_start' (str): Start datetime in '%Y-%m-%d %H:%M:%S'
+                                  (from Time1_JS)
+            - 'date_end'   (str): End datetime in '%Y-%m-%d %H:%M:%S'
+                                  (from Time2_JS)
+            - 'duration_s' (float): Observation duration in seconds
+                                    (Time2_JS − Time1_JS)
+ 
+        Projected coordinates (EPSG:3413, metres):
+            - 'X1', 'Y1': Start position
+            - 'X2', 'Y2': End position
+ 
+        Displacement and velocity (EPSG:3413):
+            - 'sea_ice_x_displacement' (float): X2 − X1  (m)
+            - 'sea_ice_y_displacement' (float): Y2 − Y1  (m)
+            - 'u_vel_ms' (float): sea_ice_x_displacement / duration_s  (m s⁻¹)
+            - 'v_vel_ms' (float): sea_ice_y_displacement / duration_s  (m s⁻¹)
+ 
+        Speed and direction:
+            - 'sea_ice_speed'      (float): geodesic speed  (m s⁻¹)
+            - 'sea_ice_speed_kmdy' (float): geodesic speed  (km day⁻¹)
+            - 'direction_of_sea_ice_displacement' (float): forward azimuth
+                                                           (degrees)
+            - 'distance' (float): geodesic distance (m)
+ 
+        Sensor identifiers:
+            - 'sensor1' (str): Satellite identifier from File1
+                               (prefix before first underscore)
+            - 'sensor2' (str): Satellite identifier from File2
+ 
     Notes:
-        - SAR time fields `Time1_JS` and `Time2_JS` are interpreted as
-          seconds since 2000-01-01 00:00:00.
-        - Longitudes are normalized from 0–360 to -180/180 to ensure
-          correct rendering in QGIS and compatibility with downstream
-          projections.
+        - SAR time fields `Time1_JS` and `Time2_JS` are seconds since
+          2000-01-01 00:00:00.
         - A specific `pyproj` warning about database path setup is suppressed
           because it is expected in this runtime environment.
-        - This function assumes the input file includes the required columns:
-          'Bear_deg', 'Time1_JS', 'Time2_JS', 'U_vel_ms', 'V_vel_ms',
-          'Speed_kmdy', 'File1', and 'File2'.
+        - Required source columns: 'Time1_JS', 'Time2_JS', 'Lat1', 'Lon1',
+          'Lat2', 'Lon2', 'File1', 'File2'. The columns 'Bear_deg',
+          'Speed_kmdy', 'U_vel_ms', 'V_vel_ms' must also be present but are
+          dropped after processing.
     """
     
     import numpy as np
@@ -933,84 +1028,89 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
         header=0, engine='c', skiprows=skip_rows
     )
     df.columns = df.columns.str.strip()
-    
+
     
     # Add the appropriate input file to a data frame
     # Julian seconds start from date 01-01-2000
     base_time = datetime(2000, 1, 1)
 
     # Create new Date* columnc by converting Time_JS* columns to datetime
-    df['Date1'] = df["Time1_JS"].apply(
+    df['date_start'] = df["Time1_JS"].apply(
         lambda x: base_time + timedelta(seconds=x)
         )
-    df['Date1'] = df['Date1'].dt.strftime('%Y-%m-%d %H:%M:%S')
-    df['Date2'] = df["Time2_JS"].apply(
+    df['date_start'] = df['date_start'].dt.strftime('%Y-%m-%d %H:%M:%S')
+    df['date_end'] = df["Time2_JS"].apply(
         lambda x: base_time + timedelta(seconds=x)
         )
-    df['Date2'] = df['Date2'].dt.strftime('%Y-%m-%d %H:%M:%S')
+    df['date_end'] = df['date_end'].dt.strftime('%Y-%m-%d %H:%M:%S')
     
-    
-    # need to mormalize longitudes since the file was created in
-    # Polar stereogrpahic despite having lon/lat
-    # This transitions helps future projections and if files opened in QGIS
-    df['Lon1'] = df['Lon1'].apply(lambda x: x - 360 if x > 180 else x)
-    df['Lon2'] = df['Lon2'].apply(lambda x: x - 360 if x > 180 else x)
 
-
-    # Calculate duration of observations
-    # 1. Date time
-    # 2. Raw Julian seconds
-    df['Duration'] = pd.to_timedelta(
-        df['Time2_JS'] - df['Time1_JS'], unit='s'
-        ).astype(str)
-    df['JS_Duration'] = (
+    # Calculate duration of observations in seconds
+    df['duration_s'] = (
         df['Time2_JS'] - df['Time1_JS']
-        )
+    )
     
+    drift = _calculate_drift_daily(
+        lat1=df['Lat1'].values,
+        lon1=df['Lon1'].values,
+        lat2=df['Lat2'].values,
+        lon2=df['Lon2'].values,
+        duration_s=df['duration_s'].values
+    )
     
-    # convert speed units to m/s-1
-    # SECONDS_PER_DAY = 86400.0
-    # cols = [
-    #     'U_vel_ms', 'V_vel_ms',
-    #     'computed_speed_ms',
-    #     'converted_speed_ms_5_decimals',
-    #     'converted_speed_ms_1_decimal',
-    #     'Speed_kmdy_orig',
-    #     'Speed_kmdy_rounded'
-    # ]
-    # df_compare = pd.DataFrame(columns=cols)
-    # df_compare['U_vel_ms'] = df['U_vel_ms'].values
-    # df_compare['V_vel_ms'] = df['V_vel_ms'].values
-    # df_compare['computed_speed_ms'] = np.sqrt(df['U_vel_ms']**2 + df['V_vel_ms']**2)
-    # df_compare['converted_speed_ms_5_decimals'] = np.round(df['Speed_kmdy'] * 1000 / SECONDS_PER_DAY, 5)
-    # df_compare['converted_speed_ms_1_decimal'] = np.round(np.round(df['Speed_kmdy'], 1) * 1000 / SECONDS_PER_DAY, 5)
-    # df_compare['Speed_kmdy_orig'] = df['Speed_kmdy']
-    # df_compare['Speed_kmdy_rounded'] = np.round(df['Speed_kmdy'], 1)
-    # df_compare.to_csv(r'v00/comparison.csv', index=False)
-    
-    # exit()
-    
-    # convert speed units to m/s-1
-    SECONDS_PER_DAY = 86400.0
-    df['Speed_ms'] = np.round(
-        (df['Speed_kmdy'] * 1000) / SECONDS_PER_DAY,
+    df['X1'] = drift['X1']
+    df['Y1'] = drift['Y1']
+    df['X2'] = drift['X2']
+    df['Y2'] = drift['Y2']
+    df['sea_ice_x_displacement'] = np.round(
+        drift['dx'], config['speed_precision']
+    )
+    df['sea_ice_y_displacement'] = np.round(
+        drift['dy'], config['speed_precision']
+    )
+    df['u_vel_ms'] = drift['u_vel_ms']
+    df['v_vel_ms'] = drift['v_vel_ms']
+    df['sea_ice_speed'] = np.round(
+        drift['speed_ms'],
         config['speed_precision']
     )
-    
-    # round volicities
-    df['U_vel_ms'] = np.round(df['U_vel_ms'], config['speed_precision'])
-    df['V_vel_ms'] = np.round(df['V_vel_ms'], config['speed_precision'])
-    
-    # round bearing
-    df['Bear_deg'] = np.round(
-        df['Bear_deg'], config['bearing_precision']
+    df['sea_ice_speed_kmdy'] = np.round(
+        drift['speed_kmdy'],
+        config['speed_precision']
+    )
+    df['direction_of_sea_ice_displacement'] = np.round(
+        drift['bearing'], config['bearing_precision']
+    )
+    df['distance'] = np.round(
+        drift['distance'], config['speed_precision']
     )
     
+    
     # identify satellites for analysis
-    df['Sat1'] = df["File1"].str.partition("_")[0]
-    df['Sat2'] = df["File2"].str.partition("_")[0]
-
-
+    df['sensor1'] = df["File1"].str.partition("_")[0]
+    df['sensor2'] = df["File2"].str.partition("_")[0]
+    
+    df.rename(columns=
+              {
+                  'Lat1': 'latitude_1',
+                  'Lon1': 'longitude_1',
+                  'Lat2': 'latitude_2',
+                  'Lon2': 'longitude_2'
+        },
+        inplace=True
+    )
+    
+    df.drop(
+        [
+            'Time1_JS', 'Time2_JS',
+            'U_vel_ms', 'V_vel_ms', 'Speed_kmdy', 'Bear_deg',
+            'img1_mean', 'img1_std', 'img2_mean', 'img2_std',
+            'img1s_mean', 'img1s_std', 'Npnt', 'Offset1', 'Offset2'
+        ],
+        axis=1,
+        inplace=True
+    )
+    
     return df
 
 
@@ -1023,7 +1123,7 @@ def outlier_search(df, config, base_name, radius_km,
     from sklearn.covariance import MinCovDet, LedoitWolf
     from scipy.stats import chi2
     
-    if config['version'] == '01':
+    if config['level'] == '01':
         # no outlier deteection required
         df['outlier_category'] = '-9'
         return df
@@ -1033,12 +1133,10 @@ def outlier_search(df, config, base_name, radius_km,
     
     radius_m = radius_km * 1000
     iter_prev_inliers = None
-    quiver_payloads_by_iter = []
     
     # create scene groupings based on `File` and `File2` values
     out_df = out_df.sort_values(by=['File1', 'File2'], ascending=True)
     out_df = out_df.reset_index(drop=True) # reset index after sorting
-    out_df["bearing_rad"] = np.deg2rad(out_df["Bear_deg"].to_numpy())
     out_df["outlier_category"] = '01' # default value of significant inlier
     out_df["sd_neighbor_indices"] = None
     out_df["sd_neighbor_count"] = 0
@@ -1052,13 +1150,6 @@ def outlier_search(df, config, base_name, radius_km,
     out_df['sd_outlier_pass'] = -1
     out_df['md_outlier_pass'] = -1
     
-    # for the neighbor search to work, the projection needs
-    # to be changed to EPSG:3411
-    tf = _set_transformer(3411)
-    out_df['X1'], out_df['Y1'] = tf['4326_to_3411'].transform(
-        out_df['Lon1'].to_numpy(),
-        out_df['Lat1'].to_numpy(),
-    )
     
     # create scene index for each File1, File2 pairing
     out_df["scene"] = out_df.groupby(
@@ -1077,13 +1168,6 @@ def outlier_search(df, config, base_name, radius_km,
         inlier_count = (out_df['outlier_category'] == '01').sum()
         
         
-        quiver_payloads_by_iter.append({
-            'LON': pool_df['Lon1'].to_numpy(),
-            'LAT': pool_df['Lat1'].to_numpy(),
-            'U': pool_df['U_vel_ms'].to_numpy(),
-            'V': pool_df['V_vel_ms'].to_numpy()
-        })
-        
         # stop if stable
         if iter_prev_inliers is not None and \
             inlier_count == iter_prev_inliers:
@@ -1100,7 +1184,9 @@ def outlier_search(df, config, base_name, radius_km,
             
             tree = cKDTree(xy)
             all_neighbors = tree.query_ball_point(xy, r=radius_m)
-            Xall = scene_df[['U_vel_ms', 'V_vel_ms']].to_numpy()
+            Xall = scene_df[
+                ['sea_ice_x_displacement', 'sea_ice_y_displacement']
+            ].to_numpy()
 
             
             for local_idx, local_neighbors in enumerate(all_neighbors):
@@ -1117,8 +1203,10 @@ def outlier_search(df, config, base_name, radius_km,
                 
                 neigh_rows = scene_df.iloc[neigh_idxs]
 
-                neigh_dist = neigh_rows['Speed_ms'].to_numpy()
-                neigh_bear = neigh_rows['bearing_rad'].to_numpy()
+                neigh_dist = neigh_rows['sea_ice_speed'].to_numpy()
+                neigh_bear = (
+                    neigh_rows['direction_of_sea_ice_displacement'].to_numpy()
+                )
                 
                 
                 # compute neighbor mean and standard deviation
@@ -1128,8 +1216,11 @@ def outlier_search(df, config, base_name, radius_km,
                 bear_std = _circular_std(neigh_bear)
                 
                 # get current cell values
-                cell_dist = scene_df.iloc[local_idx]["Speed_ms"]
-                cell_bear = scene_df.iloc[local_idx]["bearing_rad"]
+                cell_dist = scene_df.iloc[local_idx]['sea_ice_speed']
+                cell_bear = (
+                    scene_df.iloc[local_idx]
+                    ['direction_of_sea_ice_displacement']
+                )
                 
                 # compute z-score absolute value makes it two-sided
                 if (dist_std == 0) or np.isnan(dist_std):
@@ -1387,9 +1478,6 @@ def outlier_search(df, config, base_name, radius_km,
                 f"dist+bear={n_d_b} | md+dist={n_md_d} | "
                 f"md+bear={n_md_b} | md+dist+bear={n_md_d_b}"
             )
-
-
-        ### TEST CASE 0782302767 ####
         
     
     return out_df
@@ -1399,398 +1487,438 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
     """
     Create a gridded NetCDF sea-ice drift product from point/vector
     observations.
-
+ 
     This function maps input drift vectors (lon/lat locations with speed and
     displacement components) onto a polar stereographic grid, populates a
     NetCDF dataset using attributes from a metadata/template dataset, crops
     the output to the spatial extent of valid observations (with padding),
     and writes the result to disk with compression.
-
+ 
     Args:
         df (pandas.DataFrame): Input table of drift observations.
-        Expected columns:
-            - 'Date1' (datetime-like): Start timestamp for the vector.
-            - 'Date2' (datetime-like): End timestamp for the vector.
-            - 'Lon1' (float): Starting longitude (degrees).
-            - 'Lat1' (float): Starting latitude (degrees).
-            - 'Speed_ms' (float): Sea-ice speed (m s-1).
-            - 'U_vel_ms' (float): X displacement component (m s-1).
-            - 'V_vel_ms' (float): Y displacement component (m s-1).
-            - 'Bear_deg' (float): Direction of sea-ice displacement (degrees).
+            Expected columns (as produced by `read_sar_drift_data_file`):
+                - 'date_start' (datetime-like): Start timestamp for the vector.
+                - 'date_end' (datetime-like): End timestamp for the vector.
+                - 'duration_s' (float): Observation duration in seconds.
+                - 'longitude_1' (float): Starting longitude (degrees).
+                - 'latitude_1' (float): Starting latitude (degrees).
+                - 'sea_ice_speed' (float): Sea-ice speed (m s⁻¹).
+                - 'sea_ice_x_displacement' (float): X displacement (m).
+                - 'sea_ice_y_displacement' (float): Y displacement (m).
+                - 'direction_of_sea_ice_displacement' (float): Bearing
+                                                               (degrees).
+                - 'outlier_category' (int): Outlier classification code.
+                - 'Maxcorr1', 'Maxcorr2' (float): Cross-correlation scores
+                  (used for `measurement_error` flag in levels 00/01).
+                - '_use_75km' (bool): Whether the 75 km file was used
+                  (controls speed threshold for `speed_error` flag).
         base_name (str): Base filename (without extension) used to name
                          the output NetCDF file
                          `<config['nc_dir']>/<base_name>.nc`.
         config (dict): Configuration dictionary. Must include:
-            - 'nc_dir' (str): Output directory where the NetCDF file
-                              is written. Also used by `_set_metadata(config)`
-                              to populate global/variable attributes.
-        template_ds (xarray.Dataset): Template dataset providing the
-                                      target grid coordinate arrays and
-                                      dimensions.
+                - 'nc_dir' (str): Output directory where the NetCDF file
+                                  is written.
+                - 'level'  (str): Processing level ('00'–'03'); controls
+                                  which error flags are computed vs. set
+                                  to fill value −9.
+        template_ds (xarray.Dataset): Template dataset providing the target
+                                      grid coordinate arrays and dimensions.
+        scene_i_j (dict): Mutable dictionary updated in-place with the list
+                          of (i, j) grid index pairs for this scene, keyed
+                          by `base_name`.
+ 
     Returns:
         None
-
-
+ 
     Workflow:
-        1. Normalize input timestamps (`Date1`, `Date2`) to pandas datetimes.
-        2. Convert starting lon/lat positions (`Lon1`, `Lat1`) to grid
-           indices (i, j) using `_polar_lonlat_to_ij(...)`.
-        3. Build an output dataset using variable/global attributes
-           from `_set_metadata(config)` while using the coordinate arrays
-           from `template_ds`.
-        4. Populate the first (and only) time slice with the vector fields:
-           - sea_ice_speed
-           - sea_ice_x_displacement
-           - sea_ice_y_displacement
-           - direction_of_sea_ice_displacement
-        5. Crop the dataset to the bounding box of valid observations
-           with padding.
-        6. Write the dataset to NetCDF using zlib compression (level 4).
-
+        1. Parse `date_start` and `date_end` to pandas datetimes.
+        2. Derive the scene reference time and time bounds from `duration_s`,
+           `date_start`, and `date_end`.
+        3. Compute error flags (`bearing_error`, `speed_error`,
+           `measurement_error`) for levels 00/01; set to −9 otherwise.
+        4. Convert starting positions (`longitude_1`, `latitude_1`) to NSIDC
+           12.5 km polar stereographic grid indices (i, j) using
+           `_polar_lonlat_to_ij`.
+        5. Load CDL-derived variable and global attributes from
+           `_set_metadata(config)`.
+        6. Build an `xarray.Dataset` on the full template grid, initialised
+           with NaN / −9 fill values.
+        7. Populate the time slice at index 0 with per-observation values for
+           all science and flag variables.
+        8. Crop the dataset to the bounding box of finite `sea_ice_speed`
+           values, with a 4-cell padding on each side.
+        9. Write to NetCDF with zlib compression (level 4) and explicit
+           `_FillValue` / dtype encoding per variable.
+ 
     Notes:
-        - The NetCDF time coordinate is stored as seconds since the Unix epoch
-          using the mean of `Date1` and `Date2` across all observations.
+        - The `time` coordinate is set to the minimum `date_start` value
+          across all observations, stored as seconds since 2000-01-01
+          (Julian seconds, matching the source file convention).
+        - `time_bnds` spans [min(date_start), max(date_end)] for the scene.
         - Global attributes `date_created`, `time_coverage_start`, and
-          `time_coverage_end` are updated after dataset creation.
-        - Cropping is based on finite values of `sea_ice_speed`
-          at time index 0.
-        - Duplicate (i, j) assignments are detected and logged; the last value
-          written will overwrite earlier ones for that grid cell.
+          `time_coverage_end` are updated after dataset construction.
+        - Duplicate (i, j) assignments are detected and logged; the last
+          observation written wins for that grid cell.
+        - All int16 flag variables use −9 as their `_FillValue`.
     """
-
+ 
     import os
     import numpy as np
     import pandas as pd
     from datetime import datetime
     import xarray as xr
     import logging
-   
-    
-    
+ 
+ 
     # standardize date/time stamps
     df_copy = df.copy()
-    df_copy['Date1'] = pd.to_datetime(df_copy['Date1'])
-    df_copy['Date2'] = pd.to_datetime(df_copy['Date2'])
-    
-    # use Time1_JS min as scene start time
-    time_sec = float(df_copy['Time1_JS'].min())
+    df_copy['date_start'] = pd.to_datetime(df_copy['date_start'])
+    df_copy['date_end'] = pd.to_datetime(df_copy['date_end'])
+ 
+    # use minimum date_start as scene reference time (Julian seconds)
+    # reconstruct Time1_JS from date_start relative to 2000-01-01
+    epoch = pd.Timestamp('2000-01-01')
+    time_sec = float(
+        (df_copy['date_start'].min() - epoch).total_seconds()
+    )
     time_array = np.array([time_sec], dtype='float64')
-    
-    # time bounds: start and end of observation period
+ 
+    # time bounds: [min date_start, max date_end] in Julian seconds
     time_bounds = np.array([
-        [float(df_copy['Time1_JS'].min()),
-         float(df_copy['Time2_JS'].max())]
+        [time_sec,
+         float((df_copy['date_end'].max() - epoch).total_seconds())]
     ], dtype='float64')
-    
-    min_time = df_copy['Date1'].min()
-    max_time = df_copy['Date2'].max()
-    
-    # if version 01, flag bad bearing/distance and Maxcorr1 > Maxcorr2
-    if config['version'] in ['00', '01']:
+ 
+    min_time = df_copy['date_start'].min()
+    max_time = df_copy['date_end'].max()
+ 
+    # compute error flags for levels 00/01; set fill value otherwise
+    if config['level'] in ['00', '01']:
         # bearing check: 0 if valid, 1 if invalid
-        df_filter = (df_copy['Bear_deg'] != 0) & (df_copy['Speed_kmdy'] > 0)
+        df_filter = (
+            (df_copy['direction_of_sea_ice_displacement'] != 0) &
+            (df_copy['sea_ice_speed'] > 0)
+        )
         df_copy['bearing_error'] = (~df_filter).astype(int)
-        
+ 
         # speed check: 0 if valid, 1 if invalid
         speed_thresh = 35.0 if df_copy['_use_75km'].iloc[0] else 25.0
-        df_filter = (df_copy['Speed_kmdy'] < speed_thresh)
+        df_filter = (df_copy['sea_ice_speed'] < speed_thresh)
         df_copy['speed_error'] = (~df_filter).astype(int)
-    
-        # Maxcorr2 > Maxcorr1 check: 0 if valid: 1 if invalid
+ 
+        # Maxcorr2 > Maxcorr1 check: 0 if valid, 1 if invalid
         df_filter = (df_copy['Maxcorr1'] > df_copy['Maxcorr2'])
         df_copy['measurement_error'] = df_filter.astype(int)
     else:
-        # set to -9 default
         df_copy['bearing_error'] = -9
         df_copy['speed_error'] = -9
         df_copy['measurement_error'] = -9
-    
-    # take the starting longitude and latitude that correspond
-    # with the start date
-    lons = df_copy["Lon1"].to_numpy(dtype=float)
-    lats = df_copy["Lat1"].to_numpy(dtype=float)
-    
-    
+ 
+    # use starting position (longitude_1, latitude_1) to locate grid cells
+    lons = df_copy["longitude_1"].to_numpy(dtype=float)
+    lats = df_copy["latitude_1"].to_numpy(dtype=float)
+ 
     # get the i,j coordinates based on lon/lat
     i, j = _polar_lonlat_to_ij(
         lons,
         lats,
         grid_size=12.5,
         hemisphere="north"
-    )    
+    )
     # force numpy integer arrays
     i = np.asarray(i, dtype=np.int64)
     j = np.asarray(j, dtype=np.int64)
-    
+ 
     i_list = [int(val) for val in i]
     j_list = [int(val) for val in j]
-
-    
+ 
+ 
     # template data set settings
     x_coords = template_ds['x'].values
     y_coords = template_ds['y'].values
     grid_shape = (1, template_ds.sizes['y'], template_ds.sizes['x'])
-
-    
-    try:       
-        # time defaults
-        # convert to "seconds since 1970-01-01 00:00:00"
-        # take min time since using Lon1/Lat1
-
-        # set NetCDF standard attributes
-        meta_ds = _set_metadata(config)
-        
-       
-        # replace placeholders with real values
-        # keep attrs from the CDL skeleton
-        global_attrs = meta_ds.attrs.copy()
-        sea_ice_speed_attrs = meta_ds["sea_ice_speed"].attrs.copy()
-        sea_ice_x_attrs = meta_ds["sea_ice_x_displacement"].attrs.copy()
-        sea_ice_y_attrs = meta_ds["sea_ice_y_displacement"].attrs.copy()
-        direction_attrs = (
-            meta_ds["direction_of_sea_ice_displacement"].attrs.copy()
+ 
+ 
+    # try:
+    # set NetCDF standard attributes from CDL template
+    meta_ds = _set_metadata(config)
+ 
+    # keep attrs from the CDL skeleton
+    global_attrs = meta_ds.attrs.copy()
+    sea_ice_speed_attrs = meta_ds["sea_ice_speed"].attrs.copy()
+    sea_ice_x_attrs = meta_ds["sea_ice_x_displacement"].attrs.copy()
+    sea_ice_y_attrs = meta_ds["sea_ice_y_displacement"].attrs.copy()
+    direction_attrs = (
+        meta_ds["direction_of_sea_ice_displacement"].attrs.copy()
+    )
+    outlier_attrs = meta_ds["outlier_category"].attrs.copy()
+    bearing_error_attrs = meta_ds["bearing_error"].attrs.copy()
+    speed_error_attrs = meta_ds["speed_error"].attrs.copy()
+    measurement_error_attrs = meta_ds["measurement_error"].attrs.copy()
+    spatial_ref_attrs = meta_ds["spatial_ref"].attrs.copy()
+    x_attrs = meta_ds["x"].attrs.copy()
+    y_attrs = meta_ds["y"].attrs.copy()
+    time_attrs = meta_ds["time"].attrs.copy()
+ 
+    meta_ds.close()
+    del meta_ds
+ 
+ 
+    # create dataset from CDL
+    netcdf_grid = xr.Dataset(
+        data_vars={
+            "sea_ice_speed": (
+                ("time", "y", "x"),
+                np.full(grid_shape, np.nan, dtype=np.float32),
+                sea_ice_speed_attrs
+            ),
+            "sea_ice_x_displacement": (
+                ("time", "y", "x"),
+                np.full(grid_shape, np.nan, dtype=np.float32),
+                sea_ice_x_attrs
+            ),
+            "sea_ice_y_displacement": (
+                ("time", "y", "x"),
+                np.full(grid_shape, np.nan, dtype=np.float32),
+                sea_ice_y_attrs
+            ),
+            "direction_of_sea_ice_displacement": (
+                ("time", "y", "x"),
+                np.full(grid_shape, np.nan, dtype=np.float32),
+                direction_attrs
+            ),
+            "outlier_category": (
+                ("time", "y", "x"),
+                np.full(grid_shape, -9, dtype=np.int16),
+                outlier_attrs
+            ),
+            "bearing_error": (
+                ("time", "y", "x"),
+                np.full(grid_shape, -9, dtype=np.int16),
+                bearing_error_attrs
+            ),
+            "speed_error": (
+                ("time", "y", "x"),
+                np.full(grid_shape, -9, dtype=np.int16),
+                speed_error_attrs
+            ),
+            "measurement_error": (
+                ("time", "y", "x"),
+                np.full(grid_shape, -9, dtype=np.int16),
+                measurement_error_attrs
+            ),
+            "spatial_ref": (
+                (),
+                np.int32(0),
+                spatial_ref_attrs
+            ),
+            "time_bnds": (
+                ("time", "nv"),
+                time_bounds
+            )
+        },
+        coords={
+            "time": ("time", time_array, time_attrs),
+            "nv": [0, 1],
+            "x": ("x", x_coords, x_attrs),
+            "y": ("y", y_coords, y_attrs)
+        },
+        attrs=global_attrs
+    )
+ 
+    # update global date/time coverage attributes
+    netcdf_grid.attrs['date_created'] = (
+        datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+    )
+    netcdf_grid.attrs['time_coverage_start'] = (
+        min_time.strftime('%Y-%m-%dT%H:%M:%SZ')
+    )
+    netcdf_grid.attrs['time_coverage_end'] = (
+        max_time.strftime('%Y-%m-%dT%H:%M:%SZ')
+    )
+ 
+ 
+    # populate grid with per-observation values
+    idx_list = []
+    seen_key = set()
+    for row_n, row in enumerate(df_copy.itertuples(index=False)):
+        ix = int(i[row_n])   # x index
+        iy = int(j[row_n])   # y index
+        index_key = (ix, iy)
+        idx_list.append(index_key)
+ 
+        if index_key in seen_key:
+            print(f'Duplicate entry found for {ix}, {iy}')
+ 
+        seen_key.add(index_key)
+ 
+        netcdf_grid["sea_ice_speed"].values[0, iy, ix] = (
+            np.float32(row.sea_ice_speed)
         )
-        outlier_attrs = (
-            meta_ds["outlier_category"].attrs.copy()
+        netcdf_grid["sea_ice_x_displacement"].values[0, iy, ix] = (
+            np.float32(row.sea_ice_x_displacement)
         )
-        bearing_error_attrs = (
-            meta_ds["bearing_error"].attrs.copy()
+        netcdf_grid["sea_ice_y_displacement"].values[0, iy, ix] = (
+            np.float32(row.sea_ice_y_displacement)
         )
-        speed_error_attrs = (
-            meta_ds["speed_error"].attrs.copy()
+        netcdf_grid["direction_of_sea_ice_displacement"].values[
+            0, iy, ix
+        ] = np.float32(row.direction_of_sea_ice_displacement)
+        netcdf_grid["outlier_category"].values[
+            0, iy, ix
+        ] = np.int16(row.outlier_category)
+        netcdf_grid["bearing_error"].values[
+            0, iy, ix
+        ] = np.int16(row.bearing_error)
+        netcdf_grid["speed_error"].values[
+            0, iy, ix
+        ] = np.int16(row.speed_error)
+        netcdf_grid["measurement_error"].values[
+            0, iy, ix
+        ] = np.int16(row.measurement_error)
+ 
+ 
+    # update scene_i_j
+    scene_i_j[base_name] = list(zip(i_list, j_list))
+ 
+    # crop to populated values
+    data_mask = np.isfinite(netcdf_grid["sea_ice_speed"].values[0])
+    if np.any(data_mask):
+        filled_y, filled_x = np.where(data_mask)
+ 
+        y_start = int(filled_y.min())
+        y_end = int(filled_y.max())
+        x_start = int(filled_x.min())
+        x_end = int(filled_x.max())
+ 
+        # pad grid cells in case vectors extend outside of viewing area
+        pad_cells = 4
+        y_start = max(0, y_start - pad_cells)
+        y_end = min(netcdf_grid.sizes["y"] - 1, y_end + pad_cells)
+        x_start = max(0, x_start - pad_cells)
+        x_end = min(netcdf_grid.sizes["x"] - 1, x_end + pad_cells)
+ 
+        netcdf_grid = netcdf_grid.isel(
+            y=slice(y_start, y_end + 1),
+            x=slice(x_start, x_end + 1)
         )
-        measurement_error_attrs = (
-            meta_ds["measurement_error"].attrs.copy()
-        )
-        spatial_ref_attrs = meta_ds["spatial_ref"].attrs.copy()
-        x_attrs = meta_ds["x"].attrs.copy()
-        y_attrs = meta_ds["y"].attrs.copy()
-        time_attrs = meta_ds["time"].attrs.copy()
-
-        meta_ds.close()
-        del meta_ds
-        
-        
-        # create dataset from CDL
-        netcdf_grid = xr.Dataset(
-            data_vars={
-                "sea_ice_speed": (
-                    ("time", "y", "x"),
-                    np.full(grid_shape, np.nan, dtype=np.float32),
-                    sea_ice_speed_attrs
-                ),
-                "sea_ice_x_displacement": (
-                    ("time", "y", "x"),
-                    np.full(grid_shape, np.nan, dtype=np.float32),
-                    sea_ice_x_attrs
-                ),
-                "sea_ice_y_displacement": (
-                    ("time", "y", "x"),
-                    np.full(grid_shape, np.nan, dtype=np.float32),
-                    sea_ice_y_attrs
-                ),
-                "direction_of_sea_ice_displacement": (
-                    ("time", "y", "x"),
-                    np.full(grid_shape, np.nan, dtype=np.float32),
-                    direction_attrs
-                ),
-                "outlier_category": (
-                    ("time", "y", "x"),
-                    np.full(grid_shape, -9, dtype=np.int16),
-                    outlier_attrs
-                ),
-                "bearing_error": (
-                    ("time", "y", "x"),
-                    np.full(grid_shape, -9, dtype=np.int16),
-                    bearing_error_attrs
-                ),
-                "speed_error": (
-                    ("time", "y", "x"),
-                    np.full(grid_shape, -9, dtype=np.int16),
-                    speed_error_attrs
-                ),
-                "measurement_error": (
-                    ("time", "y", "x"),
-                    np.full(grid_shape, -9, dtype=np.int16),
-                    measurement_error_attrs
-                ),
-                "spatial_ref": (
-                    (),
-                    np.int32(0),
-                    spatial_ref_attrs
-                ),
-                "time_bnds": (
-                    ("time", "nv"),
-                    time_bounds
-                )
+ 
+ 
+    # save to NetCDF with zlib compression level 4
+    output_file_path = os.path.join(
+        config['nc_dir'], f"{base_name}.nc"
+    )
+    netcdf_grid.to_netcdf(
+        output_file_path, mode='w',
+        encoding={
+            'sea_ice_speed': {
+                'zlib': True, 'complevel': 4, 'dtype': 'float32'
             },
-            coords={
-                "time": ("time", time_array, time_attrs),
-                "nv": [0, 1],
-                "x": ("x", x_coords, x_attrs),
-                "y": ("y", y_coords, y_attrs)
+            'sea_ice_x_displacement': {
+                'zlib': True, 'complevel': 4, 'dtype': 'float32'
             },
-            attrs=global_attrs
-        )
-
-        # update date and time
-        netcdf_grid.attrs['date_created'] = (
-            datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
-            )
-        netcdf_grid.attrs['time_coverage_start'] = (
-            min_time.strftime('%Y-%m-%dT%H:%M:%SZ')
-            )
-        netcdf_grid.attrs['time_coverage_end'] = (
-            max_time.strftime('%Y-%m-%dT%H:%M:%SZ')
-            )
-        
-        
-        # update NetCDF with values from input data
-        idx_list = []
-        seen_key = set()
-        for row_n, row in enumerate(df_copy.itertuples(index=False)):
-            ix = int(i[row_n])   # x index
-            iy = int(j[row_n])   # y index
-            index_key = (ix, iy)
-            idx_list.append(index_key)
-            
-            if index_key in seen_key:
-                print(f'Duplcate entry found for {ix}, {iy}')
-                
-            seen_key.add(index_key)
-        
-            netcdf_grid["sea_ice_speed"].values[0, iy, ix] = (
-                np.float32(row.Speed_ms)
-            )
-            netcdf_grid["sea_ice_x_displacement"].values[0, iy, ix] = (
-                np.float32(row.U_vel_ms)
-            )
-            netcdf_grid["sea_ice_y_displacement"].values[0, iy, ix] = (
-                np.float32(row.V_vel_ms) # negate to match flipped grid y-axis
-            )
-            netcdf_grid["direction_of_sea_ice_displacement"].values[
-                0, iy, ix
-            ] = np.float32(row.Bear_deg)
-            netcdf_grid["outlier_category"].values[
-                0, iy, ix
-            ] = np.int16(row.outlier_category)
-            netcdf_grid["bearing_error"].values[
-                0, iy, ix
-            ] = np.int16(row.bearing_error)
-            netcdf_grid["speed_error"].values[
-                0, iy, ix
-            ] = np.int16(row.speed_error)
-            netcdf_grid["measurement_error"].values[
-                0, iy, ix
-            ] = np.int16(row.measurement_error)
-        
-        
-        # update scene_i_j
-        scene_i_j[base_name] = list(zip(i_list, j_list))
-        
-        # crop to populated values
-        data_mask = np.isfinite(netcdf_grid["sea_ice_speed"].values[0])
-        if np.any(data_mask):
-            filled_y, filled_x = np.where(data_mask)
-        
-            y_start = int(filled_y.min())
-            y_end = int(filled_y.max())
-            x_start = int(filled_x.min())
-            x_end = int(filled_x.max())
-        
-            # pad grid cells in case vectors extend outside of viewing area
-            pad_cells = 4
-            y_start = max(0, y_start - pad_cells)
-            y_end = min(netcdf_grid.sizes["y"] - 1, y_end + pad_cells)
-            x_start = max(0, x_start - pad_cells)
-            x_end = min(netcdf_grid.sizes["x"] - 1, x_end + pad_cells)
-        
-            netcdf_grid = netcdf_grid.isel(
-                y=slice(y_start, y_end + 1),
-                x=slice(x_start, x_end + 1)
-            )
-    
-        
-        # Save to NetCDF with compression level 4     
-        output_file_path = os.path.join(
-            config['nc_dir'], f"{base_name}.nc"
-        )
-        netcdf_grid.to_netcdf(
-            output_file_path, mode='w',
-            encoding={
-                'sea_ice_speed': {
-                    'zlib': True, 'complevel': 4, 'dtype': 'float32'
-                },
-                'sea_ice_x_displacement': {
-                    'zlib': True, 'complevel': 4, 'dtype': 'float32'
-                },
-                'sea_ice_y_displacement': {
-                    'zlib': True, 'complevel': 4, 'dtype': 'float32'
-                },
-                'direction_of_sea_ice_displacement': {
-                    'zlib': True, 'complevel': 4, 'dtype': 'float32'
-                },
-                'outlier_category': {
-                    'zlib': True, 'complevel': 4, 'dtype': 'int16',
-                    '_FillValue': np.int16(-9)
-                },
-                'bearing_error': {
-                    'zlib': True, 'complevel': 4, 'dtype': 'int16',
-                    '_FillValue': np.int16(-9)
-                },
-                'speed_error': {
-                    'zlib': True, 'complevel': 4, 'dtype': 'int16',
-                    '_FillValue': np.int16(-9)
-                },
-                'measurement_error': {
-                    'zlib': True, 'complevel': 4, 'dtype': 'int16',
-                    '_FillValue': np.int16(-9)
-                },
-                'time_bnds': {'dtype': 'float64'},
-                'spatial_ref': {'dtype': 'int32'}
-            }
-        )
-        
-        # log activity
-        logger = logging.getLogger('sar_drift_converter')
-        logger.info(f'Created NetCDF {output_file_path}')
-        
-    finally:
-        # Ensure that these lines are executed even if an error occurs
-        netcdf_grid.close()
-        del netcdf_grid
+            'sea_ice_y_displacement': {
+                'zlib': True, 'complevel': 4, 'dtype': 'float32'
+            },
+            'direction_of_sea_ice_displacement': {
+                'zlib': True, 'complevel': 4, 'dtype': 'float32'
+            },
+            'outlier_category': {
+                'zlib': True, 'complevel': 4, 'dtype': 'int16',
+                '_FillValue': np.int16(-9)
+            },
+            'bearing_error': {
+                'zlib': True, 'complevel': 4, 'dtype': 'int16',
+                '_FillValue': np.int16(-9)
+            },
+            'speed_error': {
+                'zlib': True, 'complevel': 4, 'dtype': 'int16',
+                '_FillValue': np.int16(-9)
+            },
+            'measurement_error': {
+                'zlib': True, 'complevel': 4, 'dtype': 'int16',
+                '_FillValue': np.int16(-9)
+            },
+            'time_bnds': {'dtype': 'float64'},
+            'spatial_ref': {'dtype': 'int32'}
+        }
+    )
+ 
+    # log activity
+    logger = logging.getLogger('sar_drift_converter')
+    logger.info(f'Created NetCDF {output_file_path}')
+ 
+    # finally:
+    #     # ensure dataset is closed even if an error occurs
+    #     netcdf_grid.close()
+    #     del netcdf_grid
 
 
 def create_shape_package(df, base_name, config):
     """
     Create a GeoPackage containing drift line vectors for SAR drift data.
-
-    Builds LineString geometries from start to end coordinates and writes
-    them to a single layer within a GeoPackage. Longitudes in the 0-360
-    range are normalized to -180/180 before geometry creation.
-
+ 
+    Builds LineString geometries from projected start and end coordinates
+    (EPSG:3413) and writes them as a single `drift_lines` layer within a
+    GeoPackage. A QML style file is embedded directly into the GeoPackage's
+    `layer_styles` table for automatic styling when opened in QGIS.
+ 
     Args:
-        df (pandas.DataFrame): Input DataFrame containing drift vectors.
+        df (pandas.DataFrame): Input DataFrame containing drift vectors, as
+            produced by `read_sar_drift_data_file` and `outlier_search`.
             Expected columns:
-                - 'Lon1', 'Lat1' (float): Starting longitude/latitude
-                                          (degrees).
-                - 'Lon2', 'Lat2' (float): Ending longitude/latitude (degrees).
-                Additional columns are preserved and written to the GeoPackage.
+                Projected coordinates (EPSG:3413, metres):
+                    - 'X1', 'Y1' (float): Start position.
+                    - 'X2', 'Y2' (float): End position.
+                Geographic coordinates (degrees):
+                    - 'longitude_1', 'latitude_1' (float): Start lon/lat.
+                    - 'longitude_2', 'latitude_2' (float): End lon/lat.
+                Timestamps and duration:
+                    - 'date_start' (str): Start datetime
+                                         ('%Y-%m-%d %H:%M:%S').
+                    - 'date_end'   (str): End datetime
+                                         ('%Y-%m-%d %H:%M:%S').
+                    - 'duration_s' (float): Observation duration (s).
+                Sensor identifiers:
+                    - 'sensor1', 'sensor2' (str): Satellite/sensor IDs.
+                Science variables:
+                    - 'sea_ice_x_displacement' (float): X displacement (m).
+                    - 'sea_ice_y_displacement' (float): Y displacement (m).
+                    - 'u_vel_ms' (float): X velocity component (m s⁻¹).
+                    - 'v_vel_ms' (float): Y velocity component (m s⁻¹).
+                    - 'sea_ice_speed' (float): Drift speed (m s⁻¹).
+                    - 'sea_ice_speed_kmdy' (float): Drift speed (km day⁻¹).
+                    - 'direction_of_sea_ice_displacement' (float): Forward
+                                                                   azimuth
+                                                                   (degrees).
+                    - 'distance' (float): Geodesic displacement distance (m).
+                Outlier flag (level-dependent):
+                    - 'outlier_category' (str): Two-digit outlier code;
+                      included only when config['level'] in ['00', '02'].
         base_name (str): Base filename (without extension) used to name the
             output GeoPackage file `<config['gpkg_dir']>/<base_name>.gpkg`.
         config (dict): Configuration dictionary containing:
                 - 'gpkg_dir' (str): Output directory where the GeoPackage
                                     is written.
                 - 'qml_file' (str): Path to the QML style file to embed.
-
+                - 'level'  (str):   Processing level; controls whether
+                                    `outlier_category` is included
+                                    ('00' or '02' = include, otherwise omit).
+ 
     Returns:
         None
-
+ 
     Notes:
-        - CRS is set to EPSG:4326 (geographic lat/lon).
-        - A helper column `geometry_type` is added with value 'line'.
-        - The QML style is embedded directly into the GeoPackage's
-          layer_styles table, so no QML file is needed by end users.
+        - Geometry is a `LineString` from `(X1, Y1)` to `(X2, Y2)` in
+          EPSG:3413 projected metres, not from geographic coordinates.
+        - CRS is set to EPSG:3413 (NSIDC Sea Ice Polar Stereographic North).
+        - A helper column `geometry_type` is added with the literal value
+          `'line'` to identify the layer geometry type.
+        - Only the columns listed in `needed_cols` (plus `outlier_category`
+          where applicable) are written; all other DataFrame columns are
+          excluded.
+        - The QML style is embedded via `_embed_qml_style`, so end users do
+          not need the QML file present to load the styled layer in QGIS.
     """
 
     import os
@@ -1799,58 +1927,35 @@ def create_shape_package(df, base_name, config):
     from shapely.geometry import LineString
     
     # add X and Y for EPSG:3411 projection
+    df_local = df.copy()
+
+
+    # keep necessary columns for GeoPackage
     needed_cols = [
-        'File1', 'File2', 'Date1', 'Date2', 'JS_Duration', 'Time1_JS',
-        'Lon1', 'Lat1', 'Lon2', 'Lat2', 'Sat1', 'Sat2',
-        'U_vel_ms', 'V_vel_ms', 'Speed_ms', 'Bear_deg',
-        'outlier_category'
+        'sensor1', 'sensor2',
+        'longitude_1', 'latitude_1', 'longitude_2', 'latitude_2',
+        'X1', 'Y1', 'X2', 'Y2',
+        'date_start', 'date_end', 'duration_s',
+        'sea_ice_x_displacement', 'sea_ice_y_displacement',
+        'u_vel_ms', 'v_vel_ms','sea_ice_speed', 'sea_ice_speed_kmdy',
+        'direction_of_sea_ice_displacement', 'distance'
     ]
-    df_local = df[needed_cols].copy()
     
-    tf = _set_transformer()
-    df_local['X1'], df_local['Y1'] = tf['4326_to_3411'].transform(
-        df_local['Lon1'].values,
-        df_local['Lat1'].values
-    )
-    
-    df_local['X2'], df_local['Y2'] = tf['4326_to_3411'].transform(
-        df_local['Lon2'].values,
-        df_local['Lat2'].values
-    )
+    if config['level'] in ['00', '02']:
+        needed_cols.append('outlier_category')
+        
+    df_local=df_local[needed_cols]
     
     df_local['geometry_line'] = df_local.apply(
-        lambda row: LineString([
-            (row['X1'], row['Y1']),
-            (
-                row['X1'] + row['U_vel_ms'] * row['JS_Duration'],
-                row['Y1'] + row['V_vel_ms'] * row['JS_Duration']
-            )
-        ]),
+        lambda row: LineString(
+            [
+                (row['X1'], row['Y1']),
+                (row['X2'], row['Y2'])
+            ]
+        ),
         axis=1
     )
     
-    
-    # rename the columns to match NetCDF variable names
-    df_local.rename(columns=
-              {
-                  'X1': 'longitude',
-                  'Y1': 'latitude',
-                  'Time1_JS': 'time',
-                  'JS_Duration': 'duration_s',
-                  'Speed_ms': 'sea_ice_speed',
-                  'U_vel_ms': 'sea_ice_x_displacement',
-                  'V_vel_ms': 'sea_ice_y_displacement',
-                  'Bear_deg': 'direction_of_sea_ice_displacement',
-                  'Sat1': 'sensor1',
-                  'Sat2': 'sensor2'
-              },
-              inplace=True
-    )
-    df_local.drop(
-        ['Lon1', 'Lon2', 'Lat1', 'Lat2', 'X2', 'Y2'],
-        axis=1,
-        inplace=True
-    )
     
     # Create GeoDataFrame for lines (lines only)
     gdf_line = gpd.GeoDataFrame(
@@ -1859,14 +1964,6 @@ def create_shape_package(df, base_name, config):
     # Add a column to distinguish geometry type    
     gdf_line['geometry_type'] = 'line'  
     
-    # change order of columns
-    column_order = [
-        'longitude','latitude', 'time','duration_s',
-        'sea_ice_x_displacement','sea_ice_y_displacement',
-        'sea_ice_speed','direction_of_sea_ice_displacement',
-        'sensor1', 'sensor2', 'geometry_line'
-    ]
-    df_local = df_local[column_order]
    
     # Save as a single GeoPackage file (supports mixed geometries)
     geopackage_file = f"{base_name}.gpkg"
@@ -1877,7 +1974,7 @@ def create_shape_package(df, base_name, config):
     gdf_line = gdf_line.rename(
         columns={'geometry_line': 'geometry'}
     ).set_geometry('geometry')
-    gdf_line = gdf_line.set_crs(tf['crs_string_3411'])
+    gdf_line = gdf_line.set_crs('EPSG:3413')
     gdf_line.to_file(output_file_path, layer='drift_lines', driver='GPKG')
     
 
@@ -1887,11 +1984,153 @@ def create_shape_package(df, base_name, config):
     # log activity
     logger = logging.getLogger('sar_drift_converter')
     logger.info(f'Created GeoPackage {output_file_path}')
-    
-    
-    # *0782308532*0782393500*
         
     
+def create_plotly_html(base_name, df, config, output_path=None):
+    """
+    Create an interactive Plotly map of sea-ice drift vectors from a DataFrame.
+
+    Args:
+        config (dict): Must contain 'html_dir' (str) for output path.
+        base_name (str): Used to name the output HTML file.
+        df (pd.DataFrame): Must contain columns:
+            Lon1, Lat1, Lon2, Lat2,
+            sea_ice_x_displacement, sea_ice_y_displacement,
+            sea_ice_speed, JS_Duration
+    """
+    import os
+    import numpy as np
+    import plotly.graph_objects as go
+
+    SECONDS_PER_DAY = 86_400
+
+    mag = np.hypot(
+        df['sea_ice_x_displacement'],
+        df['sea_ice_y_displacement']
+    ) / df['duration_s'] * SECONDS_PER_DAY
+
+    if len(mag) == 0 or np.all(np.isnan(mag)):
+        import logging
+        logging.getLogger('sar_drift').warning(
+            f'No valid observations for {base_name}, skipping Plotly HTML.'
+        )
+        return
+
+    # normalize mag to 0-1 for colorscale lookup
+    mag_min, mag_max = np.nanmin(mag), np.nanmax(mag)
+    mag_norm = (mag - mag_min) / (mag_max - mag_min + 1e-9)
+
+    # sample viridis colorscale
+    import plotly.colors as pc
+    def mag_to_color(val):
+        return pc.sample_colorscale('Viridis', val)[0]
+
+    fig = go.Figure()
+
+    # one trace per vector, colored by speed
+    vectors = zip(
+        df['longitude_1'], df['latitude_1'],
+        df['longitude_2'], df['latitude_2'],
+        mag, mag_norm
+    )
+    for i, (lon1, lat1, lon2, lat2, m, mn) in enumerate(vectors):
+        fig.add_trace(go.Scattergeo(
+            lon=[lon1, lon2],
+            lat=[lat1, lat2],
+            mode='lines',
+            line=dict(width=1.5, color=mag_to_color(mn)),
+            hoverinfo='skip',
+            showlegend=False
+        ))
+
+        
+    # start points - green
+    fig.add_trace(go.Scattergeo(
+        lon=df['longitude_1'],
+        lat=df['latitude_1'],
+        mode='markers',
+        marker=dict(size=4, color='green', symbol='circle'),
+        hoverinfo='skip',
+        name='Start points'
+    ))
+    
+    
+    # end points - red
+    fig.add_trace(go.Scattergeo(
+        lon=df['longitude_2'],
+        lat=df['latitude_2'],
+        mode='markers',
+        marker=dict(size=4, color='red', symbol='circle'),
+        text=[
+            f'Speed: {m:.1f} m/day<br>'
+            f'Bearing: {b:.0f}°<br>'
+            f'Lon: {lo:.4f}  Lat: {la:.4f}<br>'
+            f'Sat: {s1}/{s2}'
+            for m, b, lo, la, s1, s2 in zip(
+                mag,
+                df['direction_of_sea_ice_displacement'],
+                df['longitude_2'], df['latitude_2'],
+                df['sensor1'], df['sensor2']
+            )
+        ],
+        hoverinfo='text',
+        name='End points'
+    ))        
+
+
+    # invisible trace just for the colorbar
+    fig.add_trace(go.Scattergeo(
+        lon=df['longitude_2'],
+        lat=df['latitude_2'],
+        mode='markers',
+        marker=dict(
+            size=4,
+            opacity=0,
+            color=mag,
+            colorscale='Viridis',
+            colorbar=dict(title='Speed (m/day)', thickness=15, len=0.5),
+            showscale=True
+        ),
+        hoverinfo='skip',
+        showlegend=False
+    ))
+
+    # center_lat = float(df['Lat1'].mean())
+    # center_lon = float(df['Lon1'].mean())
+
+    fig.update_layout(
+        title=dict(
+            text=(
+                f'Sea-ice Drift Vectors — {base_name}<br>'
+                f'<sup>Observations: {len(df)} | EPSG:4326</sup>'
+            ),
+            x=0.5
+        ),
+        geo=dict(
+            projection_type='stereographic',
+            projection_rotation=dict(lat=90, lon=0),
+            center=dict(lat=75, lon=0),
+            showland=True, landcolor='lightgray',
+            showocean=True, oceancolor='aliceblue',
+            showcoastlines=True, coastlinecolor='black',
+            lataxis=dict(range=[60, 90]),
+            projection_scale=1.0,  # lower = more zoomed out, adjust to taste
+        ),
+        dragmode='zoom',
+        width=2000,
+        height=2000
+    )
+
+    if output_path:
+        html_file = output_path
+    else:
+        html_file = os.path.join(config['html_dir'], f'{base_name}.html')
+    fig.write_html(html_file, include_plotlyjs='cdn')
+
+    import logging
+    logging.getLogger('sar_drift').info(f'Created Plotly HTML {html_file}')
+
+
 def create_png(config, base_name):
     """
     Create and save a PNG map of sea-ice drift vectors from a NetCDF file.
@@ -2372,7 +2611,7 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
             }
         )
     
-        if update_log and config['version'] == '00':
+        if update_log and config['level'] == '00':
             update_df = pd.DataFrame(update_log)
             df_filter = update_df['overwrite']
             update_df = update_df[df_filter].drop(columns='overwrite')
@@ -2420,7 +2659,7 @@ def combine_daily_geopackage(gpkg_files, daily_gpkg_path, config):
         f'Created daily GeoPackage {daily_gpkg_path} | '
         f'scenes={len(gdfs)} | rows={len(daily_gdf)}'
     )
-
+  
 
 def overlay_sar_drift_on_geotiff(config, gdf_lines, df_sar, base_name):
     """
@@ -2696,400 +2935,4 @@ def overlay_sar_drift_on_geotiff(config, gdf_lines, df_sar, base_name):
     )
     fig.savefig(png_file, bbox_inches='tight', dpi=300)
     plt.close(fig)
-        
-
-#==============
-# JSON for STAC
-#==============
-import json
-import re
-
-DATE_PATTERN = re.compile(r"_(\d{8})")
-BBOX = [-180, 60, 180, 90]
-GEOMETRY = {
-    "type": "Polygon",
-    "coordinates": [[
-        [-180, 60],
-        [ 180, 60],
-        [ 180, 90],
-        [-180, 90],
-        [-180, 60]
-    ]]
-}
-
-
-def create_json_for_output_file(config, file_url, base_name, ext, data_type):
-    start_dt, end_dt = _parse_datetime_from_path(base_name)
-    
-    return {
-        "type": "Feature",
-        "stac_version": "1.0.0",
-        "stac_extensions": [
-            "https://stac-extensions.github.io/projection/v1.1.0/schema.json"
-        ],
-        "id": base_name,
-        "collection": f"sar_drift_ice_velocities_v{config['version']}",
-        "geometry": GEOMETRY,
-        "bbox":BBOX,
-        "properties": {
-            "datetime": start_dt,
-            "start_datetime": start_dt,
-            "end_datetime": end_dt,
-            "proj:epsg": 3411
-        },
-        "links": [
-            {
-                "rel": "collection",
-                "href": "./collection.json",
-                "type": "application/json"
-            },
-            {
-                "rel": "parent",
-                "href": "./collection.json",
-                "type": "application/json"
-            },
-            {
-                "rel": "root",
-                "href": "../../catalog.json",
-                "type": "application/json"
-            }
-        ],
-        "assets": {
-            "data": {
-                "href": file_url,
-                "type": data_type,
-                "title": f'{base_name}.{ext}',
-                "roles": ["data"],
-                "pw:service_type": "http"
-            }
-        }
-    }
-
-
-def make_item(collection_id, file_url, base_name, ext, data_type):
-    start_dt, end_dt = _parse_datetime_from_path(base_name)
-
-    return {
-        "type": "Feature",
-        "stac_version": "1.0.0",
-        "stac_extensions": [
-            "https://stac-extensions.github.io/projection/v1.1.0/schema.json"
-        ],
-        "id": f'{base_name}.{ext}',
-        "collection": collection_id,
-        "geometry": GEOMETRY,
-        "bbox": BBOX,
-        "properties": {
-            "datetime": start_dt,
-            "start_datetime": start_dt,
-            "end_datetime": end_dt,
-            "proj:epsg": 3411
-        },
-        "links": [
-            {
-                "rel": "collection",
-                "href": "./collection.json",
-                "type": "application/json"
-            },
-            {
-                "rel": "parent",
-                "href": "./collection.json",
-                "type": "application/json"
-            },
-            {
-                "rel": "root",
-                "href": "../../catalog.json",
-                "type": "application/json"
-            }
-        ],
-        "assets": {
-            "data": {
-                "href": file_url,
-                "type": data_type,
-                "title": f'{base_name}.{ext}',
-                "roles": ["data"],
-                "pw:service_type": "http"
-            }
-        }
-    }
-
-
-def update_catalog_json(config, rel_items):
-    dates = [item["title"] for item in rel_items]
-    date_min, date_max = min(dates)[:10], max(dates)[:10]
-    
-    return {
-        "type": "Collection",
-        "id": f"sar_drift_ice_velocities_v{config['version']}",
-        "stac_version": "1.0.0",
-        "stac_extensions": [
-            "https://stac-extensions.github.io/scientific/v1.0.0/schema.json",
-            "https://stac-extensions.github.io/projection/v1.1.0/schema.json"
-            ],
-        "title":
-            "SAR drift derived sea ice velocities in Arctic region - "
-            f"Version {config['version']}.",
-        "description": 
-            "Analysis on daily images taken by satellite sensors that "
-            "measures sea ice drift bearing and velocity. The images "
-            "have a Fourier transformation that distinguished prominent "
-            "features and measures the change between the daily "
-            "satellite images. NetCDF output haved been filtered and "
-            "outliers detected. If the speed in km/day and bearing are "
-            "both zero, the observation was discarded. If the first max "
-            "correlation values is greater than the second max "
-            "correlation value, the observation was discarded. If the "
-            "observation file has more than 60% of its records where max "
-            "correlation 1 is greater than max correlation 2, the entire "
-            "file is discarded. Outlier categories applied using two "
-            "outlier passes identifying Mahalanobis and z-score "
-            "thresholds. Both NetCDF and GeoPackage files created.",
-        "license": "proprietary",
-        "keywords": [
-            "algorithms",
-            "altimetry",
-            "Arctic",
-            "EARTH SCIENCE>CLIMATE INDICATORS>CRYOSPHERIC "
-            "INDICATORS>SEA ICE VELOCITY",
-            "remote sensing",
-            "sea ice",
-            "velocity"
-        ],
-        "providers": [
-            {
-                "name": "NOAA NESDIS STAR",
-                "roles": [
-                    "producer",
-                    "processor"
-                ]
-            }
-        ],
-        "extent": {
-            "spatial": {
-                "bbox": BBOX
-            },
-            "temporal": {
-                "interval": [
-                    [
-                        f"{date_min}T00:00:00+00:00",
-                        f"{date_max}T00:00:00+00:00"
-                    ]
-                ]
-            }
-        },
-        "summaries": {
-            "platform": [
-                "ICESat-2, CryoSat-2"
-            ],
-            "instruments": [
-                ""
-            ],
-            "proj:epsg": [
-                3411
-            ]
-        },
-        "links": [
-            {
-                "rel": "self",
-                "href": (
-                    "./collections/sar_drift_ice_velocities_v"
-                    f"{config['version']}/collection.json"
-                ),
-                "type": "application/json",
-                "title": "This collection"
-            },
-            {
-                "rel": "root",
-                "href": "../../catalog.json",
-                "type": "application/json",
-                "title": "STAC Catalog"
-            },
-            {
-                "rel": "parent",
-                "href": "../../catalog.json",
-                "type": "application/json",
-                "title": "STAC Catalog"
-            },
-            {
-                "rel": "about",
-                "href": "https://www.star.nesdis.noaa.gov/socd/mecb/sar/",
-                "type": "text/html",
-                "title": "ERDDAP Data Access Form"
-            },
-            {
-                "rel": "describedby",
-                "href": "https://www.star.nesdis.noaa.gov/socd/mecb/sar/",
-                "type": "text/html",
-                "title": "ERDDAP Dataset Information"
-            },
-            *rel_items
-        ],
-        "assets": {
-            "data": {
-                "href": (
-                    "https://www.star.nesdis.noaa.gov/socd/mecb/sar/"
-                    "sea_ice_drift_vectors.php"
-                ),
-                "type": "text/html",
-                "title": "HTTPS data directory",
-                "roles": [
-                    "data"
-                ],
-                "pw:service_type": "https",
-                "pw:base_url": (
-                    "https://www.star.nesdis.noaa.gov/socd/mecb/sar/"
-                    "sea_ice_drift_vectors.php"
-                )
-            }
-        },
-        "item_assets": {
-            "LaRA_sd_5yr": {
-                "type": "application/x-netcdf",
-                "title": "SAR Drift ice velocities",
-                "roles": [
-                    "data"
-                ]
-            },
-            "grid_lat": {
-                "type": "application/x-netcdf",
-                "title": "grid_lat",
-                "roles": [
-                    "data"
-                ]
-            },
-            "grid_lon": {
-                "type": "application/x-netcdf",
-                "title": "grid_lon",
-                "roles": [
-                    "data"
-                ]
-            }
-        },
-        "pw:service_type": "https",
-        "pw:conventions": "CF-1.6, ACDD-1.3, COARDS",
-        "pw:naming_authority": "",
-        "pw:standard_name_vocabulary": "CF Standard Name Table v70",
-        "pw:processing_level": "NOAA Level 3",
-        "pw:resolution_spatial": "",
-        "pw:resolution_temporal": "P1M",
-        "pw:license_text": "Creative Commons CC0 (CC 1.0)",
-        "pw:creator_name": "NOAA NESDIS STAR",
-        "pw:creator_email": "christopher dot jackson@noaa.gov",
-        "proj:epsg": 3411,
-        "proj:proj4": (
-            "+proj=stere +lat_0=90 +lat_ts=70 +lon_0=-45 +x_0=0 "
-            "+y_0=0 +a=6378273 +b=6356889.449 +units=m +no_defs +type=crs"
-        )
-    }
-
-                
-def create_json_for_stac(config):
-    from glob import glob
-    
-    
-    # build NetCDF file list
-    nc_files = sorted(glob(os.path.join(config['output_dir'], "*.nc")))
-    data_list = [
-        {
-            "type": "application/x-netcdf",
-            "files": nc_files,
-        }
-    ]
-    
-    
-    # build GeoPackage file list
-    if config['version'] in ['02', '03']:
-        gpkg_files = sorted(glob(os.path.join(config['output_dir'], "*.gpkg")))
-        data_list.append(
-            {
-                "type": "application/vnd.sqlite3",
-                "files": gpkg_files,
-            }
-        )
-
-
-    # build HTML file list
-    if config['version'] == '03':
-        html_files = sorted(glob(os.path.join(config['output_dir'], "*.html")))
-        data_list.append(
-            {
-                "type": "text/html",
-                "files": html_files,
-            }
-        )
-
-
-    items, rel_items = [], []
-    for entry in data_list:
-        data_type = entry['type']
-        for data_file in entry['files']:
-            base_name, ext = os.path.splitext(os.path.basename(data_file))
-            ext = ext.replace('.', '')
-            file_url = f"http://localhost:8001/{base_name}.{ext}"
-
-            json_output_file = create_json_for_output_file(
-                config=config,
-                file_url=file_url,
-                base_name=base_name,
-                ext=ext,
-                data_type=data_type
-            )
-
-            
-            output_path = os.path.join(
-                'D:\\', 'NOAA', 'GitHub', 'polarwatch', 'stac', 'collections',
-                f'sar_drift_ice_velocities_v{config["version"]}',
-                f'{base_name}_{ext}.json'
-            )
-            with open(output_path, 'w') as f:
-                json.dump(json_output_file, f, indent=2)
-                
-                
-            item = make_item(
-                collection_id=f'sar_drift_ice_velocities_v{config["version"]}',
-                file_url=file_url,
-                base_name=base_name,
-                ext=ext,
-                data_type=data_type
-                
-            )
-            items.append(item)
-            
-            
-            start_dt, _ = _parse_datetime_from_path(data_file)
-            rel_item = {
-                 "rel": "item",
-                 "href": f"./{base_name}_{ext}.json",
-                 "type": "application/geo+json",
-                 "title": start_dt
-            }
-            rel_items.append(rel_item)
-
-
-    feature_collection = {
-        "type": "FeatureCollection",
-        "features": items,
-        "numberReturned": len(items)
-    }
-
-
-    # write items.json
-    output_path = os.path.join(
-        'D:\\', 'NOAA', 'GitHub', 'polarwatch', 'stac', 'collections',
-        f'sar_drift_ice_velocities_v{config["version"]}', 'items.json'
-    )
-    with open(output_path, "w") as f:
-        json.dump(feature_collection, f, indent=2)
-    print(f"Written {len(items)} items to {output_path}")    
-               
-    # write collection.json
-    collection = update_catalog_json(config, rel_items)
-    collection_path = os.path.join(
-        'D:\\', 'NOAA', 'GitHub', 'polarwatch', 'stac', 'collections',
-        f'sar_drift_ice_velocities_v{config["version"]}', 'collection.json'
-    )
-    with open(collection_path, 'w') as f:
-        json.dump(collection, f, indent=2)
-    print(f"Written collection.json to {collection_path}")        
-
     

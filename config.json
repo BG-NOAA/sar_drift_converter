@@ -5,8 +5,10 @@
   "netcdf_cdl_file": "meta/sar_drift_output.cdl",
   "netcdf_template_file": "meta/NSIDC0771_LatLon_PS_N12.5km_v1.1.nc",
   "qml_file": "meta/outlier_style.qml",
+  "file_server": "SIVelocity_SAR",
   "clear_output_dir": true,
   "batch_process": true,
+  "epsg": 3413,
   "delimiter": ",",
   "skip_rows_before_header": 0,
   "use_geotiff": false,
@@ -16,5 +18,5 @@
   "quiver_scale_small_area": 1.0,
   "quiver_scale_large_area": 0.1,
   "verbose": true,
-  "version": "01"
+  "level": "02"
 }

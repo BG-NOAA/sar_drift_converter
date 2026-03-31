@@ -184,6 +184,121 @@ you should expect (directories from `config.json`):
 
 ---
 
+## Variable Reference
+
+Variables flow through three stages: raw columns read from the CSV source file, derived columns computed during pipeline processing, and variables written to the NetCDF and GeoPackage outputs.
+
+### CSV source — raw input columns
+
+Columns marked *dropped* are consumed during processing but not carried forward into any output file.
+
+| Column | Units | Retained | Description |
+|--------|-------|----------|-------------|
+| `File1` | — | ✓ | Filename of the first SAR scene (start image) |
+| `File2` | — | ✓ | Filename of the second SAR scene (end image) |
+| `Time1_JS` | s | dropped | Start time as Julian seconds since 2000-01-01 00:00:00 |
+| `Time2_JS` | s | dropped | End time as Julian seconds since 2000-01-01 00:00:00 |
+| `Lon1` | degrees | renamed → `longitude_1` | Starting longitude of the tracked ice feature |
+| `Lat1` | degrees | renamed → `latitude_1` | Starting latitude of the tracked ice feature |
+| `Lon2` | degrees | renamed → `longitude_2` | Ending longitude of the tracked ice feature |
+| `Lat2` | degrees | renamed → `latitude_2` | Ending latitude of the tracked ice feature |
+| `Bear_deg` | degrees | dropped | Source-file bearing; used in `filter_input_data` to remove zero-bearing rows, then dropped |
+| `Speed_kmdy` | km/day | dropped | Source-file speed; used in `filter_input_data` for speed threshold filtering, then dropped |
+| `U_vel_ms` | m s⁻¹ | dropped | Source-file x-velocity component; dropped after read (recomputed from projected coordinates) |
+| `V_vel_ms` | m s⁻¹ | dropped | Source-file y-velocity component; dropped after read (recomputed from projected coordinates) |
+| `Maxcorr1` | — | ✓ | Cross-correlation score of the first (lower-ranked) match candidate |
+| `Maxcorr2` | — | ✓ | Cross-correlation score of the second (best) match candidate; must exceed `Maxcorr1` for the row to pass filtering |
+| `img1_mean`, `img1_std` | — | dropped | Image 1 patch mean and standard deviation |
+| `img2_mean`, `img2_std` | — | dropped | Image 2 patch mean and standard deviation |
+| `img1s_mean`, `img1s_std` | — | dropped | Image 1 sub-patch mean and standard deviation |
+| `Npnt` | — | dropped | Number of points used in the correlation |
+| `Offset1`, `Offset2` | — | dropped | Correlation offset values |
+
+### Derived — computed in pipeline
+
+These columns are added by `read_sar_drift_data_file` and `outlier_search` and are carried through all downstream processing.
+
+| Column | CRS / Reference | Units | Description |
+|--------|----------------|-------|-------------|
+| `date_start` | — | — | Start datetime converted from `Time1_JS` (format: `YYYY-MM-DD HH:MM:SS`) |
+| `date_end` | — | — | End datetime converted from `Time2_JS` |
+| `duration_s` | — | s | Observation duration (`Time2_JS − Time1_JS`) |
+| `longitude_1` | EPSG:4326 | degrees | Starting longitude (renamed from `Lon1`) |
+| `latitude_1` | EPSG:4326 | degrees | Starting latitude (renamed from `Lat1`) |
+| `longitude_2` | EPSG:4326 | degrees | Ending longitude (renamed from `Lon2`) |
+| `latitude_2` | EPSG:4326 | degrees | Ending latitude (renamed from `Lat2`) |
+| `sensor1` | — | — | Satellite identifier extracted from `File1` (prefix before first underscore) |
+| `sensor2` | — | — | Satellite identifier extracted from `File2` |
+| `X1` | EPSG:3413 | m | Projected x-coordinate of start position |
+| `Y1` | EPSG:3413 | m | Projected y-coordinate of start position |
+| `X2` | EPSG:3413 | m | Projected x-coordinate of end position |
+| `Y2` | EPSG:3413 | m | Projected y-coordinate of end position |
+| `sea_ice_x_displacement` | EPSG:3413 | m | X displacement (`X2 − X1`) |
+| `sea_ice_y_displacement` | EPSG:3413 | m | Y displacement (`Y2 − Y1`) |
+| `u_vel_ms` | EPSG:3413 | m s⁻¹ | X-component of velocity (`sea_ice_x_displacement / duration_s`) |
+| `v_vel_ms` | EPSG:3413 | m s⁻¹ | Y-component of velocity (`sea_ice_y_displacement / duration_s`) |
+| `sea_ice_speed` | geodesic | m s⁻¹ | Drift speed from geodesic distance / `duration_s` |
+| `sea_ice_speed_kmdy` | geodesic | km/day | Drift speed in km/day from geodesic distance |
+| `direction_of_sea_ice_displacement` | geodesic | degrees | Forward azimuth from geodesic inverse calculation (WGS84) |
+| `distance` | geodesic | m | Geodesic distance between start and end positions (WGS84) |
+| `outlier_category` | — | — | Two-digit outlier code (see [Outlier detection](#outlier-detection-optional)); fill = `−9` (version `01`) |
+| `bearing_error` | — | — | `1` if `direction_of_sea_ice_displacement == 0` or `sea_ice_speed == 0`; `0` = valid; `−9` = not computed (versions `02`/`03`) |
+| `speed_error` | — | — | `1` if speed exceeds threshold (25 km/day for 50 km files; 35 km/day for 75 km files); `0` = valid; `−9` = not computed (versions `02`/`03`) |
+| `measurement_error` | — | — | `1` if `Maxcorr1 > Maxcorr2`; `0` = valid; `−9` = not computed (versions `02`/`03`) |
+
+### NetCDF output variables
+
+All gridded data variables have dimensions `(time, y, x)` projected on the NSIDC 12.5 km polar stereographic grid (EPSG:3413). Coordinates and auxiliary variables are also listed.
+
+| Variable | Dimensions | Type | Units | Description |
+|----------|------------|------|-------|-------------|
+| `sea_ice_speed` | (time, y, x) | float32 | m s⁻¹ | Gridded sea ice drift speed |
+| `sea_ice_x_displacement` | (time, y, x) | float32 | m | X-component of ice displacement |
+| `sea_ice_y_displacement` | (time, y, x) | float32 | m | Y-component of ice displacement |
+| `direction_of_sea_ice_displacement` | (time, y, x) | float32 | degrees | Drift direction (forward azimuth) |
+| `outlier_category` | (time, y, x) | int16 | — | Outlier classification code; fill value = `−9` |
+| `bearing_error` | (time, y, x) | int16 | — | Bearing validity flag; fill value = `−9` |
+| `speed_error` | (time, y, x) | int16 | — | Speed threshold flag; fill value = `−9` |
+| `measurement_error` | (time, y, x) | int16 | — | Cross-correlation quality flag; fill value = `−9` |
+| `spatial_ref` | scalar | int32 | — | CRS container variable holding WKT/proj4 projection metadata |
+| `time_bnds` | (time, nv=2) | float64 | s | CF time bounds: `[min(date_start), max(date_end)]` in seconds since 2000-01-01 |
+| `time` *(coord)* | (time) | float64 | s | Scene reference time: `min(date_start)` in seconds since 2000-01-01 |
+| `x` *(coord)* | (x) | float64 | m | EPSG:3413 x-coordinates of the 12.5 km polar stereographic grid |
+| `y` *(coord)* | (y) | float64 | m | EPSG:3413 y-coordinates of the 12.5 km polar stereographic grid |
+
+### GeoPackage output columns
+
+Layer name: `drift_lines`. CRS: EPSG:3413. Geometry: `LineString` from `(X1, Y1)` to `(X2, Y2)` in projected metres.
+
+| Column | CRS / Reference | Units | Description |
+|--------|----------------|-------|-------------|
+| `sensor1` | — | — | Satellite identifier for the start scene |
+| `sensor2` | — | — | Satellite identifier for the end scene |
+| `longitude_1` | EPSG:4326 | degrees | Starting longitude |
+| `latitude_1` | EPSG:4326 | degrees | Starting latitude |
+| `longitude_2` | EPSG:4326 | degrees | Ending longitude |
+| `latitude_2` | EPSG:4326 | degrees | Ending latitude |
+| `X1` | EPSG:3413 | m | Projected x-coordinate of start position |
+| `Y1` | EPSG:3413 | m | Projected y-coordinate of start position |
+| `X2` | EPSG:3413 | m | Projected x-coordinate of end position |
+| `Y2` | EPSG:3413 | m | Projected y-coordinate of end position |
+| `date_start` | — | — | Start datetime string (`YYYY-MM-DD HH:MM:SS`) |
+| `date_end` | — | — | End datetime string (`YYYY-MM-DD HH:MM:SS`) |
+| `duration_s` | — | s | Observation duration in seconds |
+| `sea_ice_x_displacement` | EPSG:3413 | m | X displacement (matches NetCDF variable) |
+| `sea_ice_y_displacement` | EPSG:3413 | m | Y displacement (matches NetCDF variable) |
+| `u_vel_ms` | EPSG:3413 | m s⁻¹ | X-component of velocity |
+| `v_vel_ms` | EPSG:3413 | m s⁻¹ | Y-component of velocity |
+| `sea_ice_speed` | geodesic | m s⁻¹ | Drift speed (matches NetCDF variable) |
+| `sea_ice_speed_kmdy` | geodesic | km/day | Drift speed in km/day |
+| `direction_of_sea_ice_displacement` | geodesic | degrees | Drift direction (matches NetCDF variable) |
+| `distance` | geodesic | m | Geodesic displacement distance |
+| `outlier_category` | — | — | Two-digit outlier code; included only in versions `00` and `02` |
+| `geometry` | EPSG:3413 | — | `LineString` from `(X1, Y1)` to `(X2, Y2)` in projected metres |
+| `geometry_type` | — | — | Literal string `'line'` identifying the layer geometry type |
+
+---
+
 ## Outlier detection (optional)
 
 The main outlier routine is implemented in `util.outlier_search(...)` and supports:
