@@ -364,6 +364,40 @@ These require `matplotlib` and `cartopy` (and GeoTIFF tooling where applicable).
 
 ---
 
+## Notebooks
+
+### `sar_sea_ice_drift_netcdf_layer_viewer.ipynb`
+
+An interactive Jupyter notebook for exploring and exporting individual time layers from the daily SAR sea-ice drift NetCDF product.
+
+**What it does:**
+
+- Opens a NetCDF file and displays a high-level dataset summary
+- Lists all `layer_id` values so a layer can be located by scene ID or index
+- Computes per-variable statistics (shape, valid count, min/max/mean/std) for a selected layer
+- Exports a selected layer to a **GeoPackage** (`drift_lines`, EPSG:3413) with an embedded QGIS QML style
+- Renders a **quiver plot PNG** of drift vectors on a polar stereographic basemap
+
+**Key parameters (set by the user):**
+
+| Parameter | Description |
+|-----------|-------------|
+| `nc_path` | Path to the input NetCDF file |
+| `selected_layer_index` | Integer index of the time layer to export/plot |
+| `has_outliers` | `True` for version `02` files (colors arrows by outlier category); `False` for versions `01`/`03` (colors by displacement magnitude) |
+
+**Outputs written to disk:**
+
+| File | Location | Description |
+|------|----------|-------------|
+| `<layer_id>.gpkg` | `layer_to_gpkg/` | GeoPackage with `drift_lines` layer and embedded QML style |
+
+The PNG plot can be saved locally by right-clicking the inline image and choosing *Save Image As*.
+
+**Dependencies:** See [Requirements](#requirements). The notebook includes an install cell (set to `Raw NBConvert` by default — change to `Code` to run).
+
+---
+
 ## Quick checklist
 
 1. Update `config.json` paths (`sar_drift_directory`, output dirs, CDL template)
