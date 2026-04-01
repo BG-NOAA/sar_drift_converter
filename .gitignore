@@ -9,7 +9,6 @@
 
 # Jupyter Notebook Checkpoints
 .ipynb_checkpoints/
-**/*.ipynb
 
 # Python cache
 __pycache__
@@ -22,6 +21,7 @@ __pycache__
 **/*.log
 
 # Ignored folders
+layer_to_gpkg
 level_output
 SIVelocity_SAR
 input

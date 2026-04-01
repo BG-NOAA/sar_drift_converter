@@ -83,6 +83,9 @@ variables:
 	double time_bnds(time, nv) ;
 		time_bnds:long_name = "time bounds" ;
 		time_bnds:units = "seconds since 2000-01-01 12:00:00 UTC" ;		
+	char layer_id(time) ;
+		layer_id:long_name = "Layer identifier" ;
+		layer_id:comment = "Sensor pair and date range identifying the source files for this time layer." ;
 	double x(x) ;
 		x:standard_name = "projection_x_coordinate" ;
 		x:long_name = "x coordinate of projection" ;

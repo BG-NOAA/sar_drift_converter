@@ -386,8 +386,8 @@ def combine_into_dataframe(files, config):
             continue  # handled via 50km entry
             
         file_idx += 1
-        # if file_idx == 2:
-        #     break
+        if file_idx == 6:
+            break
     
         basename, ext = os.path.splitext(gfilter_path)
         if '_' in ext:

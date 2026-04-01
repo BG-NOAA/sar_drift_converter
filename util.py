@@ -386,8 +386,7 @@ def _set_metadata(config):
     if rc != 0:
         error_msg(
             'Error in `ncgen` call. Cannot continue.\n'
-            f'Command: {myCmd1}\nError Code: {rc}', 
-            25
+            f'Command: {myCmd1}\nError Code: {rc}'
         )
         
     return xr.open_dataset(ncgen_ofile_nc, decode_times=False)
@@ -399,7 +398,8 @@ def _calculate_drift_daily(lat1, lon1, lat2, lon2, duration_s):
  
     Projects start and end positions from EPSG:4326 to EPSG:3413 (NSIDC Sea
     Ice Polar Stereographic North), computes Cartesian displacement components,
-    and derives speed and bearing using a WGS84 geodesic inverse calculation.
+    and derives speed. Bearing is obtained a WGS84 geodesic inverse
+    calculation.
  
     Args:
         lat1 (array-like): Starting latitudes in decimal degrees (EPSG:4326).
@@ -427,8 +427,8 @@ def _calculate_drift_daily(lat1, lon1, lat2, lon2, duration_s):
                 - 'bearing'   : forward azimuth from start to end (degrees)
  
             Velocity components (EPSG:3413):
-                - 'u_vel_ms' : dx / duration_s  (m s⁻¹)
-                - 'v_vel_ms' : dy / duration_s  (m s⁻¹)
+                - 'u_ms' : dx / duration_s  (m s⁻¹)
+                - 'v_ms' : dy / duration_s  (m s⁻¹)
  
             Speed:
                 - 'speed_ms'   : distance / duration_s (m s⁻¹)
@@ -472,8 +472,8 @@ def _calculate_drift_daily(lat1, lon1, lat2, lon2, duration_s):
         'dy': dy,
         'distance': distance,
         'bearing': fwd_azimuth,
-        'u_vel_ms': dx / duration_s,
-        'v_vel_ms': dy / duration_s,
+        'u_ms': dx / duration_s,
+        'v_ms': dy / duration_s,
         'speed_ms': distance / duration_s,
         'speed_kmdy': (distance / 1000) / (duration_s / SECONDS_PER_DAY)
     }
@@ -981,8 +981,8 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
         Displacement and velocity (EPSG:3413):
             - 'sea_ice_x_displacement' (float): X2 − X1  (m)
             - 'sea_ice_y_displacement' (float): Y2 − Y1  (m)
-            - 'u_vel_ms' (float): sea_ice_x_displacement / duration_s  (m s⁻¹)
-            - 'v_vel_ms' (float): sea_ice_y_displacement / duration_s  (m s⁻¹)
+            - 'u_ms' (float): sea_ice_x_displacement / duration_s  (m s⁻¹)
+            - 'v_ms' (float): sea_ice_y_displacement / duration_s  (m s⁻¹)
  
         Speed and direction:
             - 'sea_ice_speed'      (float): geodesic speed  (m s⁻¹)
@@ -990,11 +990,13 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
             - 'direction_of_sea_ice_displacement' (float): forward azimuth
                                                            (degrees)
             - 'distance' (float): geodesic distance (m)
- 
-        Sensor identifiers:
-            - 'sensor1' (str): Satellite identifier from File1
-                               (prefix before first underscore)
-            - 'sensor2' (str): Satellite identifier from File2
+            
+        Sensor and scene identifiers:
+            - 'scene_id' (str): Combination of 'File1' and 'File2'' separated
+                                by underscore
+            - 'sensor1' (str):  Satellite identifier from File1
+                                (prefix before first underscore)
+            - 'sensor2' (str):  Satellite identifier from File2
  
     Notes:
         - SAR time fields `Time1_JS` and `Time2_JS` are seconds since
@@ -1068,8 +1070,8 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
     df['sea_ice_y_displacement'] = np.round(
         drift['dy'], config['speed_precision']
     )
-    df['u_vel_ms'] = drift['u_vel_ms']
-    df['v_vel_ms'] = drift['v_vel_ms']
+    df['u_ms'] = drift['u_ms']
+    df['v_ms'] = drift['v_ms']
     df['sea_ice_speed'] = np.round(
         drift['speed_ms'],
         config['speed_precision']
@@ -1089,6 +1091,7 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
     # identify satellites for analysis
     df['sensor1'] = df["File1"].str.partition("_")[0]
     df['sensor2'] = df["File2"].str.partition("_")[0]
+    df['scene_id'] = df['File1'] + '_' + df['File2']
     
     df.rename(columns=
               {
@@ -1574,6 +1577,8 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
     df_copy = df.copy()
     df_copy['date_start'] = pd.to_datetime(df_copy['date_start'])
     df_copy['date_end'] = pd.to_datetime(df_copy['date_end'])
+    
+    layer_id_str = df_copy['scene_id'].iloc[0]
  
     # use minimum date_start as scene reference time (Julian seconds)
     # reconstruct Time1_JS from date_start relative to 2000-01-01
@@ -1639,219 +1644,227 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
     grid_shape = (1, template_ds.sizes['y'], template_ds.sizes['x'])
  
  
-    # try:
-    # set NetCDF standard attributes from CDL template
-    meta_ds = _set_metadata(config)
- 
-    # keep attrs from the CDL skeleton
-    global_attrs = meta_ds.attrs.copy()
-    sea_ice_speed_attrs = meta_ds["sea_ice_speed"].attrs.copy()
-    sea_ice_x_attrs = meta_ds["sea_ice_x_displacement"].attrs.copy()
-    sea_ice_y_attrs = meta_ds["sea_ice_y_displacement"].attrs.copy()
-    direction_attrs = (
-        meta_ds["direction_of_sea_ice_displacement"].attrs.copy()
-    )
-    outlier_attrs = meta_ds["outlier_category"].attrs.copy()
-    bearing_error_attrs = meta_ds["bearing_error"].attrs.copy()
-    speed_error_attrs = meta_ds["speed_error"].attrs.copy()
-    measurement_error_attrs = meta_ds["measurement_error"].attrs.copy()
-    spatial_ref_attrs = meta_ds["spatial_ref"].attrs.copy()
-    x_attrs = meta_ds["x"].attrs.copy()
-    y_attrs = meta_ds["y"].attrs.copy()
-    time_attrs = meta_ds["time"].attrs.copy()
- 
-    meta_ds.close()
-    del meta_ds
- 
- 
-    # create dataset from CDL
-    netcdf_grid = xr.Dataset(
-        data_vars={
-            "sea_ice_speed": (
-                ("time", "y", "x"),
-                np.full(grid_shape, np.nan, dtype=np.float32),
-                sea_ice_speed_attrs
-            ),
-            "sea_ice_x_displacement": (
-                ("time", "y", "x"),
-                np.full(grid_shape, np.nan, dtype=np.float32),
-                sea_ice_x_attrs
-            ),
-            "sea_ice_y_displacement": (
-                ("time", "y", "x"),
-                np.full(grid_shape, np.nan, dtype=np.float32),
-                sea_ice_y_attrs
-            ),
-            "direction_of_sea_ice_displacement": (
-                ("time", "y", "x"),
-                np.full(grid_shape, np.nan, dtype=np.float32),
-                direction_attrs
-            ),
-            "outlier_category": (
-                ("time", "y", "x"),
-                np.full(grid_shape, -9, dtype=np.int16),
-                outlier_attrs
-            ),
-            "bearing_error": (
-                ("time", "y", "x"),
-                np.full(grid_shape, -9, dtype=np.int16),
-                bearing_error_attrs
-            ),
-            "speed_error": (
-                ("time", "y", "x"),
-                np.full(grid_shape, -9, dtype=np.int16),
-                speed_error_attrs
-            ),
-            "measurement_error": (
-                ("time", "y", "x"),
-                np.full(grid_shape, -9, dtype=np.int16),
-                measurement_error_attrs
-            ),
-            "spatial_ref": (
-                (),
-                np.int32(0),
-                spatial_ref_attrs
-            ),
-            "time_bnds": (
-                ("time", "nv"),
-                time_bounds
+    try:
+        # set NetCDF standard attributes from CDL template
+        meta_ds = _set_metadata(config)
+        
+
+     
+        # keep attrs from the CDL skeleton
+        global_attrs = meta_ds.attrs.copy()
+        sea_ice_speed_attrs = meta_ds["sea_ice_speed"].attrs.copy()
+        sea_ice_x_attrs = meta_ds["sea_ice_x_displacement"].attrs.copy()
+        sea_ice_y_attrs = meta_ds["sea_ice_y_displacement"].attrs.copy()
+        direction_attrs = (
+            meta_ds["direction_of_sea_ice_displacement"].attrs.copy()
+        )
+        outlier_attrs = meta_ds["outlier_category"].attrs.copy()
+        bearing_error_attrs = meta_ds["bearing_error"].attrs.copy()
+        speed_error_attrs = meta_ds["speed_error"].attrs.copy()
+        measurement_error_attrs = meta_ds["measurement_error"].attrs.copy()
+        spatial_ref_attrs = meta_ds["spatial_ref"].attrs.copy()
+        x_attrs = meta_ds["x"].attrs.copy()
+        y_attrs = meta_ds["y"].attrs.copy()
+        time_attrs = meta_ds["time"].attrs.copy()
+        layer_id_attrs = meta_ds["layer_id"].attrs.copy()
+        time_attrs['coordinates'] = 'layer_id'
+            
+        meta_ds.close()
+        del meta_ds
+     
+        # create dataset from CDL
+        netcdf_grid = xr.Dataset(
+            data_vars={
+                "sea_ice_speed": (
+                    ("time", "y", "x"),
+                    np.full(grid_shape, np.nan, dtype=np.float32),
+                    sea_ice_speed_attrs
+                ),
+                "sea_ice_x_displacement": (
+                    ("time", "y", "x"),
+                    np.full(grid_shape, np.nan, dtype=np.float32),
+                    sea_ice_x_attrs
+                ),
+                "sea_ice_y_displacement": (
+                    ("time", "y", "x"),
+                    np.full(grid_shape, np.nan, dtype=np.float32),
+                    sea_ice_y_attrs
+                ),
+                "direction_of_sea_ice_displacement": (
+                    ("time", "y", "x"),
+                    np.full(grid_shape, np.nan, dtype=np.float32),
+                    direction_attrs
+                ),
+                "outlier_category": (
+                    ("time", "y", "x"),
+                    np.full(grid_shape, -9, dtype=np.int16),
+                    outlier_attrs
+                ),
+                "bearing_error": (
+                    ("time", "y", "x"),
+                    np.full(grid_shape, -9, dtype=np.int16),
+                    bearing_error_attrs
+                ),
+                "speed_error": (
+                    ("time", "y", "x"),
+                    np.full(grid_shape, -9, dtype=np.int16),
+                    speed_error_attrs
+                ),
+                "measurement_error": (
+                    ("time", "y", "x"),
+                    np.full(grid_shape, -9, dtype=np.int16),
+                    measurement_error_attrs
+                ),
+                "spatial_ref": (
+                    (),
+                    np.int32(0),
+                    spatial_ref_attrs
+                ),
+                "time_bnds": (
+                    ("time", "nv"),
+                    time_bounds
+                )
+            },
+            coords={
+                "time": ("time", time_array, time_attrs),
+                "layer_id": (
+                    "time",
+                    np.array([layer_id_str]),
+                    layer_id_attrs
+                ),
+                "nv": [0, 1],
+                "x": ("x", x_coords, x_attrs),
+                "y": ("y", y_coords, y_attrs)
+            },
+            attrs=global_attrs
+        )
+     
+        # update global date/time coverage attributes
+        netcdf_grid.attrs['date_created'] = (
+            datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+        )
+        netcdf_grid.attrs['time_coverage_start'] = (
+            min_time.strftime('%Y-%m-%dT%H:%M:%SZ')
+        )
+        netcdf_grid.attrs['time_coverage_end'] = (
+            max_time.strftime('%Y-%m-%dT%H:%M:%SZ')
+        )
+     
+     
+        # populate grid with per-observation values
+        idx_list = []
+        seen_key = set()
+        for row_n, row in enumerate(df_copy.itertuples(index=False)):
+            ix = int(i[row_n])   # x index
+            iy = int(j[row_n])   # y index
+            index_key = (ix, iy)
+            idx_list.append(index_key)
+     
+            if index_key in seen_key:
+                print(f'Duplicate entry found for {ix}, {iy}')
+     
+            seen_key.add(index_key)
+     
+            netcdf_grid["sea_ice_speed"].values[0, iy, ix] = (
+                np.float32(row.sea_ice_speed)
             )
-        },
-        coords={
-            "time": ("time", time_array, time_attrs),
-            "nv": [0, 1],
-            "x": ("x", x_coords, x_attrs),
-            "y": ("y", y_coords, y_attrs)
-        },
-        attrs=global_attrs
-    )
- 
-    # update global date/time coverage attributes
-    netcdf_grid.attrs['date_created'] = (
-        datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
-    )
-    netcdf_grid.attrs['time_coverage_start'] = (
-        min_time.strftime('%Y-%m-%dT%H:%M:%SZ')
-    )
-    netcdf_grid.attrs['time_coverage_end'] = (
-        max_time.strftime('%Y-%m-%dT%H:%M:%SZ')
-    )
- 
- 
-    # populate grid with per-observation values
-    idx_list = []
-    seen_key = set()
-    for row_n, row in enumerate(df_copy.itertuples(index=False)):
-        ix = int(i[row_n])   # x index
-        iy = int(j[row_n])   # y index
-        index_key = (ix, iy)
-        idx_list.append(index_key)
- 
-        if index_key in seen_key:
-            print(f'Duplicate entry found for {ix}, {iy}')
- 
-        seen_key.add(index_key)
- 
-        netcdf_grid["sea_ice_speed"].values[0, iy, ix] = (
-            np.float32(row.sea_ice_speed)
+            netcdf_grid["sea_ice_x_displacement"].values[0, iy, ix] = (
+                np.float32(row.sea_ice_x_displacement)
+            )
+            netcdf_grid["sea_ice_y_displacement"].values[0, iy, ix] = (
+                np.float32(row.sea_ice_y_displacement)
+            )
+            netcdf_grid["direction_of_sea_ice_displacement"].values[
+                0, iy, ix
+            ] = np.float32(row.direction_of_sea_ice_displacement)
+            netcdf_grid["outlier_category"].values[
+                0, iy, ix
+            ] = np.int16(row.outlier_category)
+            netcdf_grid["bearing_error"].values[
+                0, iy, ix
+            ] = np.int16(row.bearing_error)
+            netcdf_grid["speed_error"].values[
+                0, iy, ix
+            ] = np.int16(row.speed_error)
+            netcdf_grid["measurement_error"].values[
+                0, iy, ix
+            ] = np.int16(row.measurement_error)
+     
+     
+        # update scene_i_j
+        scene_i_j[base_name] = list(zip(i_list, j_list))
+     
+        # crop to populated values
+        data_mask = np.isfinite(netcdf_grid["sea_ice_speed"].values[0])
+        if np.any(data_mask):
+            filled_y, filled_x = np.where(data_mask)
+     
+            y_start = int(filled_y.min())
+            y_end = int(filled_y.max())
+            x_start = int(filled_x.min())
+            x_end = int(filled_x.max())
+     
+            # pad grid cells in case vectors extend outside of viewing area
+            pad_cells = 4
+            y_start = max(0, y_start - pad_cells)
+            y_end = min(netcdf_grid.sizes["y"] - 1, y_end + pad_cells)
+            x_start = max(0, x_start - pad_cells)
+            x_end = min(netcdf_grid.sizes["x"] - 1, x_end + pad_cells)
+     
+            netcdf_grid = netcdf_grid.isel(
+                y=slice(y_start, y_end + 1),
+                x=slice(x_start, x_end + 1)
+            )
+     
+     
+        # save to NetCDF with zlib compression level 4
+        output_file_path = os.path.join(
+            config['nc_dir'], f"{base_name}.nc"
         )
-        netcdf_grid["sea_ice_x_displacement"].values[0, iy, ix] = (
-            np.float32(row.sea_ice_x_displacement)
+        netcdf_grid.to_netcdf(
+            output_file_path, mode='w',
+            encoding={
+                'sea_ice_speed': {
+                    'zlib': True, 'complevel': 4, 'dtype': 'float32'
+                },
+                'sea_ice_x_displacement': {
+                    'zlib': True, 'complevel': 4, 'dtype': 'float32'
+                },
+                'sea_ice_y_displacement': {
+                    'zlib': True, 'complevel': 4, 'dtype': 'float32'
+                },
+                'direction_of_sea_ice_displacement': {
+                    'zlib': True, 'complevel': 4, 'dtype': 'float32'
+                },
+                'outlier_category': {
+                    'zlib': True, 'complevel': 4, 'dtype': 'int16',
+                    '_FillValue': np.int16(-9)
+                },
+                'bearing_error': {
+                    'zlib': True, 'complevel': 4, 'dtype': 'int16',
+                    '_FillValue': np.int16(-9)
+                },
+                'speed_error': {
+                    'zlib': True, 'complevel': 4, 'dtype': 'int16',
+                    '_FillValue': np.int16(-9)
+                },
+                'measurement_error': {
+                    'zlib': True, 'complevel': 4, 'dtype': 'int16',
+                    '_FillValue': np.int16(-9)
+                },
+                'time_bnds': {'dtype': 'float64'},
+                'spatial_ref': {'dtype': 'int32'}
+            }
         )
-        netcdf_grid["sea_ice_y_displacement"].values[0, iy, ix] = (
-            np.float32(row.sea_ice_y_displacement)
-        )
-        netcdf_grid["direction_of_sea_ice_displacement"].values[
-            0, iy, ix
-        ] = np.float32(row.direction_of_sea_ice_displacement)
-        netcdf_grid["outlier_category"].values[
-            0, iy, ix
-        ] = np.int16(row.outlier_category)
-        netcdf_grid["bearing_error"].values[
-            0, iy, ix
-        ] = np.int16(row.bearing_error)
-        netcdf_grid["speed_error"].values[
-            0, iy, ix
-        ] = np.int16(row.speed_error)
-        netcdf_grid["measurement_error"].values[
-            0, iy, ix
-        ] = np.int16(row.measurement_error)
+     
+        # log activity
+        logger = logging.getLogger('sar_drift_converter')
+        logger.info(f'Created NetCDF {output_file_path}')
  
- 
-    # update scene_i_j
-    scene_i_j[base_name] = list(zip(i_list, j_list))
- 
-    # crop to populated values
-    data_mask = np.isfinite(netcdf_grid["sea_ice_speed"].values[0])
-    if np.any(data_mask):
-        filled_y, filled_x = np.where(data_mask)
- 
-        y_start = int(filled_y.min())
-        y_end = int(filled_y.max())
-        x_start = int(filled_x.min())
-        x_end = int(filled_x.max())
- 
-        # pad grid cells in case vectors extend outside of viewing area
-        pad_cells = 4
-        y_start = max(0, y_start - pad_cells)
-        y_end = min(netcdf_grid.sizes["y"] - 1, y_end + pad_cells)
-        x_start = max(0, x_start - pad_cells)
-        x_end = min(netcdf_grid.sizes["x"] - 1, x_end + pad_cells)
- 
-        netcdf_grid = netcdf_grid.isel(
-            y=slice(y_start, y_end + 1),
-            x=slice(x_start, x_end + 1)
-        )
- 
- 
-    # save to NetCDF with zlib compression level 4
-    output_file_path = os.path.join(
-        config['nc_dir'], f"{base_name}.nc"
-    )
-    netcdf_grid.to_netcdf(
-        output_file_path, mode='w',
-        encoding={
-            'sea_ice_speed': {
-                'zlib': True, 'complevel': 4, 'dtype': 'float32'
-            },
-            'sea_ice_x_displacement': {
-                'zlib': True, 'complevel': 4, 'dtype': 'float32'
-            },
-            'sea_ice_y_displacement': {
-                'zlib': True, 'complevel': 4, 'dtype': 'float32'
-            },
-            'direction_of_sea_ice_displacement': {
-                'zlib': True, 'complevel': 4, 'dtype': 'float32'
-            },
-            'outlier_category': {
-                'zlib': True, 'complevel': 4, 'dtype': 'int16',
-                '_FillValue': np.int16(-9)
-            },
-            'bearing_error': {
-                'zlib': True, 'complevel': 4, 'dtype': 'int16',
-                '_FillValue': np.int16(-9)
-            },
-            'speed_error': {
-                'zlib': True, 'complevel': 4, 'dtype': 'int16',
-                '_FillValue': np.int16(-9)
-            },
-            'measurement_error': {
-                'zlib': True, 'complevel': 4, 'dtype': 'int16',
-                '_FillValue': np.int16(-9)
-            },
-            'time_bnds': {'dtype': 'float64'},
-            'spatial_ref': {'dtype': 'int32'}
-        }
-    )
- 
-    # log activity
-    logger = logging.getLogger('sar_drift_converter')
-    logger.info(f'Created NetCDF {output_file_path}')
- 
-    # finally:
-    #     # ensure dataset is closed even if an error occurs
-    #     netcdf_grid.close()
-    #     del netcdf_grid
+    finally:
+        # ensure dataset is closed even if an error occurs
+        netcdf_grid.close()
+        del netcdf_grid
 
 
 def create_shape_package(df, base_name, config):
@@ -1932,12 +1945,12 @@ def create_shape_package(df, base_name, config):
 
     # keep necessary columns for GeoPackage
     needed_cols = [
-        'sensor1', 'sensor2',
+        'scene_id', 'sensor1', 'sensor2',
         'longitude_1', 'latitude_1', 'longitude_2', 'latitude_2',
         'X1', 'Y1', 'X2', 'Y2',
         'date_start', 'date_end', 'duration_s',
         'sea_ice_x_displacement', 'sea_ice_y_displacement',
-        'u_vel_ms', 'v_vel_ms','sea_ice_speed', 'sea_ice_speed_kmdy',
+        'u_ms', 'v_ms','sea_ice_speed', 'sea_ice_speed_kmdy',
         'direction_of_sea_ice_displacement', 'distance'
     ]
     
@@ -2129,163 +2142,6 @@ def create_plotly_html(base_name, df, config, output_path=None):
 
     import logging
     logging.getLogger('sar_drift').info(f'Created Plotly HTML {html_file}')
-
-
-def create_png(config, base_name):
-    """
-    Create and save a PNG map of sea-ice drift vectors from a NetCDF file.
-    
-    This function opens a NetCDF dataset (expected to be on a polar 
-    stereographic grid consistent with EPSG:3411-like parameters),
-    extracts the first time slice of sea-ice displacement components,
-    computes vector magnitude, and renders a quiver plot on a Cartopy
-    stereographic map. The plot is saved as a PNG file to the directory
-    specified in `config`.
-    
-    Args:
-        config (dict): Configuration dictionary containing required paths:
-            - 'nc_dir' (str): Directory containing the input NetCDF file.
-            - 'png_dir' (str): Directory where the output PNG will be written.
-        base_name (str): Base filename (without extension) used to locate the
-            NetCDF file (`<nc_dir>/<base_name>.nc`) and name the output PNG
-            (`<png_dir>/<base_name>.png`).
-    
-    Returns:
-        None
-    
-    Expected Dataset Variables:
-        - 'x' (1D array): X coordinates in meters (projection coordinates).
-        - 'y' (1D array): Y coordinates in meters (projection coordinates).
-        - 'sea_ice_x_displacement' (time, y, x): X displacement component.
-        - 'sea_ice_y_displacement' (time, y, x): Y displacement component.
-        - 'sea_ice_speed' (time, y, x): Used to count finite
-          (valid) observations.
-    
-    Notes:
-        - Vector magnitude is computed as `hypot(dx, dy)` and used
-          to color the quivers.
-        - The map extent is derived from the min/max of the x/y
-          coordinate arrays.
-        - Quiver scale is adjusted heuristically based on the map span.
-        - Requires Cartopy and its dependencies (e.g., PROJ, GEOS).
-        - The colorbar label assumes units of meters per day ("m_day")
-          and should be updated if the dataset uses different units.
-    """
-    import xarray as xr
-    import numpy as np
-    import matplotlib.pyplot as plt
-    import matplotlib.colors as mcolors
-    import cartopy.crs as ccrs
-    import cartopy.feature as cfeature
-
-    SECONDS_PER_DAY = 86_400 # use this scale to properly show quivers
-    source_nc_path = os.path.join(config['nc_dir'], f'{base_name}.nc')
-    
-    with xr.open_dataset(source_nc_path) as ds:
-        x_values = ds['x'].values
-        y_values = ds['y'].values
-        X, Y = np.meshgrid(x_values, y_values)
-        
-        dx_values = ds["sea_ice_x_displacement"].isel(time=0).values
-        dy_values = ds["sea_ice_y_displacement"].isel(time=0).values
-
-        # determine total valid observations
-        arr = ds['sea_ice_speed'].isel(time=0).values
-        valid_mask = np.isfinite(arr) # ignore any NaN values
-        
-        
-        outlier_codes = ds['outlier_category'].isel(time=0).values
-        outlier_codes = np.asarray(outlier_codes).astype(str)
-        
-        green_mask = np.isin(outlier_codes, ['00', '01']) & valid_mask
-    
-    
-    
-    # set projection defined by data set
-    globe_3411 = ccrs.Globe(
-        semimajor_axis=6378273.0,
-        semiminor_axis=6356889.449
-    )
-    
-    crs_3411 = ccrs.Stereographic(
-        central_latitude=90,
-        central_longitude=-45,
-        false_easting=0.0,
-        false_northing=0.0,
-        true_scale_latitude=70,
-        globe=globe_3411
-    )
-     
-    fig = plt.figure(figsize=(10, 10))
-    ax = plt.axes(projection=crs_3411)
-    
-    # Set extent in the projection's coordinate system (meters)
-    pad = 0 # 50km <-- change the pad to change scope of view
-    xmin = np.round(x_values.min() - pad, 3)
-    xmax = np.round(x_values.max() + pad, 3)
-    ymin = np.round(y_values.min() - pad, 3)
-    ymax = np.round(y_values.max() + pad, 3)
-    
-    # set reasonable size of quivers based on dataset extent
-    map_width = xmax - xmin
-    map_height = ymax - ymin
-    map_span = np.round(max(map_height, map_width), 0)
-    if map_span > 2_000_000:
-        quiver_scale = 0.1
-    else:
-        quiver_scale = 1.0
-    ax.set_extent([xmin, xmax, ymin, ymax], crs=crs_3411)
-    
-    
-    # Coastlines / land
-    ax.add_feature(cfeature.LAND, zorder=0)
-    ax.coastlines(resolution="10m", linewidth=1.0, zorder=1)
-    
-    
-
-    mag = np.hypot(dx_values, dy_values) * SECONDS_PER_DAY
-    norm = mcolors.Normalize(
-        vmin=np.nanmin(mag),
-        vmax=np.nanmax(mag)
-    )
-
-    q = ax.quiver(
-        X[green_mask],
-        Y[green_mask],
-        dx_values[green_mask] * SECONDS_PER_DAY,
-        -dy_values[green_mask] * SECONDS_PER_DAY, # negate back for display
-        mag[green_mask],
-        transform=crs_3411,
-        angles="xy", scale_units="xy",
-        scale=quiver_scale,
-        width=0.001,
-        pivot="tail",
-        cmap="viridis",
-        norm=norm,
-        zorder=2
-    )       
-
-    cbar = fig.colorbar(
-        q, ax=ax, orientation="vertical", shrink=0.65, pad=0.02
-    )
-    cbar.set_label("Vector velocity (m_day)")
-    
-    
-    ax.set_title(
-        f"Sea-ice Vector Velocities\n"
-        f"x {xmin} to {xmax}; y {ymin} to {ymax}\n"
-        f"Total observations: {valid_mask.sum()}\n"
-        f"Width {np.int32(map_height)} m by Height {np.int32(map_width)} m\n"
-        f"Polar stereographic EPSG:3411"
-    )
-    
-
-    # save plot as .png
-    png_file = os.path.join(
-        config['png_dir'], f"{base_name}.png"
-    )
-    fig.savefig(png_file, bbox_inches='tight', dpi=300)
-    plt.close(fig)
     
     
 def combine_daily_netcdf_files(config, nc_files, template_ds,
@@ -2317,30 +2173,30 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
     import pandas as pd
     import xarray as xr
     from datetime import datetime
-    
+
     # template grid settings
     x_coords = template_ds["x"].values
     y_coords = template_ds["y"].values
-    
+
     # time defaults for output daily file
     min_time = pd.Timestamp(daily_start_date)
     max_time = pd.Timestamp(daily_end_date)
-    
+
     if multi_layered:
         n_time = len(nc_files)
     else:
         n_time = 1
-    
+
     # finalize grid shape
     grid_shape = (n_time, template_ds.sizes["y"], template_ds.sizes["x"])
-    
+
     # track last_write time per cell (single-layer only)
     latest_time_grid = np.full(
         (template_ds.sizes["y"], template_ds.sizes["x"]),
         -np.inf,
         dtype=np.float64
     )
-    
+
     # variables to merge spatially
     var_names = [
         "sea_ice_speed",
@@ -2352,15 +2208,16 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
         "speed_error",
         "measurement_error"
     ]
-    
+
     daily_grid = None
     time_list = []
     update_log = []
-    
+    layer_id_list = []
+
     try:
         # build output dataset from CDL metadata
         meta_ds = _set_metadata(config)
-    
+
         global_attrs = meta_ds.attrs.copy()
         sea_ice_speed_attrs = meta_ds["sea_ice_speed"].attrs.copy()
         sea_ice_x_attrs = meta_ds["sea_ice_x_displacement"].attrs.copy()
@@ -2376,14 +2233,16 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
         x_attrs = meta_ds["x"].attrs.copy()
         y_attrs = meta_ds["y"].attrs.copy()
         time_attrs = meta_ds["time"].attrs.copy()
-    
+        layer_id_attrs = meta_ds["layer_id"].attrs.copy()
+        time_attrs['coordinates'] = 'layer_id'
+
         meta_ds.close()
         del meta_ds
-    
+
         # placeholder time and bounds — updated after merge loop
         time_array = np.zeros(n_time, dtype='float64')
         time_bounds = np.zeros((n_time, 2), dtype='float64')
-    
+
         daily_grid = xr.Dataset(
             data_vars={
                 "sea_ice_speed": (
@@ -2444,7 +2303,7 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
             },
             attrs=global_attrs,
         )
-    
+
         # update global attrs
         daily_grid.attrs["date_created"] = (
             datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -2459,7 +2318,6 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
             "Daily Northern Hemisphere SAR sea-ice velocity mosaic"
         )
 
-    
         # sort scene files by time
         file_times = []
         for nc_file in nc_files:
@@ -2470,28 +2328,35 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
                     (float(scene_ds['time'].values[0]), nc_file)
                 )
         file_times.sort(key=lambda x: x[0])
-    
-        
+
+
         # merge each scene into the daily grid
         for nc_idx, (scene_time, nc_file) in enumerate(file_times):
             with xr.open_dataset(
                 nc_file, decode_times=False, mask_and_scale=False
             ) as scene_ds:
-    
+
                 scene_x = scene_ds['x'].values
                 scene_y = scene_ds['y'].values
                 t_idx = nc_idx if multi_layered else 0
-    
+
                 # read scene time bounds from its time_bnds variable
                 scene_bnds = scene_ds['time_bnds'].values  # shape (1, 2)
                 scene_start = float(scene_bnds[0, 0])
                 scene_end = float(scene_bnds[0, 1])
-    
+
                 if multi_layered:
                     # each scene gets its own time layer
                     time_list.append(float(scene_ds['time'].values[0]))
                     time_bounds[t_idx, 0] = scene_start
                     time_bounds[t_idx, 1] = scene_end
+                    if 'layer_id' in scene_ds.coords or \
+                            'layer_id' in scene_ds:
+                        layer_id_list.append(
+                            str(scene_ds['layer_id'].values[0])
+                        )
+                    else:
+                        layer_id_list.append('')
                 else:
                     # single layer: keep earliest start, latest end
                     if time_bounds[0, 0] == 0 or \
@@ -2499,16 +2364,16 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
                         time_bounds[0, 0] = scene_start
                     if scene_end > time_bounds[0, 1]:
                         time_bounds[0, 1] = scene_end
-    
+
                 # get x/y placement indices on template grid
                 x_start = int(np.where(x_coords == scene_x[0])[0][0])
                 x_end   = int(np.where(x_coords == scene_x[-1])[0][0])
                 y_start = int(np.where(y_coords == scene_y[0])[0][0])
                 y_end   = int(np.where(y_coords == scene_y[-1])[0][0])
-    
+
                 x_0, x_1 = min(x_start, x_end), max(x_start, x_end)
                 y_0, y_1 = min(y_start, y_end), max(y_start, y_end)
-    
+
                 if multi_layered:
                     for var_name in var_names:
                         scene_vals = scene_ds[var_name].isel(time=0).values
@@ -2521,7 +2386,7 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
                     valid = np.isfinite(ref_vals)
                     newer = scene_time > last_t
                     write_mask = valid & newer
-    
+
                     if write_mask.any():
                         local_rows, local_cols = np.where(write_mask)
                         for lr, lc in zip(local_rows, local_cols):
@@ -2534,7 +2399,7 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
                                 "nc_file":       nc_file,
                                 "overwrite":     old_ts != -np.inf
                             })
-    
+
                         for var_name in var_names:
                             scene_vals = scene_ds[var_name].isel(time=0).values
                             target = daily_grid[var_name].values[
@@ -2544,11 +2409,11 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
                             daily_grid[var_name].values[
                                 0, y_0:y_1+1, x_0:x_1+1
                             ] = target
-    
+
                         latest_time_grid[
                             y_0:y_1+1, x_0:x_1+1
                         ][write_mask] = scene_time
-    
+
 
         # Update time coordinate and bounds after merge
         if multi_layered:
@@ -2556,13 +2421,19 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
         else:
             # use scene start (first bound) as the time coordinate
             final_time_array = np.array([time_bounds[0, 0]], dtype='float64')
-    
+
         daily_grid = daily_grid.assign_coords(
             time=('time', final_time_array, daily_grid['time'].attrs)
         )
         # write populated time_bounds into the dataset
         daily_grid['time_bnds'].values[:] = time_bounds
-    
+
+        # assign layer_id coordinate (multi-layered only)
+        if multi_layered and layer_id_list:
+            daily_grid = daily_grid.assign_coords(
+                layer_id=('time', np.array(layer_id_list), layer_id_attrs)
+            )
+
         # pop _FillValue from int16 variable attrs before writing
         for var in [
                 'outlier_category', 'bearing_error',
@@ -2571,7 +2442,7 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
             daily_grid[var].attrs.pop('_FillValue', None)
             daily_grid[var].encoding['_FillValue'] = np.int16(-9)
             daily_grid[var].encoding['dtype'] = np.int16
-    
+
 
         # Save to NetCDF
         daily_grid.to_netcdf(
@@ -2610,7 +2481,7 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
                 "spatial_ref": {"dtype": "int32"},
             }
         )
-    
+
         if update_log and config['level'] == '00':
             update_df = pd.DataFrame(update_log)
             df_filter = update_df['overwrite']
@@ -2618,11 +2489,11 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
             update_df = update_df.sort_values(['i', 'j'])
             log_path = os.path.join(config['output_dir'], 'cell_update_log.csv')
             update_df.to_csv(log_path, index=False)
-    
+
     finally:
         if daily_grid is not None:
             daily_grid.close()
-            del daily_grid 
+            del daily_grid
 
 
 def combine_daily_geopackage(gpkg_files, daily_gpkg_path, config):
