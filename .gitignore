@@ -5,23 +5,29 @@
 **/*.xml
 **/*.xlsx
 **/*.bkp
-**/*.npz
+**/*.qgz
 
 # Jupyter Notebook Checkpoints
 .ipynb_checkpoints/
-**/*.ipynb
 
 # Python cache
 __pycache__
 
 # Output files
-output
-overlays
 **/*.gpkg
 **/*.nc
 **/*.png
+**/*.npz
+**/*.log
 
 # Ignored folders
+layer_to_gpkg
+level_output
+SIVelocity_SAR
 input
 misc
+npz
+overlays
 sample_day
+sample_year
+
