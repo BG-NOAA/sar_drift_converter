@@ -2,16 +2,18 @@
 """
 ******************************************************************************
 
- Project:    SAR Drift Data converter
- Purpose:    Converter SAR drift data into visually interactive output
- Author:     Brendon Gory, brendon.gory@noaa.gov
-                           brendon.gory@colostate.edu
-             Data Science Application Specialist (Research Associate II)
-             at CSU CIRA
- Supervisor: Dr. Prasanjit Dash, prasanjit.dash@noaa.gov
-                               prasanjit.dash@colostate.edu
-             CSU CIRA Research Scientist III
-             (Program Innovation Scientist)
+ Project:     SAR Drift Data converter
+ Purpose:     Converter SAR drift data into visually interactive output
+ Author:      Brendon Gory, brendon.gory@noaa.gov
+                            brendon.gory@colostate.edu
+              Data Science Application Specialist (Research Associate II)
+              at CSU CIRA
+ Supervisors: Dr. Ludovic Brucker, ludovic.brucker@noaa.gov
+              NESDIS Physical Scientist
+              Dr. Prasanjit Dash, prasanjit.dash@noaa.gov
+                                  prasanjit.dash@colostate.edu
+              CSU CIRA Research Scientist III
+              (Program Innovation Scientist)
 ******************************************************************************
 Copyright notice
          NOAA STAR SOCD and Colorado State Univ CIRA
@@ -59,12 +61,8 @@ os.environ["PROJ_LIB"] = str(proj_dir)   # backward compatibility
 from pyproj.datadir import set_data_dir
 set_data_dir(str(proj_dir))
 
-from pyproj import CRS, Transformer, Geod
+from pyproj import Transformer, Geod
 
-
-######################################################
-# Take starting date which coressponds to Lon1, Lat1 #
-######################################################
 
 # =============================================================
 # Grid navigation functions from 
@@ -260,71 +258,6 @@ def error_msg(msg):
 #===================
 # Internal functions
 #===================
-
-def _set_transformer(epsg=3411):
-    transformer = {}
-    
-    # CRS setup
-    transformer['epsg'] = epsg
-    transformer['crs_string_3413'] = CRS.from_string(
-        "+proj=stere +lat_0=90 +lat_ts=70 +lon_0=-45 "
-        "+x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs +type=crs"
-    )
-    transformer['crs_string_4326'] = CRS.from_string(
-        "+proj=longlat +datum=WGS84 +no_defs +type=crs"
-    )
-    transformer["crs_string_3408"] = CRS.from_string(
-        "+proj=laea +lat_0=90 +lon_0=0 "
-        "+x_0=0 +y_0=0 "
-        "+a=6371228 +b=6371228 "
-        "+units=m +no_defs +type=crs"
-    )
-    
-    transformer["crs_string_3411"] = CRS.from_string(
-        "+proj=stere +lat_0=90 +lat_ts=70 +lon_0=-45 "
-        "+x_0=0 +y_0=0 +a=6378273 +b=6356889.449 "
-        "+units=m +no_defs +type=crs"
-    )
-    
-    transformer['proj4_3413_dict'] = {
-        "proj": "stere",
-        "lat_0": 90,
-        "lat_ts": 70,
-        "lon_0": -45,
-        "x_0": 0,
-        "y_0": 0,
-        "datum": "WGS84",
-        "units": "m",
-        "no_defs": True
-    }
-    
-    transformer['4326_to_3413'] = Transformer.from_crs(
-        transformer['crs_string_4326'],
-        transformer['crs_string_3413'],
-        always_xy=True
-    )
-
-    transformer['3413_to_4326'] = Transformer.from_crs(
-        transformer['crs_string_3413'],
-        transformer['crs_string_4326'],
-        always_xy=True
-    )
-    
-    transformer['4326_to_3408'] = Transformer.from_crs(
-        transformer['crs_string_4326'],
-        transformer['crs_string_3408'],
-        always_xy=True
-    )
-    
-    transformer['4326_to_3411'] = Transformer.from_crs(
-        transformer['crs_string_4326'],
-        transformer['crs_string_3411'],
-        always_xy=True
-    )
-    
-    return transformer
-
-
 def _set_metadata(config):
     """
     Generate a NetCDF metadata template using a CDL file and load
@@ -392,13 +325,14 @@ def _set_metadata(config):
     return xr.open_dataset(ncgen_ofile_nc, decode_times=False)
 
 
-def _calculate_drift_daily(lat1, lon1, lat2, lon2, duration_s):
+def _calculate_drift_daily(lat1, lon1, lat2, lon2, duration_s, epsg):
     """
     Compute sea-ice drift kinematics from start/end geographic coordinates.
  
-    Projects start and end positions from EPSG:4326 to EPSG:3413 (NSIDC Sea
-    Ice Polar Stereographic North), computes Cartesian displacement components,
-    and derives speed. Bearing is obtained a WGS84 geodesic inverse
+    Projects start and end positions from EPSG:4326 to the target projected
+    CRS specified by `config['epsg']` (default EPSG:3413, NSIDC Sea Ice Polar
+    Stereographic North), computes Cartesian displacement components, and
+    derives speed. Bearing is obtained via a WGS84 geodesic inverse
     calculation.
  
     Args:
@@ -408,25 +342,30 @@ def _calculate_drift_daily(lat1, lon1, lat2, lon2, duration_s):
         lon2 (array-like): Ending longitudes in decimal degrees (EPSG:4326).
         duration_s (array-like): Observation duration in seconds
                                   (Time2_JS − Time1_JS).
+        config (dict): Configuration dictionary. Expected keys:
+            - 'epsg' (int): EPSG code for the target projected CRS used for
+              coordinate transformation and displacement computation
+              (e.g. 3413 for NSIDC Sea Ice Polar Stereographic North,
+              3411 for NSIDC Polar Stereographic North with Hughes ellipsoid).
  
     Returns:
         dict: Dictionary of derived drift quantities with the following keys:
  
-            Projected coordinates (EPSG:3413, metres):
+            Projected coordinates (EPSG:`config['epsg']`, meters):
                 - 'X1' : x-coordinate of start position
                 - 'Y1' : y-coordinate of start position
                 - 'X2' : x-coordinate of end position
                 - 'Y2' : y-coordinate of end position
  
-            Displacement (EPSG:3413, metres):
+            Displacement (EPSG:`config['epsg']`, meters):
                 - 'dx' : X2 − X1
                 - 'dy' : Y2 − Y1
  
-            Geodesic quantities:
+            Geodesic quantities (WGS84 ellipsoid):
                 - 'distance'  : geodesic distance between start and end (m)
                 - 'bearing'   : forward azimuth from start to end (degrees)
  
-            Velocity components (EPSG:3413):
+            Velocity components (EPSG:`config['epsg']`):
                 - 'u_ms' : dx / duration_s  (m s⁻¹)
                 - 'v_ms' : dy / duration_s  (m s⁻¹)
  
@@ -440,21 +379,25 @@ def _calculate_drift_daily(lat1, lon1, lat2, lon2, duration_s):
           `always_xy=True`, so longitude is passed before latitude.
         - Geodesic distance and forward azimuth are computed with
           `pyproj.Geod(ellps='WGS84').inv(lon1, lat1, lon2, lat2)`.
-        - `u_vel_ms` and `v_vel_ms` are Cartesian velocity components in
-          EPSG:3413 projection space. In this projection the x-axis points
-          roughly eastward and the y-axis roughly northward, but note that
-          the source file's `U_vel_ms` / `V_vel_ms` fields use the opposite
-          convention (U drives Y, V drives X). The values returned here are
-          computed directly from projected displacements and are
-          self-consistent.
+        - `u_ms` and `v_ms` are Cartesian velocity components in the target
+          projection space. For EPSG:3413 the x-axis points roughly eastward
+          and the y-axis roughly northward, but note that the source file's
+          `U_vel_ms` / `V_vel_ms` fields use the opposite convention (U drives
+          Y, V drives X). The values returned here are computed directly from
+          projected displacements and are self-consistent.
+        - `speed_ms` and `speed_kmdy` are derived from geodesic distance, not
+          from `sqrt(dx² + dy²)`. They are therefore not exactly equal to
+          `sqrt(u_ms² + v_ms²)` due to projection distortion; the discrepancy
+          is typically ~3–5% at high latitudes.
           
     Coauthor:
         Ludo Brucker, ludovic.brucker@noaa.gov        
-    """    
+    """
+    
     import numpy as np
    
     SECONDS_PER_DAY = 60 * 60 * 24
-    tf = Transformer.from_crs('EPSG:4326', 'EPSG:3413', always_xy=True)
+    tf = Transformer.from_crs('EPSG:4326', f'EPSG:{epsg}', always_xy=True)
     
     x1, y1 = tf.transform(lon1, lat1)
     x2, y2 = tf.transform(lon2, lat2)
@@ -477,93 +420,9 @@ def _calculate_drift_daily(lat1, lon1, lat2, lon2, duration_s):
         'speed_ms': distance / duration_s,
         'speed_kmdy': (distance / 1000) / (duration_s / SECONDS_PER_DAY)
     }
-
-
-def _read_geotiff_rasterio(geotiff_file):
-    """
-    Reads a GeoTIFF image using GCP-based reprojection to EPSG:3413
-    (NSIDC Sea Ice Polar Stereographic North) and returns a masked
-    array with coordinate information.
-    
-    This function:
-        - Opens a GeoTIFF file using rasterio
-        - Extracts Ground Control Points (GCPs) to reproject the image
-        to a target CRS (EPSG:3413)
-        - Uses nearest-neighbor resampling to regrid the data
-        - Constructs an xarray.DataArray with spatial coordinates in meters
-        - Masks background values (zeros) to allow clean visualization
-        - Computes the image extent for use in plotting (e.g., with imshow)
-    
-    Parameters:
-        geotiff_path (str): Path to the input GeoTIFF file containing
-                            GCPs and raster data.
-    
-    Returns:
-        tuple:
-            masked_xr (np.ma.MaskedArray): Masked 2D array of image data
-                                           with background set to NaN.
-            extent (list): [xmin, xmax, ymin, ymax] extent of the image
-                           in meters (EPSG:3413) for use with plotting.
-    Coauthor:
-        Rachael Lazzaro, rachel.lazzaro@noaa.gov
-    """
-    
-    
-    import rasterio
-    from rasterio.warp import reproject, Resampling
-    from rasterio.warp import calculate_default_transform
-    import xarray as xr
-    import numpy as np
-   
-
-    with rasterio.open(geotiff_file) as src:
-        gcps, gcps_crs = src.get_gcps()
-        dst_crs = "EPSG:3413"
-        dst_transform, width, height = calculate_default_transform(
-            gcps_crs, dst_crs, src.width, src.height, gcps=gcps
-        )
-
-        dst_array = np.empty(
-            (src.count, height, width), 
-            dtype=src.dtypes[0]
-        )
-
-        reproject(
-            source=rasterio.band(src, 1),
-            destination=dst_array[0],
-            src_crs=gcps_crs,
-            src_transform=None, # None triggers GCP-based warping
-            gcps=gcps,          # Let rasterio warp based on GCPs
-            dst_transform=dst_transform,
-            dst_crs=dst_crs,
-            resampling=Resampling.nearest
-        )
-        
-        # Construct xarray.DataArray with coordinates
-        x_coords = dst_transform[2] + dst_transform[0] * np.arange(width)
-        y_coords = dst_transform[5] + dst_transform[4] * np.arange(height)
-        
-        geotiff_xr = xr.DataArray(
-            dst_array[0],
-            dims=("y", "x"),
-            coords={"x": x_coords, "y": y_coords},
-            attrs={"crs": dst_crs}
-        )
-        
-        # change backround to white
-        masked_xr = np.ma.masked_equal(geotiff_xr.values, 0)
-        
-        extent = [
-            dst_transform[2],
-            dst_transform[2] + dst_transform[0] * width,
-            dst_transform[5] + dst_transform[4] * height,
-            dst_transform[5],
-        ]
-        
-        return masked_xr, extent
         
 
-def _embed_qml_style(gpkg_path, layer_name, qml_path):
+def _embed_qml_style(gpkg_path, layer_name, config):
     """
     Embed a QML style into a GeoPackage's layer_styles table.
 
@@ -576,23 +435,41 @@ def _embed_qml_style(gpkg_path, layer_name, qml_path):
         gpkg_path (str): Full path to the target GeoPackage file.
         layer_name (str): Name of the layer to apply the style to.
                           Must match the layer name in the GeoPackage exactly.
-        qml_path (str): Full path to the QML style file to embed.
+        config (dict): Configuration dictionary. Must include:
+                - 'level' (str): Processing level; controls which QML file
+                                 is selected.
+                - 'outlier_qml_file' (str): Path to the QML style file used
+                                            for level '02' (colors vectors
+                                            by outlier category).
+                - 'graduated_qml_file' (str): Path to the QML style file
+                                              used for all other levels
+                                              (colors vectors by displacement
+                                              magnitude).
 
     Returns:
         None
 
     Notes:
+        - The QML file is selected based on config['level']: level '02' uses
+          'outlier_qml_file'; all other levels use 'graduated_qml_file'.
         - The layer_styles table is created if it does not already exist,
           following the QGIS standard schema.
         - `f_geometry_column` is hardcoded to 'geom' because GeoPandas
           silently renames the geometry column from 'geometry' to 'geom'
           when writing to GeoPackage format.
+        - `styleName` is hardcoded to 'outliers' to satisfy the QGIS
+          layer_styles schema; it does not reflect the actual style content.
         - `useAsDefault` is set to 1 so QGIS applies the style automatically
           on load without user intervention.
         - The layer_styles table is registered in gpkg_contents as an
           attributes layer for full GeoPackage spec compliance.
     """
     import sqlite3
+    
+    if config['level'] == '02':
+        qml_path = config['outlier_qml_file']
+    else:
+        qml_path = config['graduated_qml_file']
     
     with open(qml_path, 'r') as f:
         qml_content = f.read()
@@ -660,253 +537,56 @@ def _embed_qml_style(gpkg_path, layer_name, qml_path):
 #=============
 
 def _circular_mean(a):
+    """
+    Compute the circular mean of an array of angles.
+
+    Uses the arctangent of the mean sine and cosine components to correctly
+    handle angular wrap-around near 0°/360° (or −π/π radians), where a
+    naive arithmetic mean would be incorrect.
+
+    Args:
+        a (array-like): Angles in radians. NaN values are ignored.
+
+    Returns:
+        float: Circular mean angle in radians, in the range (−π, π].
+    """
+    
     import numpy as np
     return np.arctan2(np.nanmean(np.sin(a)), np.nanmean(np.cos(a)))
 
 
 def _circular_std(a):
+    """
+    Compute the circular standard deviation of an array of angles.
+    
+    Uses the mean resultant length R — the magnitude of the vector sum of
+    unit vectors at each angle — to derive a dispersion measure analogous
+    to standard deviation. R = 1 indicates perfect concentration (all angles
+    identical); R → 0 indicates maximum dispersion. The circular standard
+    deviation is defined as sqrt(−2 · ln(R)), which approaches 0 as
+    concentration increases and grows unboundedly as R → 0.
+    
+    Args:
+        a (array-like): Angles in radians. NaN values are ignored.
+    
+    Returns:
+        float: Circular standard deviation in radians, in the range [0, ∞).
+            Returns sqrt(−2 · ln(1e-12)) ≈ 7.43 when R is at or below the
+            clipping floor of 1e-12 (i.e. maximum dispersion).
+    
+    Notes:
+        - R is clipped to [1e-12, 1.0] before the logarithm to guard against
+          log(0) when all angles are maximally dispersed, and against
+          log(>1) from floating-point rounding when all angles are identical.
+        - Input angles are assumed to be in radians. Degree inputs will
+          produce incorrect results.
+    """
+
     import numpy as np
     s = np.nanmean(np.sin(a))
     c = np.nanmean(np.cos(a))
     R = np.sqrt(s*s + c*c)
     return np.sqrt(-2 * np.log(np.clip(R, 1e-12, 1.0)))
-
-
-#==================
-# Plot enhancements
-#==================
-
-def _add_graticules(ax, map_extent):
-    """
-    Add latitude and longitude graticules with labels to a Cartopy map axis.
-    
-    This function draws dashed gridlines (graticules) at regular intervals
-    of longitude and latitude on a projected plot using EPSG:3413
-    (NSIDC Sea Ice Polar Stereographic North). Longitude labels are placed
-    near the bottom of the plot and labeled in degrees west. Latitude labels
-    are placed along the right edge in degrees north.
-    
-    Parameters
-    ----------
-    ax : matplotlib.axes._subplots.AxesSubplot
-        A Cartopy-projected Matplotlib axis to which graticules will be added.
-    
-    map_extent_xr : list of float
-        The extent of the plotted map in EPSG:3413 projected coordinates, 
-        given as [xmin, xmax, ymin, ymax].
-    
-    Notes
-    -----
-    - Graticules are drawn every 10 degrees longitude and 
-      every 5 degrees latitude.
-    - The function internally transforms coordinates using `pyproj`
-      for EPSG:3413 <-> EPSG:4326.
-    - A 10% buffer is added to both longitude and latitude ranges to ensure
-      full graticule coverage.
-    - Labels are drawn in projected space (not geographic space).
-    - Longitude labels use west notation (e.g., 135°W),
-      and latitude uses north (e.g., 75.0°N).
-    """
-    
-    
-    import numpy as np
-    
-    # Corners in degrees transform from EPSG:3413 to EPSG:4326
-    transformer = _set_transformer()
-    lon_min, lat_min = (
-        transformer['3413_to_4326'].transform(map_extent[0], map_extent[2])
-    )
-    lon_max, lat_max = (
-        transformer['3413_to_4326'].transform(map_extent[1], map_extent[3])
-    )
-    
-    # Fix inverted bounds
-    lon_min, lon_max = sorted([lon_min, lon_max])
-    lat_min, lat_max = sorted([lat_min, lat_max])
-   
-    
-    # Generate labels (every 5 degrees lat; every 10 degrees lon)
-    # Only include multiples of 5 within the actual bounds
-    lon_labels = np.arange(
-        np.ceil(lon_min / 10) * 10,
-        np.floor(lon_max / 10) * 10 + 1,
-        10
-    )
-    
-    lat_labels = np.arange(
-        np.ceil(lat_min / 5) * 5,
-        np.floor(lat_max / 5) * 5 + 1,
-        5
-    )
-
-    
-    # Extend the longitude/latitude range slightly (e.g., 10%) 
-    # to ensure full coverage
-    lon_range = lon_max - lon_min
-    lon_pad = 0.1 * lon_range  # 10% padding
-    lon_min_ext = lon_min - lon_pad
-    lon_max_ext = lon_max + lon_pad
-    
-    lat_range = lat_max - lat_min
-    lat_pad = 0.1 * lat_range
-    lat_min_ext = lat_min - lat_pad
-    lat_max_ext = lat_max + lat_pad
-    
-    
-    # Vertical lines for longitude
-    for lon in lon_labels:
-        lats = np.linspace(lat_min_ext, lat_max_ext, 200)
-        points = []
-        for lat in lats:
-            points.append(transformer['4326_to_3413'].transform(lon, lat))
-        xs, ys = zip(*points)
-        ax.plot(xs, ys, color='lightgray', linestyle='--', linewidth=0.5)
-        
-    # longitude labels
-    for lon in lon_labels:
-        x, y = transformer['3413_to_4326'].transform(lon, lat_min)
-        ax.text(
-            x + 30000,
-            y + 5000,
-            f"{lon:.0f}°W",
-            ha='center',
-            va='top',
-            fontsize=8
-        )
-
-
-    # horizontal lines for latitude    
-    for lat in lat_labels:
-        lons = np.linspace(lon_min_ext, lon_max_ext, 200)
-        points = []
-        for lon in lons:
-            points.append(transformer['4326_to_34123'].transform(lon, lat))
-        xs, ys = zip(*points)
-        ax.plot(xs, ys, color='lightgray', linestyle='--', linewidth=0.5)    
-    
-    # Label latitudes at right
-    for lat in lat_labels:
-        x, y = transformer['4326_to_3413'].transform(lon_labels[-1], lat)
-        ax.text(
-            x - 5000,
-            y - 10000,
-            f"{lat:.1f}°N",
-            ha='left',
-            va='center',
-            fontsize=8
-        )
-
-
-def _add_scale(ax, cartopy_crs):
-    """
-    Add a scale bar to a Cartopy-projected map axis.
-    
-    This function uses the `matplotlib_scalebar` library to draw a scale bar
-    that indicates real-world distance in kilometers. It assumes the map
-    projection uses meters as its base unit (e.g., EPSG:3413).
-    
-    Parameters
-    ----------
-    ax : matplotlib.axes._subplots.AxesSubplot
-        A Matplotlib axis with a Cartopy projection to which the scale bar
-        will be added.
-    
-    cartopy_crs : cartopy.crs.Projection
-        The projection used for the map, assumed to be in meters. Although not
-        directly used, this parameter is kept for compatibility and clarity.
-    
-    Notes
-    -----
-    - The scale bar spans 25% of the axis width.
-    - The bar displays a fixed length of 100 kilometers.
-    - The position of the scale bar is anchored to the lower left corner
-      of the plot.
-    - The axis is assumed to use projected units in meters
-      (e.g., Polar Stereographic).
-    """
-    
-    
-    from matplotlib_scalebar.scalebar import ScaleBar
-    
-    # Add scalebar to ax
-    scalebar = ScaleBar(
-        dx=1,                  # 1 data unit = 1 meter
-        units='m',             # tell it the CRS uses meters
-        location='lower left',
-        scale_loc='bottom',
-        length_fraction=0.25,  # bar spans 25% of axis
-        fixed_value=100,       # (optional) force bar to 100 km
-        fixed_units='km'       # force label to km
-    )
-    ax.add_artist(scalebar)
-    
-    
-def _add_true_north(ax, xmin, xmax, ymin, ymax):
-    """
-    Add a True North arrow to a Cartopy map axis using EPSG:3413 coordinates.
-
-    This function adds an arrow pointing to geographic North at a reference
-    location near the bottom-right corner of the plot. The location is computed
-    in the EPSG:3413 projection (Polar Stereographic North), and then
-    converted to geographic coordinates (EPSG:4326) to calculate the northward
-    direction.
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        The Matplotlib axis on which to draw the True North arrow.
-
-    xmin : float
-        Minimum x-coordinate (in meters) of the map extent.
-
-    xmax : float
-        Maximum x-coordinate (in meters) of the map extent.
-
-    ymin : float
-        Minimum y-coordinate (in meters) of the map extent.
-
-    ymax : float
-        Maximum y-coordinate (in meters) of the map extent.
-
-    Notes
-    -----
-    - The north arrow is drawn at 5% from the right and 5% from the bottom
-      of the map.
-    - The arrow is styled with a black face and labeled with an 'N'
-      to indicate direction.
-    - Coordinate conversions between EPSG:3413 and EPSG:4326 are performed
-      using `pyproj.Transformer`.
-    """
-    
-    
-    
-    transformer = _set_transformer()
-    
-    # bottom-right corner of the plot as reference point
-    x_ref = xmax - 0.05 * (xmax - xmin)
-    y_ref = ymin + 0.05 * (ymax - ymin)
-    
-    # convert meters to degrees
-    lon_ref, lat_ref = transformer['3413_to_4326'].transform(x_ref, y_ref)
-    
-    # move a small distance north
-    lat_north = lat_ref + 0.5
-    lon_north = lon_ref
-    
-    # convert degrees back to meters
-    x_north, y_north = transformer['4326_to_3413'].transform(lon_north, lat_north)
-    
-    # arrow
-    ax.annotate(
-        '', xy=(x_north, y_north), xytext=(x_ref, y_ref),
-        arrowprops=dict(
-            facecolor='black', edgecolor='black', width=2, headwidth=10
-        ),
-    )
-    ax.text(
-        x_ref, y_ref - 20000, 'N', color='black',
-        fontsize=16, ha='center', va='top'
-    )
     
     
 #=========
@@ -932,14 +612,17 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
         3. Convert Julian seconds timestamps (`Time1_JS`, `Time2_JS`) to
            human-readable datetime strings (`date_start`, `date_end`).
         4. Compute observation duration in seconds (`duration_s`).
-        5. Project start/end lat/lon to EPSG:3413 and compute displacement,
-           velocity, speed, and bearing via `_calculate_drift_daily`.
-        6. Extract sensor identifiers from `File1`/`File2` into `sensor1`/
+        5. Project start/end lat/lon to EPSG:`config['epsg']` and compute
+           displacement, velocity, speed, and bearing via
+           `_calculate_drift_daily`.
+        6. Round all coordinate, displacement, velocity, speed, bearing, and
+           distance fields according to precision keys in `config`.
+        7. Extract sensor identifiers from `File1`/`File2` into `sensor1`/
            `sensor2`.
-        7. Rename geographic coordinate columns:
+        8. Rename geographic coordinate columns:
                Lat1 → latitude_1,  Lon1 → longitude_1
                Lat2 → latitude_2,  Lon2 → longitude_2
-        8. Drop source columns that are not used in any output:
+        9. Drop source columns that are not used in any output:
                Time1_JS, Time2_JS, U_vel_ms, V_vel_ms, Speed_kmdy, Bear_deg,
                img1_mean, img1_std, img2_mean, img2_std, img1s_mean, img1s_std,
                Npnt, Offset1, Offset2
@@ -951,16 +634,29 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
             - 'delimiter' (str): Field delimiter passed to `pd.read_csv`.
             - 'skip_rows_before_header' (int): Number of rows to skip before
               the header row.
-            - 'speed_precision' (int): Decimal places for speed and
-              displacement rounding.
-            - 'bearing_precision' (int): Decimal places for bearing rounding.
+            - 'epsg' (int): EPSG code for the target projected CRS used by
+              `_calculate_drift_daily` (e.g. 3413 for NSIDC Sea Ice Polar
+              Stereographic North). Controls the projection used for X1, Y1,
+              X2, Y2, dx, dy, u_ms, and v_ms.
+            - 'coordinate_position' (int): Decimal places for geographic
+              coordinates (Lat1, Lon1, Lat2, Lon2) and projected coordinates
+              (X1, Y1, X2, Y2).
+            - 'displacement_precision' (int): Decimal places for
+              `sea_ice_x_displacement`, `sea_ice_y_displacement`, `u_ms`,
+              and `v_ms`.
+            - 'speed_precision' (int): Decimal places for `sea_ice_speed`,
+              `sea_ice_speed_kmdy`, and `distance`.
+            - 'bearing_precision' (int): Decimal places for
+              `direction_of_sea_ice_displacement`.
+        skip_rows (list[int] or None): Row indices to skip when reading the
+            file, passed directly to `pd.read_csv`. Defaults to None.
  
     Returns:
         pandas.DataFrame: Cleaned and enriched SAR drift DataFrame. Raw source
         columns are preserved (except those listed as dropped above) together
         with the following derived and renamed columns:
  
-        Renamed geographic coordinates:
+        Renamed geographic coordinates (rounded to `coordinates_position`):
             - 'latitude_1'  (float): Starting latitude  (degrees, from Lat1)
             - 'longitude_1' (float): Starting longitude (degrees, from Lon1)
             - 'latitude_2'  (float): Ending latitude    (degrees, from Lat2)
@@ -972,27 +668,33 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
             - 'date_end'   (str): End datetime in '%Y-%m-%d %H:%M:%S'
                                   (from Time2_JS)
             - 'duration_s' (float): Observation duration in seconds
-                                    (Time2_JS − Time1_JS)
+                                    (Time2_JS − Time1_JS); not rounded.
  
-        Projected coordinates (EPSG:3413, metres):
+        Projected coordinates (EPSG:`config['epsg']`, meters; rounded to
+        `coordinates_position`):
             - 'X1', 'Y1': Start position
             - 'X2', 'Y2': End position
  
-        Displacement and velocity (EPSG:3413):
+        Displacement and velocity (EPSG:`config['epsg']`; rounded to
+        `displacement_precision`):
             - 'sea_ice_x_displacement' (float): X2 − X1  (m)
             - 'sea_ice_y_displacement' (float): Y2 − Y1  (m)
             - 'u_ms' (float): sea_ice_x_displacement / duration_s  (m s⁻¹)
             - 'v_ms' (float): sea_ice_y_displacement / duration_s  (m s⁻¹)
  
         Speed and direction:
-            - 'sea_ice_speed'      (float): geodesic speed  (m s⁻¹)
-            - 'sea_ice_speed_kmdy' (float): geodesic speed  (km day⁻¹)
+            - 'sea_ice_speed'      (float): geodesic speed  (m s⁻¹);
+                                            rounded to `speed_precision`
+            - 'sea_ice_speed_kmdy' (float): geodesic speed  (km day⁻¹);
+                                            rounded to `speed_precision`
             - 'direction_of_sea_ice_displacement' (float): forward azimuth
-                                                           (degrees)
-            - 'distance' (float): geodesic distance (m)
+                                            (degrees); rounded to
+                                            `bearing_precision`
+            - 'distance' (float): geodesic distance (m); rounded to
+                                  `speed_precision`
             
         Sensor and scene identifiers:
-            - 'scene_id' (str): Combination of 'File1' and 'File2'' separated
+            - 'scene_id' (str): Combination of 'File1' and 'File2' separated
                                 by underscore
             - 'sensor1' (str):  Satellite identifier from File1
                                 (prefix before first underscore)
@@ -1057,21 +759,26 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
         lon1=df['Lon1'].values,
         lat2=df['Lat2'].values,
         lon2=df['Lon2'].values,
-        duration_s=df['duration_s'].values
+        duration_s=df['duration_s'].values,
+        epsg=config['epsg']
     )
     
-    df['X1'] = drift['X1']
-    df['Y1'] = drift['Y1']
-    df['X2'] = drift['X2']
-    df['Y2'] = drift['Y2']
+    df['Lat1'] = np.round(df['Lat1'], config['coordinate_precision'])
+    df['Lon1'] = np.round(df['Lon1'], config['coordinate_precision'])
+    df['Lat2'] = np.round(df['Lat2'], config['coordinate_precision'])
+    df['Lon2'] = np.round(df['Lon2'], config['coordinate_precision'])
+    df['X1'] = np.round(drift['X1'], config['coordinate_precision'])
+    df['Y1'] = np.round(drift['Y1'], config['coordinate_precision'])
+    df['X2'] = np.round(drift['X2'], config['coordinate_precision'])
+    df['Y2'] = np.round(drift['Y2'], config['coordinate_precision'])
     df['sea_ice_x_displacement'] = np.round(
-        drift['dx'], config['speed_precision']
+        drift['dx'], config['displacement_precision']
     )
     df['sea_ice_y_displacement'] = np.round(
-        drift['dy'], config['speed_precision']
+        drift['dy'], config['displacement_precision']
     )
-    df['u_ms'] = drift['u_ms']
-    df['v_ms'] = drift['v_ms']
+    df['u_ms'] = np.round(drift['u_ms'], config['displacement_precision'])
+    df['v_ms'] = np.round(drift['v_ms'], config['displacement_precision'])
     df['sea_ice_speed'] = np.round(
         drift['speed_ms'],
         config['speed_precision']
@@ -1120,10 +827,144 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
 def outlier_search(df, config, base_name, radius_km,
                    min_neighbors, md_neighbors, z_score_level,
                    chi_square_level, passes):
+    """
+    Detect and classify outlier drift vectors within each SAR scene.
+
+    For each scene (grouped by `File1`/`File2`), computes per-vector outlier
+    flags using two independent methods: z-score on speed and bearing, and
+    Mahalanobis distance on displacement components. Results are combined into
+    a two-digit `outlier_category` code encoding outlier type and statistical
+    confidence. Detection is run iteratively, excluding already-flagged vectors
+    from the neighbor pool on each subsequent pass.
+
+    Args:
+        df (pandas.DataFrame): Input drift observations. Expected columns:
+                - 'File1', 'File2' (str): Scene pair identifiers used for
+                  grouping.
+                - 'X1', 'Y1' (float): Projected start coordinates
+                  (EPSG:`config['epsg']`, meters); used to build the
+                  spatial neighbor index.
+                - 'sea_ice_speed' (float): Drift speed (m s⁻¹); used for
+                  z-score distance outlier detection.
+                - 'direction_of_sea_ice_displacement' (float): Forward azimuth
+                  (degrees); used for z-score bearing outlier detection.
+                - 'sea_ice_x_displacement', 'sea_ice_y_displacement' (float):
+                  Displacement components (m); used as features for
+                  Mahalanobis distance outlier detection.
+        config (dict): Configuration dictionary. Must include:
+                - 'level' (str): Processing level. If '01', outlier detection
+                  is skipped and all rows are assigned `outlier_category`
+                  of '-9'.
+                - 'epsg' (int): EPSG code of the projected CRS used for
+                  `X1`/`Y1` coordinates, passed through from
+                  `read_sar_drift_data_file`. Used here only for
+                  documentation context; the neighbor search operates
+                  directly on the projected meter values.
+        base_name (str): Scene identifier string used in log messages.
+        radius_km (float): Search radius in kilometers for z-score neighbor
+                           lookup via `cKDTree.query_ball_point`.
+        min_neighbors (int): Minimum number of neighbors required for a
+                             z-score outlier flag to be considered
+                             statistically confident (i.e. to receive a `1`
+                             confidence digit).
+        md_neighbors (int): Minimum number of neighbors required for a
+                            Mahalanobis distance outlier flag to be considered
+                            statistically confident.
+        z_score_level (float): Z-score threshold above which a vector is
+                               flagged as a speed or bearing outlier.
+        chi_square_level (float): Chi-square cumulative probability threshold
+                                  (e.g. 0.99) used to derive the squared
+                                  Mahalanobis distance cutoff via
+                                  `chi2.ppf(chi_square_level, df=2)`.
+        passes (int): Maximum number of detection iterations. Each pass
+                      rebuilds the neighbor pool using only current inliers
+                      (`outlier_category` in `['00', '01']`). Iteration stops
+                      early if the inlier count stabilizes between passes.
+
+    Returns:
+        pandas.DataFrame: Copy of `df` with the following columns added:
+                - 'outlier_category' (str): Two-digit code encoding outlier
+                  type (tens digit) and statistical confidence (units digit).
+                  See Notes for the full encoding table. Set to '-9' for
+                  level '01'.
+                - 'scene' (int): Scene group number assigned by
+                  `File1`/`File2` pairing.
+                - 'sd_neighbor_indices' (list[int]): `out_df` row indices of
+                  z-score neighbors for each vector.
+                - 'sd_neighbor_count' (int): Number of z-score neighbors found.
+                - 'distance_z_score' (float): Absolute z-score of speed
+                  relative to neighbors.
+                - 'bearing_z_score' (float): Absolute circular z-score of
+                  bearing relative to neighbors.
+                - 'md_neighbor_indices' (list[int]): `out_df` row indices of
+                  Mahalanobis neighbors for each vector.
+                - 'md_neighbor_count' (int): Number of Mahalanobis neighbors
+                  found.
+                - 'mahal_sq' (float): Squared Mahalanobis distance of the
+                  vector from its neighbors.
+                - 'thr_sq' (float): Squared distance threshold derived from
+                  `chi_square_level`.
+                - 'mahal_outlier_flag' (bool): True if `mahal_sq > thr_sq`.
+                - 'sd_outlier_pass' (int): Pass index (1-based) on which the
+                  vector was first flagged by z-score; −1 if never flagged.
+                - 'md_outlier_pass' (int): Pass index (1-based) on which the
+                  vector was first flagged by Mahalanobis distance; −1 if
+                  never flagged.
+
+    Notes:
+        **Level '01' short-circuit:** If `config['level']` is '01', the
+        function assigns `outlier_category = '-9'` to all rows and returns
+        immediately without performing any detection.
+
+        **outlier_category encoding:** The two-digit string combines a tens
+        digit for outlier type and a units digit for statistical confidence
+        (0 = below neighbor threshold, 1 = at or above threshold):
+
+        | Code | Outlier Type                              |
+        |------|-------------------------------------------|
+        | `00` | None (under neighbor threshold)           |
+        | `01` | None (at or above neighbor threshold)     |
+        | `10` | Distance                                  |
+        | `11` | Distance (confident)                      |
+        | `20` | Bearing                                   |
+        | `21` | Bearing (confident)                       |
+        | `30` | Mahalanobis distance                      |
+        | `31` | Mahalanobis distance (confident)          |
+        | `40` | Distance and bearing                      |
+        | `41` | Distance and bearing (confident)          |
+        | `50` | Mahalanobis distance and distance         |
+        | `51` | Mahalanobis distance and distance (conf.) |
+        | `60` | Mahalanobis distance and bearing          |
+        | `61` | Mahalanobis distance and bearing (conf.)  |
+        | `70` | Mahalanobis distance, distance and bearing|
+        | `71` | Mahalanobis distance, distance and bearing (conf.) |
+
+        **Confidence digit:** For categories involving Mahalanobis distance
+        (30–71), confidence uses `md_neighbors`; for all others it uses
+        `min_neighbors`.
+
+        **Mahalanobis estimation:** Uses `LedoitWolf` covariance on
+        standardized displacement components, which is more stable than
+        `MinCovDet` for small or ill-conditioned neighbor samples. Vectors
+        with fewer than `max(2p+1, md_neighbors)` neighbors or a rank-
+        deficient neighbor matrix receive `mahal_sq = NaN` and are not
+        flagged.
+
+        **Bearing z-score:** Computed using circular statistics —
+        `arctan2(sin(Δ), cos(Δ))` normalizes the angular difference before
+        dividing by circular standard deviation, correctly handling wrap-
+        around near 0°/360°.
+
+        **Iterative passes:** On each pass, the neighbor pool is restricted
+        to current inliers only, preventing flagged vectors from inflating
+        local statistics. Iteration stops early if the inlier count does not
+        change between passes.
+    """
+    
     import numpy as np
     import logging
     from scipy.spatial import cKDTree
-    from sklearn.covariance import MinCovDet, LedoitWolf
+    from sklearn.covariance import LedoitWolf
     from scipy.stats import chi2
     
     if config['level'] == '01':
@@ -1328,75 +1169,7 @@ def outlier_search(df, config, base_name, radius_km,
                 out_df.at[target_out_idx, 'mahal_outlier_flag'] = (
                     (mahal_sq > thr_sq)
                 )
-                
-                
-            ### TEST ON FULL SENE (index to right when done)
-            # # 1) Build full-scene feature matrix
-            # Xall = out_df[["U_vel_ms", "V_vel_ms"]].to_numpy(dtype=float)
-            # n, p = Xall.shape
-            
-            # # Optional: drop rows with non-finite values (recommended)
-            # finite_mask = np.isfinite(Xall).all(axis=1)
-            
-            # # Initialize outputs (so you can keep original length)
-            # mahal_sq = np.full(n, np.nan, dtype=float)
-            
-            # if finite_mask.sum() >= max(2 * p + 1, md_neighbors):   # keep your minimum sample rule
-            #     X = Xall[finite_mask]
-            
-            #     # 2) Standardize using full-scene stats
-            #     mu = X.mean(axis=0)
-            #     sd = X.std(axis=0, ddof=0)
-            #     sd[sd == 0] = 1.0
-            #     Xz = (X - mu) / sd
-            
-            #     # 3) Fit covariance once (scene-wide)
-            #     lw = LedoitWolf().fit(Xz)
-            
-            #     # 4) Mahalanobis squared distances for all points (scene-wide)
-            #     mahal_sq[finite_mask] = lw.mahalanobis(Xz)  # returns squared distances
-            
-            # # 5) Threshold (chi-square, df=p)
-            # alpha = chi_sq
-            # thr_sq = float(chi2.ppf(alpha, df=p))
-            
-            # # 6) Store results
-            # out_df["mahal_sq"] = mahal_sq
-            # out_df["thr_sq"] = thr_sq
-            # out_df["mahal_outlier_flag"] = (out_df["mahal_sq"] > out_df["thr_sq"]).fillna(False)
-            
-            # # 7) Neighbor fields no longer mean "neighbors"—repurpose or simplify
-            # # If you want "count used for scene covariance":
-            # out_df["md_neighbor_count"] = int(finite_mask.sum()) - 1  # "others in scene" (approx)
-            # # If you don't want indices, keep empty lists or None:
-            # out_df["md_neighbor_indices"] = None
-            # md_neighbors = int(finite_mask.sum()) - 1                 
 
-                
-                
-            """
-            assign outlier category
-            00: None (under neighbor threshold)
-            01: None (equal to or above neighbor threshold)
-            10: Distance (under neighbor threshold)
-            11: Distance (equal to or above neighbor threshold)
-            20: Bearing (under neighbor threshold)
-            21: Bearing (equal to or above neighbor threshold)
-            30: Mahalanobis distance (under neighbor threshold)
-            31: Mahalanobis distance (equal to or above neighbor threshold)
-            40: Distance and bearing (under neighbor threshold)
-            41: Distance and bearing (equal to or above neighbor threshold)
-            50: Mahalanobis distance and distance (under neighbor threshold)
-            51: Mahalanobis distance and distance
-                (equal to or above neighbor threshold)
-            60: Mahalanobis distance and bearing (under neighbor threshold)
-            61: Mahalanobis distance and bearing
-                (equal to or above neighbor threshold)            
-            70: Mahalanobis distance, distance and bearing
-                (under neighbor threshold)
-            71: Mahalanobis distance, distance and bearing
-                (equal to or above neighbor threshold)
-            """
             
             # outlier boolean flags
             distance_filter = out_df['distance_z_score'] > z_score_level
@@ -1503,16 +1276,26 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
                 - 'date_start' (datetime-like): Start timestamp for the vector.
                 - 'date_end' (datetime-like): End timestamp for the vector.
                 - 'duration_s' (float): Observation duration in seconds.
-                - 'longitude_1' (float): Starting longitude (degrees).
-                - 'latitude_1' (float): Starting latitude (degrees).
-                - 'sea_ice_speed' (float): Sea-ice speed (m s⁻¹).
-                - 'sea_ice_x_displacement' (float): X displacement (m).
-                - 'sea_ice_y_displacement' (float): Y displacement (m).
+                - 'longitude_1' (float): Starting longitude (degrees,
+                  EPSG:4326); used to locate each vector on the NSIDC 12.5 km
+                  polar stereographic grid regardless of the projected CRS
+                  used for displacement computation.
+                - 'latitude_1' (float): Starting latitude (degrees, EPSG:4326).
+                - 'sea_ice_speed' (float): Sea-ice speed (m s⁻¹); derived
+                  from the projected CRS specified by `config['epsg']`
+                  upstream.
+                - 'sea_ice_x_displacement' (float): X displacement (m);
+                  projected in `config['epsg']` CRS.
+                - 'sea_ice_y_displacement' (float): Y displacement (m);
+                  projected in `config['epsg']` CRS.
                 - 'direction_of_sea_ice_displacement' (float): Bearing
-                                                               (degrees).
-                - 'outlier_category' (int): Outlier classification code.
+                  (degrees); geodesic, independent of projected CRS.
+                - 'outlier_category' (str): Two-digit outlier classification
+                  code (e.g. '00', '01', '11'). For level '03', only rows
+                  with values '00' or '01' are retained and the value is
+                  recoded to −1 before writing.
                 - 'Maxcorr1', 'Maxcorr2' (float): Cross-correlation scores
-                  (used for `measurement_error` flag in levels 00/01).
+                  (used for `measurement_error` flag in levels '00'/'01').
                 - '_use_75km' (bool): Whether the 75 km file was used
                   (controls speed threshold for `speed_error` flag).
         base_name (str): Base filename (without extension) used to name
@@ -1522,8 +1305,13 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
                 - 'nc_dir' (str): Output directory where the NetCDF file
                                   is written.
                 - 'level'  (str): Processing level ('00'–'03'); controls
-                                  which error flags are computed vs. set
-                                  to fill value −9.
+                                  inlier filtering, error flag computation,
+                                  and fill value assignment.
+                - 'epsg' (int): EPSG code of the projected CRS used upstream
+                                for displacement and speed computation.
+                                Does not affect the output grid, which is
+                                always the NSIDC 12.5 km polar stereographic
+                                grid (EPSG:3413).
         template_ds (xarray.Dataset): Template dataset providing the target
                                       grid coordinate arrays and dimensions.
         scene_i_j (dict): Mutable dictionary updated in-place with the list
@@ -1531,29 +1319,38 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
                           by `base_name`.
  
     Returns:
-        None
+        str: Path to the written NetCDF file
+             (`<config['nc_dir']>/<base_name>.nc`). Returns `None` early
+             if level is '03' and no rows survive the inlier filter.
  
     Workflow:
         1. Parse `date_start` and `date_end` to pandas datetimes.
-        2. Derive the scene reference time and time bounds from `duration_s`,
+        2. For level '03': retain only rows where `outlier_category` is '00'
+           or '01' (inliers), recode `outlier_category` to −1, and return
+           early if no rows survive.
+        3. Derive the scene reference time and time bounds from `duration_s`,
            `date_start`, and `date_end`.
-        3. Compute error flags (`bearing_error`, `speed_error`,
-           `measurement_error`) for levels 00/01; set to −9 otherwise.
-        4. Convert starting positions (`longitude_1`, `latitude_1`) to NSIDC
+        4. Compute error flags (`bearing_error`, `speed_error`,
+           `measurement_error`) for levels '00'/'01'; set to −9 otherwise.
+        5. Convert starting positions (`longitude_1`, `latitude_1`) to NSIDC
            12.5 km polar stereographic grid indices (i, j) using
-           `_polar_lonlat_to_ij`.
-        5. Load CDL-derived variable and global attributes from
+           `_polar_lonlat_to_ij`. Grid placement always uses EPSG:4326
+           geographic coordinates and is independent of `config['epsg']`.
+        6. Load CDL-derived variable and global attributes from
            `_set_metadata(config)`.
-        6. Build an `xarray.Dataset` on the full template grid, initialised
+        7. Build an `xarray.Dataset` on the full template grid, initialised
            with NaN / −9 fill values.
-        7. Populate the time slice at index 0 with per-observation values for
+        8. Populate the time slice at index 0 with per-observation values for
            all science and flag variables.
-        8. Crop the dataset to the bounding box of finite `sea_ice_speed`
+        9. Crop the dataset to the bounding box of finite `sea_ice_speed`
            values, with a 4-cell padding on each side.
-        9. Write to NetCDF with zlib compression (level 4) and explicit
+       10. Write to NetCDF with zlib compression (level 4) and explicit
            `_FillValue` / dtype encoding per variable.
  
     Notes:
+        - The output grid is always the NSIDC 12.5 km polar stereographic
+          grid (EPSG:3413), regardless of the `config['epsg']` value used
+          for upstream displacement computation.
         - The `time` coordinate is set to the minimum `date_start` value
           across all observations, stored as seconds since 2000-01-01
           (Julian seconds, matching the source file convention).
@@ -1562,7 +1359,10 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
           `time_coverage_end` are updated after dataset construction.
         - Duplicate (i, j) assignments are detected and logged; the last
           observation written wins for that grid cell.
-        - All int16 flag variables use −9 as their `_FillValue`.
+        - All int16 flag variables use −9 as their `_FillValue`. For level
+          '03', `outlier_category` carries −1 for all written observations,
+          indicating the outlier algorithm has been applied and the vector
+          passed as an inlier.
     """
  
     import os
@@ -1577,6 +1377,19 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
     df_copy = df.copy()
     df_copy['date_start'] = pd.to_datetime(df_copy['date_start'])
     df_copy['date_end'] = pd.to_datetime(df_copy['date_end'])
+    
+    
+    # For level 03, retain only inlier vectors (outlier_category 00 or 01),
+    # then recode to -1 to signal that outlier filtering has been applied.
+    if config['level'] == '03':
+        outlier_filter = df_copy['outlier_category'].isin(['00', '01'])
+        df_copy = df_copy[outlier_filter].copy()
+        
+        df_copy['outlier_category'] = -1
+        if df_copy.shape[0] == 0:
+            # it might be possible the data frame was labelled
+            # as all outliers.
+            return None
     
     layer_id_str = df_copy['scene_id'].iloc[0]
  
@@ -1865,22 +1678,26 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
         # ensure dataset is closed even if an error occurs
         netcdf_grid.close()
         del netcdf_grid
+        
+        
+    return  os.path.join(config["nc_dir"], f'{base_name}.nc')
 
 
-def create_shape_package(df, base_name, config):
+def create_shape_package(df, gpkg_path, config):
     """
     Create a GeoPackage containing drift line vectors for SAR drift data.
- 
+
     Builds LineString geometries from projected start and end coordinates
-    (EPSG:3413) and writes them as a single `drift_lines` layer within a
-    GeoPackage. A QML style file is embedded directly into the GeoPackage's
-    `layer_styles` table for automatic styling when opened in QGIS.
- 
+    (EPSG:`config['epsg']`) and writes them as a single `drift_lines` layer
+    within a GeoPackage. A QML style file is embedded directly into the
+    GeoPackage's `layer_styles` table for automatic styling when opened in
+    QGIS.
+
     Args:
         df (pandas.DataFrame): Input DataFrame containing drift vectors, as
             produced by `read_sar_drift_data_file` and `outlier_search`.
             Expected columns:
-                Projected coordinates (EPSG:3413, metres):
+                Projected coordinates (EPSG:`config['epsg']`, metres):
                     - 'X1', 'Y1' (float): Start position.
                     - 'X2', 'Y2' (float): End position.
                 Geographic coordinates (degrees):
@@ -1897,8 +1714,8 @@ def create_shape_package(df, base_name, config):
                 Science variables:
                     - 'sea_ice_x_displacement' (float): X displacement (m).
                     - 'sea_ice_y_displacement' (float): Y displacement (m).
-                    - 'u_vel_ms' (float): X velocity component (m s⁻¹).
-                    - 'v_vel_ms' (float): Y velocity component (m s⁻¹).
+                    - 'u_ms' (float): X velocity component (m s⁻¹).
+                    - 'v_ms' (float): Y velocity component (m s⁻¹).
                     - 'sea_ice_speed' (float): Drift speed (m s⁻¹).
                     - 'sea_ice_speed_kmdy' (float): Drift speed (km day⁻¹).
                     - 'direction_of_sea_ice_displacement' (float): Forward
@@ -1907,24 +1724,35 @@ def create_shape_package(df, base_name, config):
                     - 'distance' (float): Geodesic displacement distance (m).
                 Outlier flag (level-dependent):
                     - 'outlier_category' (str): Two-digit outlier code;
-                      included only when config['level'] in ['00', '02'].
-        base_name (str): Base filename (without extension) used to name the
-            output GeoPackage file `<config['gpkg_dir']>/<base_name>.gpkg`.
+                      included when config['level'] in ['00', '02', '03'].
+                      For level '03', only rows with values '00' or '01' are
+                      retained and the value is recoded to −1 before writing.
+        gpkg_path (str): Full path for the output GeoPackage file.
         config (dict): Configuration dictionary containing:
-                - 'gpkg_dir' (str): Output directory where the GeoPackage
-                                    is written.
-                - 'qml_file' (str): Path to the QML style file to embed.
-                - 'level'  (str):   Processing level; controls whether
-                                    `outlier_category` is included
-                                    ('00' or '02' = include, otherwise omit).
- 
+                - 'epsg' (int): EPSG code of the projected CRS used for
+                                `X1`, `Y1`, `X2`, `Y2` coordinates and set
+                                as the GeoPackage layer CRS.
+                - 'level' (str): Processing level; controls whether
+                                 `outlier_category` is included
+                                 ('00', '02', or '03' = include, otherwise
+                                 omit) and whether inlier filtering is
+                                 applied ('03' only).
+                - 'outlier_qml_file' (str): Path to the QML style file used
+                                            for level '02' (colors vectors
+                                            by outlier category).
+                - 'graduated_qml_file' (str): Path to the QML style file
+                                              used for all other levels
+                                              (colors vectors by displacement
+                                              magnitude).
+
     Returns:
         None
- 
+        
     Notes:
         - Geometry is a `LineString` from `(X1, Y1)` to `(X2, Y2)` in
-          EPSG:3413 projected metres, not from geographic coordinates.
-        - CRS is set to EPSG:3413 (NSIDC Sea Ice Polar Stereographic North).
+          EPSG:`config['epsg']` projected metres, not from geographic
+          coordinates.
+        - CRS is set to EPSG:`config['epsg']`.
         - A helper column `geometry_type` is added with the literal value
           `'line'` to identify the layer geometry type.
         - Only the columns listed in `needed_cols` (plus `outlier_category`
@@ -1934,14 +1762,11 @@ def create_shape_package(df, base_name, config):
           not need the QML file present to load the styled layer in QGIS.
     """
 
-    import os
     import logging
     import geopandas as gpd
     from shapely.geometry import LineString
     
-    # add X and Y for EPSG:3411 projection
     df_local = df.copy()
-
 
     # keep necessary columns for GeoPackage
     needed_cols = [
@@ -1954,10 +1779,22 @@ def create_shape_package(df, base_name, config):
         'direction_of_sea_ice_displacement', 'distance'
     ]
     
-    if config['level'] in ['00', '02']:
+    if config['level'] in ['00', '02', '03']:
         needed_cols.append('outlier_category')
         
     df_local=df_local[needed_cols]
+    
+    
+    # For level 03, retain only inlier vectors (outlier_category 00 or 01),
+    # then recode to -1 to signal that outlier filtering has been applied.
+    if config['level'] == '03':
+        outlier_filter = df_local['outlier_category'].isin(['00', '01'])
+        df_local = df_local[outlier_filter].copy()
+        df_local['outlier_category'] = -1
+        if df_local.shape[0] == 0:
+            # it might be possible the data frame was labelled
+            # as all outliers.
+            return None
     
     df_local['geometry_line'] = df_local.apply(
         lambda row: LineString(
@@ -1978,56 +1815,96 @@ def create_shape_package(df, base_name, config):
     gdf_line['geometry_type'] = 'line'  
     
    
-    # Save as a single GeoPackage file (supports mixed geometries)
-    geopackage_file = f"{base_name}.gpkg"
-    output_file_path = os.path.join(
-        config['gpkg_dir'], f"{geopackage_file}"
-    )
-    
+    # Save as a single GeoPackage file (supports mixed geometries)    
     gdf_line = gdf_line.rename(
         columns={'geometry_line': 'geometry'}
     ).set_geometry('geometry')
-    gdf_line = gdf_line.set_crs('EPSG:3413')
-    gdf_line.to_file(output_file_path, layer='drift_lines', driver='GPKG')
+    gdf_line = gdf_line.set_crs(f'EPSG:{config["epsg"]}')
+    gdf_line.to_file(gpkg_path, layer='drift_lines', driver='GPKG')
     
 
     # embed .qml outlier layer style
-    _embed_qml_style(output_file_path, 'drift_lines', config['qml_file'])
+    _embed_qml_style(gpkg_path, 'drift_lines', config)
     
     # log activity
     logger = logging.getLogger('sar_drift_converter')
-    logger.info(f'Created GeoPackage {output_file_path}')
-        
+    logger.info(f'Created GeoPackage {gpkg_path}')
+           
     
-def create_plotly_html(base_name, df, config, output_path=None):
+def create_plotly_html(df, html_path, config):
     """
     Create an interactive Plotly map of sea-ice drift vectors from a DataFrame.
 
+    Renders each drift vector as a colored line segment on a stereographic
+    polar projection, with start and end points marked separately. Line color
+    encodes drift speed via the Viridis colorscale. The map is written to a
+    self-contained HTML file using a CDN-hosted Plotly bundle.
+
     Args:
-        config (dict): Must contain 'html_dir' (str) for output path.
-        base_name (str): Used to name the output HTML file.
-        df (pd.DataFrame): Must contain columns:
-            Lon1, Lat1, Lon2, Lat2,
-            sea_ice_x_displacement, sea_ice_y_displacement,
-            sea_ice_speed, JS_Duration
+        df (pandas.DataFrame): Input drift observations. Expected columns:
+                - 'longitude_1', 'latitude_1' (float): Start position
+                                                        (EPSG:4326, degrees).
+                - 'longitude_2', 'latitude_2' (float): End position
+                                                        (EPSG:4326, degrees).
+                - 'sea_ice_x_displacement' (float): X displacement (m);
+                  combined with `sea_ice_y_displacement` to compute speed
+                  magnitude for colorscale normalization.
+                - 'sea_ice_y_displacement' (float): Y displacement (m).
+                - 'duration_s' (float): Observation duration (s); used to
+                  convert displacement magnitude to m day⁻¹.
+                - 'direction_of_sea_ice_displacement' (float): Forward azimuth
+                  (degrees); shown in end-point hover text.
+                - 'sensor1', 'sensor2' (str): Satellite identifiers; shown
+                  in end-point hover text.
+                - 'outlier_category' (str): Two-digit outlier code; required
+                  for level '03', where only rows with values '00' or '01'
+                  are retained before plotting.
+        html_path (str): Full path for the output HTML file.
+        config (dict): Configuration dictionary. Must include:
+                - 'level' (str): Processing level; if '03', only inlier
+                  vectors (`outlier_category` in ['00', '01']) are plotted.
+    
+    Returns:
+        None
+        
+    Notes:
+        - Speed magnitude is computed as the Euclidean norm of
+          (`sea_ice_x_displacement`, `sea_ice_y_displacement`) divided by
+          `duration_s`, scaled to m day⁻¹.
+        - Line colors are sampled from the Viridis colorscale using
+          per-vector min-max normalized magnitude. An invisible trace with
+          a colorbar is added separately so the scale renders correctly.
+        - Start points are plotted in green; end points in red with hover
+          text showing speed, bearing, coordinates, and sensor identifiers.
+        - The map uses a stereographic projection centred at 90°N, with
+          the latitude axis constrained to 60°–90°N.
+        - The map title is derived from the stem of `html_path`.
+        - The HTML file is written with ``include_plotlyjs='cdn'``, so an
+          internet connection is required to view the output.
     """
+    
     import os
     import numpy as np
     import plotly.graph_objects as go
 
     SECONDS_PER_DAY = 86_400
+    
+    
+    # For level 03, retain only inlier vectors (outlier_category 00 or 01),
+    # then recode to -1 to signal that outlier filtering has been applied.
+    if config['level'] == '03':
+        outlier_filter = df['outlier_category'].isin(['00', '01'])
+        df = df[outlier_filter].copy()
+        if df.shape[0] == 0:
+            # it might be possible the data frame was labelled
+            # as all outliers.
+            return None
 
     mag = np.hypot(
         df['sea_ice_x_displacement'],
         df['sea_ice_y_displacement']
     ) / df['duration_s'] * SECONDS_PER_DAY
 
-    if len(mag) == 0 or np.all(np.isnan(mag)):
-        import logging
-        logging.getLogger('sar_drift').warning(
-            f'No valid observations for {base_name}, skipping Plotly HTML.'
-        )
-        return
 
     # normalize mag to 0-1 for colorscale lookup
     mag_min, mag_max = np.nanmin(mag), np.nanmax(mag)
@@ -2108,13 +1985,12 @@ def create_plotly_html(base_name, df, config, output_path=None):
         showlegend=False
     ))
 
-    # center_lat = float(df['Lat1'].mean())
-    # center_lon = float(df['Lon1'].mean())
 
+    basename = os.path.splitext(os.path.basename(html_path))[0]
     fig.update_layout(
         title=dict(
             text=(
-                f'Sea-ice Drift Vectors — {base_name}<br>'
+                f'Sea-ice Drift Vectors — {basename}<br>'
                 f'<sup>Observations: {len(df)} | EPSG:4326</sup>'
             ),
             x=0.5
@@ -2134,14 +2010,10 @@ def create_plotly_html(base_name, df, config, output_path=None):
         height=2000
     )
 
-    if output_path:
-        html_file = output_path
-    else:
-        html_file = os.path.join(config['html_dir'], f'{base_name}.html')
-    fig.write_html(html_file, include_plotlyjs='cdn')
+    fig.write_html(html_path, include_plotlyjs='cdn')
 
     import logging
-    logging.getLogger('sar_drift').info(f'Created Plotly HTML {html_file}')
+    logging.getLogger('sar_drift').info(f'Created Plotly HTML {html_path}')
     
     
 def combine_daily_netcdf_files(config, nc_files, template_ds,
@@ -2152,23 +2024,68 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
     Combine multiple sliced SAR drift NetCDF files into one full daily mosaic
     on the template grid.
 
-    Parameters
-    ----------
-    sliced_nc_files (list[str]): Paths to sliced NetCDF scene files.
-    template_ds (xarray.Dataset): Template dataset providing the
-                                  target grid coordinate arrays and
-                                  dimensions.
-    daily_start_date (str): YYYYMMDD used to set start time bounds
-    daily_end_date (Str): YYYYMMDD used to set start time bounds.
-    daily_nc_filename (str): Path to the output daily NetCDF file.
-    overwrite : bool, default False
-        If False, keep first non-NaN value when overlaps occur.
-        If True, later files overwrite earlier files.
+    Reads each per-scene NetCDF file produced by `create_netcdf`, merges all
+    variables onto a shared daily grid, and writes the result to a single
+    output NetCDF file. Supports both multi-layered output (one time layer
+    per scene) and single-layer output (scenes mosaicked into one time slice).
+    Projection metadata is sourced entirely from the CDL template specified
+    in `config`.
 
-    Returns
-    -------
-    None
+    Args:
+        config (dict): Configuration dictionary. Must include:
+            - 'netcdf_cdl_file' (str): Path to the CDL template file whose
+              `spatial_ref` variable defines the output projection. Set this
+              to the CDL file matching the target EPSG (e.g.
+              `sar_drift_output_3413.cdl` or `sar_drift_output_6931.cdl`).
+            - 'level' (str): Processing level; used to determine whether to
+              write a cell-update log (`'00'` only).
+            - 'output_dir' (str): Directory where `cell_update_log.csv` is
+              written when `config['level'] == '00'` and overlapping cells
+              are detected.
+        nc_files (list[str]): Paths to per-scene sliced NetCDF files to
+            merge, as produced by `create_netcdf`.
+        template_ds (xarray.Dataset): Template dataset providing the target
+            grid coordinate arrays (`x`, `y`) and grid dimensions. Must
+            share the same projection and coordinate spacing as the input
+            scene files.
+        daily_start_date (str): Start date of the daily mosaic in `YYYYMMDD`
+            format; used to set `time_coverage_start` global attribute.
+        daily_end_date (str): End date of the daily mosaic in `YYYYMMDD`
+            format; used to set `time_coverage_end` global attribute.
+        daily_nc_path (str): Full path for the output daily NetCDF file.
+        multi_layered (bool): If `True` (default), each scene is written as
+            a separate time layer. If `False`, all scenes are mosaicked into
+            a single time slice using a last-write-wins strategy controlled
+            by `overwrite`.
+        overwrite (bool): Controls single-layer conflict resolution when
+            `multi_layered=False`. If `False` (default), the first valid
+            (non-NaN) value written to a cell is kept. If `True`, later
+            scenes overwrite earlier ones based on scene timestamp.
+
+    Returns:
+        None. The output file is written to `daily_nc_path`. When
+        `multi_layered=False` and `config['level'] == '00'`, a
+        `cell_update_log.csv` is also written to `config['output_dir']`
+        recording any cells where an earlier value was overwritten.
+
+    Notes:
+        - Output projection is fully determined by the CDL template referenced
+          in `config['netcdf_cdl_file']`. No EPSG is hardcoded in this
+          function; switching projection requires only pointing `config` at
+          the appropriate CDL file.
+        - Scene files are sorted by their `time` coordinate value before
+          merging, ensuring consistent ordering regardless of input list order.
+        - For single-layer mode, `latest_time_grid` tracks the timestamp of
+          the last write per cell to enforce the `overwrite` policy.
+        - `time_bnds` spans `[min(scene_start), max(scene_end)]` across all
+          merged scenes for single-layer output, and per-scene bounds for
+          multi-layered output.
+        - All int16 flag variables (`outlier_category`, `bearing_error`,
+          `speed_error`, `measurement_error`) use −9 as their `_FillValue`.
+        - The dataset is always closed in the `finally` block even if an
+          error occurs during merging or writing.
     """
+
     import numpy as np
     import pandas as pd
     import xarray as xr
@@ -2495,315 +2412,3 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
             daily_grid.close()
             del daily_grid
 
-
-def combine_daily_geopackage(gpkg_files, daily_gpkg_path, config):
-    """
-    Combine multiple scene GeoPackage files into one daily GeoPackage.
-
-    Parameters
-    ----------
-    gpkg_files (list[str]): Paths to scene GeoPackage files.
-    daily_gpkg_path (str): Path to the output daily GeoPackage file.
-    config (dict): Configuration dictionary.
-
-    Returns
-    -------
-    None
-    """
-    import logging
-    import geopandas as gpd
-
-    gdfs = []
-    for gpkg_file in gpkg_files:
-        gdf = gpd.read_file(gpkg_file, layer='drift_lines')
-        gdfs.append(gdf)
-
-
-    daily_gdf = gpd.pd.concat(gdfs, ignore_index=True)
-    daily_gdf = gpd.GeoDataFrame(daily_gdf, geometry='geometry')
-
-    daily_gdf.to_file(daily_gpkg_path, layer='drift_lines', driver='GPKG')
-    _embed_qml_style(daily_gpkg_path, 'drift_lines', config['qml_file'])
-
-    logger = logging.getLogger('sar_drift_converter')
-    logger.info(
-        f'Created daily GeoPackage {daily_gpkg_path} | '
-        f'scenes={len(gdfs)} | rows={len(daily_gdf)}'
-    )
-  
-
-def overlay_sar_drift_on_geotiff(config, gdf_lines, df_sar, base_name):
-    """
-    Create a two-panel visualization of SAR sea-ice drift data overlaid 
-    on a GeoTIFF image, with both a regional overview map and a detailed 
-    drift vector plot.
-    
-    This function:
-        - Loads and displays the SAR backscatter GeoTIFF image
-        (projected in EPSG:3413)
-        - Plots drift vectors (`dx`, `dy`) as quivers based on line geometries
-        - Draws a 50–100 km scale bar for spatial reference
-        - Annotates a True North arrow using geodetic conversion
-        - Includes a left panel showing a North Polar overview with a red
-          rectangle indicating the region of interest
-        - Adds axis labels, rotated tick labels, and custom titles
-        - Saves the result as a high-resolution PNG image
-    
-    Parameters:
-        geotiff_path (str): Path to the GeoTIFF file representing SAR
-                            backscatter imagery.
-        gdf_lines (GeoSeries): GeoSeries or list of LineString geometries
-                               representing SAR-derived drift vectors.
-        df_sar (pandas.DataFrame): DataFrame containing start/end projected
-                                   coordinates:
-            - 'X1', 'Y1', 'X2', 'Y2': EPSG:3413 coordinates in meters.
-        timestamp (str): Timestamp string (e.g., "20250521_1530") for naming
-                         the output file.
-        sar_basename (str): Short name of the SAR input file,
-                            used in the plot title.
-        config (dict): Dictionary containing script arguments, including:
-            - 'output_dir': Path to the save png
-            - 'sar_basename' (str): Base name of the SAR input file,
-                                    used for output file names.
-    
-    Returns:
-        matplotlib.figure.Figure: The generated figure with two subplots:
-            - Left: Arctic overview with red bounding box
-            - Right: Drift vectors overlaid on SAR GeoTIFF
-    
-    Output:
-        A PNG file named `sar_drift_<timestamp>.png` is saved in the current
-        working directory.
-    
-    Notes:
-        - The right subplot uses raw Polar Stereographic x/y coordinates
-          in meters.
-        - The left subplot uses Cartopy’s North Polar Stereographic projection.
-        - Only LineString geometries are used for drift vector plotting.
-        - The GeoTIFF image must include GCPs or valid transform info
-          to be reprojected.
-    """
-    
-    
-    import os
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from shapely.geometry import LineString, Polygon
-    import cartopy.crs as ccrs
-    import cartopy.feature as cfeature
-    from mpl_toolkits.axes_grid1.inset_locator import inset_axes
-    
-    
-    # SAR drift bounds for map extent
-    xmin = df_sar[['X1', 'X2']].min().min()
-    xmax = df_sar[['X1', 'X2']].max().max()
-    ymin = df_sar[['Y1', 'Y2']].min().min()
-    ymax = df_sar[['Y1', 'Y2']].max().max()
-    
-    
-    # create buffer around geotiff
-    buffer_deg = 10_000 # 10km
-    map_extent = [
-        xmin - buffer_deg,
-        xmax + buffer_deg,
-        ymin - buffer_deg,
-        ymax + buffer_deg
-    ]
-    
-    map_width = xmax - xmin
-    map_height = ymax - ymin
-    map_span = np.round(max(map_height, map_width), 0)
-    if map_span > 2_000_000:
-        quiver_scale = config['quiver_scale_large_area']
-    else:
-        quiver_scale = config['quiver_scale_small_area']
-    
-    
-    transformer = _set_transformer()
-
-    # initialize plot
-    fig = plt.figure(figsize=(18, 10))
-    
-    if config['create_region_plot']:
-        # -------------------------------
-        # left map of subplot
-        # -------------------------------
-        
-        # --- overview map with land and coastlines---
-
-        
-        # Convert all 4 corners of the SAR extent
-        corner_coords = [
-            (xmin, ymin),
-            (xmax, ymin),
-            (xmax, ymax),
-            (xmin, ymax),
-            (xmin, ymin)  # close the loop
-        ]
-        
-        # transform 3413 to 4326 to draw True North arrow
-        corner_lonlat = []
-        for x, y in corner_coords:
-            corner_lonlat.append(transformer['3413_to_4326'].transform(x, y))
-        
-        # Create a shapely Polygon and extract x/y separately
-        poly = Polygon(corner_lonlat)
-        inset_lon, inset_lat = poly.exterior.xy
-        
-        main_ax = fig.add_subplot(1, 2, 1, projection=ccrs.NorthPolarStereo())
-        main_ax.add_feature(cfeature.LAND, zorder=0, facecolor='lightgray')
-        main_ax.add_feature(cfeature.COASTLINE, zorder=1)
-        main_ax.set_extent([-180, 180, 60, 90], crs=ccrs.PlateCarree())
-        gl = main_ax.gridlines(
-            draw_labels=True,
-            crs=ccrs.PlateCarree(),
-            linestyle='--',alpha=0.5
-        )
-        gl.top_labels = False
-        gl.right_labels = False
-        gl.xlabel_style = {'size': 10}
-        gl.ylabel_style = {'size': 10}
-        
-        
-        # Plot red box on main overview map
-        main_ax.plot(
-            inset_lon, inset_lat, color='red',
-            linewidth=2, transform=ccrs.PlateCarree()
-        )
-    
-        main_ax.set_title('Observation region', fontsize=12)
-    
-    
-    # -------------------------------
-    # right map of subplot
-    # -------------------------------
-        
-    # inspired by "+proj=stere +lat_0=90 +lat_ts=70 +lon_0=-45 
-    # +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs +type=crs"
-    cartopy_crs = ccrs.Stereographic(
-        central_latitude=90,
-        central_longitude=-45,
-        true_scale_latitude=70,
-        globe=ccrs.Globe(datum='WGS84')
-    )
-    
-    if config['create_region_plot']:
-        # right-side plot
-        ax = fig.add_subplot(1, 2, 2, projection=cartopy_crs)
-    else:
-        # singular plot
-        ax = fig.add_subplot(1, 1, 1, projection=cartopy_crs)
-        ax.add_feature(cfeature.LAND, zorder=0, facecolor='lightgray')
-        ax.add_feature(cfeature.COASTLINE, zorder=1)
-        ax.set_extent([-180, 180, 60, 90], crs=cartopy_crs)
-
-    
-    
-    # read SAR geotiff ansd set graticules
-    if config['use_geotiff']:
-        masked_xr, map_extent_xr = read_geotiff_rasterio(
-            config['sar_geotiff_file']
-        )
-            
-        # plot geotiff    
-        ax.imshow(
-            masked_xr,
-            extent=map_extent_xr,
-            origin="upper",
-            cmap="gray",
-            transform=ccrs.epsg(3413)
-        )       
-        
-        add_graticules(ax, map_extent_xr)
-    else:
-        gl = ax.gridlines(
-            draw_labels=True,
-            crs=ccrs.PlateCarree(),
-            linestyle='--',alpha=0.5
-        )
-        gl.top_labels = False
-        gl.right_labels = False
-        gl.xlabel_style = {'size': 10}
-        gl.ylabel_style = {'size': 10}
-        
-        
-    # SAR drift quivers
-    # Extract quiver vector data from LineStrings
-    lon_start = []
-    lat_start = []
-    dx = []
-    dy = []
-    
-    for line in gdf_lines:
-        if isinstance(line, LineString):
-            x0, y0 = line.coords[0]     # start point
-            x1, y1 = line.coords[-1]    # end point
-            lon_start.append(x0)
-            lat_start.append(y0)
-            dx.append(x1 - x0)
-            dy.append(y1 - y0)
-    
-    # Plot drift vectors as quivers
-    stride = config['vector_stride']
-    X = lon_start[::stride]
-    Y = lat_start[::stride]
-    u = dx[::stride]
-    v = dy[::stride]
-    mag = np.hypot(u, v) / 1000  # magnitude in km
-    Q = ax.quiver(
-        X, Y, u, v, mag,
-        angles='xy',
-        scale_units='xy',
-        scale=quiver_scale,
-        # scale=0.25,
-        width=0.001,
-        pivot="tail",
-        cmap='viridis'
-    )
-    
-    
-    # Create an inset_axes inside ax to match its drawing area better
-    cbar_ax = inset_axes(
-        ax,
-        width="2%",          # width of cbar as percentage of ax width
-        height="100%",       # height of cbar as percentage of ax height
-        loc='lower left',
-        bbox_to_anchor=(1.02, 0., 1, 1),  # position to the right of ax
-        bbox_transform=ax.transAxes,
-        borderpad=0,
-    )
-    
-    cbar = plt.colorbar(Q, cax=cbar_ax)
-    cbar.set_label('Drift Velocity (km/day)', fontsize=10)
-
-    
-    # draw scale bar
-    add_scale(ax, cartopy_crs)
-
-        
-    # True North arrow
-    add_true_north(ax, xmin, xmax, ymin, ymax)
-
-    
-    # reset map extent
-    if config['use_geotiff']:
-        ax.set_extent(map_extent_xr, crs=ccrs.epsg(3413))
-    else:
-        ax.set_extent(map_extent, crs=ccrs.epsg(3413))
-    
-   
-    # titles
-    ax.set_title('Velocity Vectors (u, v)', fontsize=12)
-    fig.suptitle(
-        f"Vector Overlay on GeoTiff:\n{base_name}",
-        fontsize=14
-    )
-    
-   
-    # save plot as .png
-    png_file = os.path.join(
-        config['png_dir'], f"{base_name}.png"
-    )
-    fig.savefig(png_file, bbox_inches='tight', dpi=300)
-    plt.close(fig)
-    

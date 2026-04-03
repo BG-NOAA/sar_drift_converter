@@ -62,6 +62,12 @@ BEARING_PRECISION       (int):   Number of decimal places to retain
                                  in Bear_deg.
 SPEED_PRECISION         (int):   Number of decimal places to retain
                                  in Speed_kmdy.
+DISPLACEMENT_PRECISION  (int):   Number of decimal places to retain
+                                 in displacement variables like U,v or dx, dy
+COORDINATE_PRECISION    (int):   Number of decimal places to retina
+                                 in transforming X, Y coordinates in meters
+                                 from longitude, latitude in degrees.
+                                 
 """
 
 # Filtering thresholds
@@ -78,3 +84,5 @@ OUTLIER_PASSES = 3
 # Rounding
 BEARING_PRECISION = 0
 SPEED_PRECISION = 1
+DISPLACEMENT_PRECISION = 4
+COORDINATE_PRECISION = 4
