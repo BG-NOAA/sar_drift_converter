@@ -19,6 +19,6 @@
   "quiver_scale_small_area": 1.0,
   "quiver_scale_large_area": 0.1,
   "verbose": true,
-  "level": "03",
+  "level": "01",
   "version": "01"
 }

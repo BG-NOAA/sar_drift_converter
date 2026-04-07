@@ -2,10 +2,10 @@
 """
 ******************************************************************************
 
- Project:     SAR Drift Output Generator
+ Project:     SAR Drift Converter
  Purpose:     Create shape file package (.gpkg) and NetCDF file (.nc) from the
-              SAR drift daily file. This script allows the data to be visualized
-              in QGIS or any program that can read NetCDF
+              SAR drift daily file. This script allows the data to be
+              visualized in QGIS or any program that can read NetCDF
  Author:      Brendon Gory, brendon.gory@noaa.gov
                             brendon.gory@colostate.edu
               Data Science Application Specialist (Research Associate II)
@@ -526,7 +526,7 @@ def combine_into_dataframe(files, config):
         all_dfs.append(df)
     
 
-    print('Saving all files into one DatFrame...')
+    print('Saving all files into one Data Frame...')
     df_all = pd.concat(all_dfs, ignore_index=True)
     # convert date columns to datetime once
     df_all['date_start'] = pd.to_datetime(
@@ -999,12 +999,13 @@ def create_daily_output(df_day, scene_output, config, template_ds):
     
     daily_start_date_str = scene_output['start_date'].strftime("%Y%m%d")
     daily_end_date_str = scene_output['end_date'].strftime("%Y%m%d")
-    lvl = str(int(config['level']))
-    yr = daily_start_date_str[0:4]
+    epsg = str(config['epsg'])
+    lvl = f"Processing Level - {config['level']} (PL{config['level']})"
+    yr = str(daily_start_date_str[0:4])
     
     
     # multiple-layered netcdf
-    output_dir = os.path.join(config['file_server'] ,lvl, yr, 'nc')
+    output_dir = os.path.join(config['file_server'], epsg, lvl, yr, 'nc')
     os.makedirs(output_dir, exist_ok=True)
     daily_nc_path = os.path.join(
         output_dir,
@@ -1041,7 +1042,7 @@ def create_daily_output(df_day, scene_output, config, template_ds):
     
     # GeoPackage
     if config['level'] in ['00', '02', '03']:
-        output_dir = os.path.join(config['file_server'], lvl, yr, 'gpkg')
+        output_dir = os.path.join(config['file_server'], epsg, lvl, yr, 'gpkg')
         os.makedirs(output_dir, exist_ok=True)
         gpkg_path = os.path.join(
             output_dir,
@@ -1058,7 +1059,7 @@ def create_daily_output(df_day, scene_output, config, template_ds):
 
     # Plotly HTML
     if config['level'] in ['00', '03']:
-        output_dir = os.path.join(config['file_server'], lvl, yr, 'html')
+        output_dir = os.path.join(config['file_server'], epsg, lvl, yr, 'html')
         os.makedirs(output_dir, exist_ok=True)
         html_path = os.path.join(
             output_dir,
@@ -1138,7 +1139,8 @@ def main():
         - This function is intended to be called only when the script is
           run as a standalone program (`__name__ == '__main__'`).
     """
-
+    
+    import pyproj_setup
     import os
     from datetime import datetime
     from glob import glob
