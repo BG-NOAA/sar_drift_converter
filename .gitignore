@@ -21,13 +21,13 @@ __pycache__
 **/*.log
 
 # Ignored folders
+input
 layer_to_gpkg
 level_output
-SIVelocity_SAR
-input
+log
 misc
 npz
 overlays
 sample_day
 sample_year
-
+SIVelocity_SAR

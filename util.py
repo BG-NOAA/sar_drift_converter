@@ -236,49 +236,60 @@ def error_msg(msg):
 #===================
 def _set_metadata(config):
     """
-    Generate a NetCDF metadata template using a CDL file and load
-    it as an xarray.Dataset.
-    
-    This function takes the user-defined CDL (Common Data Language)
-    file path from the `user_args` dictionary, runs the `ncgen` 
-    command-line tool to convert it into a NetCDF (.nc) file,
-    and then loads that file into memory using `xarray`.
-    
-    The function is typically used to extract metadata
-    (attributes and structure) from a CDL file so that it can be applied
-    to a data-driven NetCDF file.
-    
+    Generate a NetCDF metadata template from an EPSG-specific CDL file
+    and load it as an xarray.Dataset.
+
+    Constructs the EPSG-specific CDL filename from the base CDL path in
+    config (e.g. 'meta/sar_drift_output.cdl' becomes
+    'meta/sar_drift_output_3413.cdl'), runs `ncgen` to convert it to a
+    NetCDF file, and loads the result with xarray. The output .nc file is
+    named using both the EPSG code and processing level to avoid collisions
+    across projections and levels.
+
+    The returned dataset contains only metadata (attributes and structure)
+    and is typically used as a template whose attributes are applied to a
+    data-driven NetCDF file.
+
     Parameters:
-        user_args (dict): Dictionary containing user-provided arguments,
-        including:
-            - 'metadata_dir' (str): Path to the directory where CDL file
-                                    is stored.
-    
+        config (dict): Configuration dictionary containing:
+            - 'netcdf_cdl_file' (str): Path to the base CDL file
+                                       (e.g. 'meta/sar_drift_output.cdl').
+            - 'epsg' (str | int): EPSG code used to select the correct
+                                  CDL file (e.g. 3413).
+            - 'level' (str): Processing level used in the output .nc
+                             filename (e.g. 'scene', 'daily').
+
     Returns:
-        xarray.Dataset: A dataset containing only metadata
-                        from the generated NetCDF file.
-    
+        xarray.Dataset: Dataset containing only metadata from the
+                        generated NetCDF file, opened with
+                        decode_times=False.
+
     Raises:
-        SystemExit: If the `ncgen` command fails or
-                    returns a non-zero status code.
+        SystemExit: If the `ncgen` command fails or returns a non-zero
+                    exit code.
     """
-    
-    # COnfirm naming convention meets standards
 
-
+    import util
     import os
     import subprocess
     import xarray as xr
     
+    
     cdl_file = config['netcdf_cdl_file']
     cdl_file_dir = os.path.dirname(cdl_file)
     cdl_file_basename = os.path.basename(cdl_file)
-    # Prepare ncgen input and output filenames
-
-    
+    cdl_file_stem = os.path.splitext(cdl_file_basename)[0]
+    epsg_cdl_file = os.path.join(
+        cdl_file_dir,
+        f'{cdl_file_stem}_{config["epsg"]}.cdl'
+    )
+    if not os.path.exists(epsg_cdl_file):
+        util.error_msg(f"Cannot find `{epsg_cdl_file}`")
+        
     ncgen_ofile_nc = os.path.join(
-        cdl_file_dir, f"{cdl_file_basename}_{config['level']}.nc"
-        )
+        cdl_file_dir,
+        f'{cdl_file_stem}_{config["epsg"]}_{config["level"]}.nc'
+    )
     
     
     # Run ncgen command to generate the netCDF file from CDL
@@ -287,7 +298,7 @@ def _set_metadata(config):
             "ncgen",
             "-o",
             ncgen_ofile_nc,
-            cdl_file,
+            epsg_cdl_file,
         ]
     )
         
@@ -576,14 +587,14 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
     """
     Read and preprocess a SAR ice-drift text data file into a standardized
     DataFrame.
- 
+    
     This function loads a SAR drift data file (CSV-like text) using parsing
     rules provided in `config`, cleans column names, and derives projected
     coordinates, displacement, velocity, speed, and sensor identifier fields.
     Several raw source columns are renamed for consistency with NetCDF/
     GeoPackage output naming, and columns that are not needed downstream
     are dropped.
- 
+    
     Processing steps:
         1. Read the file with `pandas.read_csv()` using delimiter and header
            offsets from `config`.
@@ -592,7 +603,7 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
            human-readable datetime strings (`date_start`, `date_end`).
         4. Compute observation duration in seconds (`duration_s`).
         5. Project start/end lat/lon to EPSG:`config['epsg']` and compute
-           displacement, velocity, speed, and bearing via
+           displacement, velocity, speed, bearing, and geodesic distance via
            `_calculate_drift_daily`.
         6. Round all coordinate, displacement, velocity, speed, bearing, and
            distance fields according to precision keys in `config`.
@@ -605,7 +616,7 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
                Time1_JS, Time2_JS, U_vel_ms, V_vel_ms, Speed_kmdy, Bear_deg,
                img1_mean, img1_std, img2_mean, img2_std, img1s_mean, img1s_std,
                Npnt, Offset1, Offset2
- 
+    
     Args:
         input_file (str or pathlib.Path): Path to the SAR drift data file
                                           to read.
@@ -617,68 +628,67 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
               `_calculate_drift_daily` (e.g. 3413 for NSIDC Sea Ice Polar
               Stereographic North). Controls the projection used for X1, Y1,
               X2, Y2, dx, dy, u_ms, and v_ms.
-            - 'coordinate_position' (int): Decimal places for geographic
+            - 'coordinate_precision' (int): Decimal places for geographic
               coordinates (Lat1, Lon1, Lat2, Lon2) and projected coordinates
               (X1, Y1, X2, Y2).
             - 'displacement_precision' (int): Decimal places for
               `sea_ice_x_displacement`, `sea_ice_y_displacement`, `u_ms`,
               and `v_ms`.
             - 'speed_precision' (int): Decimal places for `sea_ice_speed`,
-              `sea_ice_speed_kmdy`, and `distance`.
+              `sea_ice_speed_kmdy`, `distance`, and `distance_geod`.
             - 'bearing_precision' (int): Decimal places for
               `direction_of_sea_ice_displacement`.
         skip_rows (list[int] or None): Row indices to skip when reading the
             file, passed directly to `pd.read_csv`. Defaults to None.
- 
+    
     Returns:
         pandas.DataFrame: Cleaned and enriched SAR drift DataFrame. Raw source
         columns are preserved (except those listed as dropped above) together
         with the following derived and renamed columns:
- 
-        Renamed geographic coordinates (rounded to `coordinates_position`):
+    
+        Renamed geographic coordinates (rounded to `coordinate_precision`):
             - 'latitude_1'  (float): Starting latitude  (degrees, from Lat1)
             - 'longitude_1' (float): Starting longitude (degrees, from Lon1)
             - 'latitude_2'  (float): Ending latitude    (degrees, from Lat2)
             - 'longitude_2' (float): Ending longitude   (degrees, from Lon2)
- 
+    
         Derived timestamps and duration:
             - 'date_start' (str): Start datetime in '%Y-%m-%d %H:%M:%S'
                                   (from Time1_JS)
             - 'date_end'   (str): End datetime in '%Y-%m-%d %H:%M:%S'
                                   (from Time2_JS)
             - 'duration_s' (float): Observation duration in seconds
-                                    (Time2_JS − Time1_JS); not rounded.
- 
+                                    (Time2_JS - Time1_JS); not rounded.
+    
         Projected coordinates (EPSG:`config['epsg']`, meters; rounded to
-        `coordinates_position`):
+        `coordinate_precision`):
             - 'X1', 'Y1': Start position
             - 'X2', 'Y2': End position
- 
+    
         Displacement and velocity (EPSG:`config['epsg']`; rounded to
         `displacement_precision`):
-            - 'sea_ice_x_displacement' (float): X2 − X1  (m)
-            - 'sea_ice_y_displacement' (float): Y2 − Y1  (m)
-            - 'u_ms' (float): sea_ice_x_displacement / duration_s  (m s⁻¹)
-            - 'v_ms' (float): sea_ice_y_displacement / duration_s  (m s⁻¹)
- 
-        Speed and direction:
-            - 'sea_ice_speed'      (float): geodesic speed  (m s⁻¹);
-                                            rounded to `speed_precision`
-            - 'sea_ice_speed_kmdy' (float): geodesic speed  (km day⁻¹);
-                                            rounded to `speed_precision`
+            - 'sea_ice_x_displacement' (float): X2 - X1  (m)
+            - 'sea_ice_y_displacement' (float): Y2 - Y1  (m)
+            - 'u_ms' (float): sea_ice_x_displacement / duration_s  (m/s)
+            - 'v_ms' (float): sea_ice_y_displacement / duration_s  (m/s)
+    
+        Speed and direction (rounded to `speed_precision` unless noted):
+            - 'sea_ice_speed'      (float): geodesic speed (m/s)
+            - 'sea_ice_speed_kmdy' (float): geodesic speed (km/day)
             - 'direction_of_sea_ice_displacement' (float): forward azimuth
                                             (degrees); rounded to
                                             `bearing_precision`
-            - 'distance' (float): geodesic distance (m); rounded to
-                                  `speed_precision`
-            
+            - 'distance'      (float): projected displacement magnitude (m)
+            - 'distance_geod' (float): geodesic great-circle distance (m)
+    
         Sensor and scene identifiers:
             - 'scene_id' (str): Combination of 'File1' and 'File2' separated
                                 by underscore
-            - 'sensor1' (str):  Satellite identifier from File1
+            - 'sensor1'  (str): Satellite identifier from File1
                                 (prefix before first underscore)
-            - 'sensor2' (str):  Satellite identifier from File2
- 
+            - 'sensor2'  (str): Satellite identifier from File2
+                                (prefix before first underscore)
+    
     Notes:
         - SAR time fields `Time1_JS` and `Time2_JS` are seconds since
           2000-01-01 00:00:00.
@@ -771,6 +781,9 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
     )
     df['distance'] = np.round(
         drift['distance'], config['speed_precision']
+    )
+    df['distance_geod'] = np.round(
+        drift['distance_geod'], config['speed_precision']
     )
     
     

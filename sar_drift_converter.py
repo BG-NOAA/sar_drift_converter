@@ -101,13 +101,13 @@ def setup_logger(output_dir):
 def read_json_config():
     """
     Parse and validate configuration for SAR Drift Output Generator.
-    
-    This function reads a JSON config file specified via the `-c` or 
-    `--config_file` argument and validates its contents against a strict
-    schema. It ensures all required inputs (SAR drift file, GeoTIFF, 
-    CDL metadata, output directory) exist and validates types and formatting
-    for each parameter.
-    
+
+    Reads a JSON config file specified via the `-c` / `--config_file`
+    command-line argument and validates its contents against a strict schema.
+    Ensures all required input files and directories exist, validates types
+    and value ranges for each parameter, and merges algorithm constants from
+    `constants.py` into the returned config dictionary.
+
     Expected JSON keys (must match exactly):
         - "sar_drift_directory"    (str):   Path to directory containing
                                             multiple SAR drift delimited files
@@ -116,8 +116,10 @@ def read_json_config():
                                             delimited text file.
         - "sar_geotiff_filename"   (str):   Path to the SAR backscatter
                                             GeoTIFF image.
-        - "netcdf_cdl_file"        (str):   Path to the CDL file used for
-                                            NetCDF metadata.
+        - "netcdf_cdl_file"        (str):   Path to the base CDL file used
+                                            for NetCDF metadata. The EPSG-
+                                            specific variant is resolved at
+                                            runtime by _set_metadata().
         - "netcdf_template_file"   (str):   Path to NetCDF template file on
                                             which scenes will be built.
         - "outlier_qml_file"       (str):   Path to QML file that applies
@@ -129,8 +131,21 @@ def read_json_config():
                                             GeoPackages when opened in QGIS.
                                             Used for all levels other than
                                             '02'.
-        - "file_server"            (str):   Path to where output files will be
-                                            saved and retrieved from the
+        - "output_dir"             (str):   Parent directory for all
+                                            processing output. Per-level
+                                            subdirectories are created
+                                            beneath this path by
+                                            create_level_output() before
+                                            files are finalized to
+                                            `file_server`. Typically set
+                                            to "level_output".
+        - "log_dir"                (str):   Directory for the run log file.
+                                            Cleared at the start of each
+                                            script run and recreated with a
+                                            fresh timestamped log file.
+                                            Typically set to "log".                                            
+        - "file_server"            (str):   Path to where output files will
+                                            be saved and retrieved from the
                                             PolarWatch STAC host server.
         - "clear_output_dir"       (bool):  Remove output directory and all
                                             contents from previous runs.
@@ -138,9 +153,6 @@ def read_json_config():
                                             `sar_drift_directory`; if False,
                                             process single
                                             `sar_drift_filename`.
-        - "epsg"                   (int):   Projection to which EPSG:4326
-                                            needs to be transformed. Only 3413
-                                            or 6931 allowed.
         - "delimiter"              (str):   Field separator in the input file
                                             (e.g., ",", "\\t").
         - "skip_rows_before_header"(int):   Number of rows to skip before
@@ -153,59 +165,53 @@ def read_json_config():
                                             render vectors only.
         - "vector_stride"          (int):   Display every nth vector (1 = all
                                             vectors).
-        - "inlier_vector_stride"   (int):   Display every nth vector for the
-                                            inliers-only plot (1 = all).
+        - "inlier_vector_stride"   (int):   Display every nth inlier vector
+                                            (1 = all).
         - "quiver_scale_small_area"(float): Quiver arrow scale for small area
                                             plots.
         - "quiver_scale_large_area"(float): Quiver arrow scale for large area
                                             plots.
         - "verbose"                (bool):  Print detailed parameter info to
                                             the console.
-        - "level"                  (str):   Processing level; controls
-                                            filtering level and output files
-                                            created. Must be one of:
-                                            '00', '01', '02', or '03'.
         - "version"                (str):   Version of application.
-    
+
+    Keys beginning with "_comment" are permitted in the JSON file and are
+    silently ignored during validation.
+
     Command-line arguments:
         -c, --config_file: Path to a JSON file with all required configuration.
-    
+
     Returns:
-        dict: Validated configuration dictionary with normalized paths,
-              outlier algorithm constants sourced from `constants.py`, and
-              resolved output subdirectories. Subdirectories created depend
-              on level:
-                  '00' / '03': filtered_data, formatted_data, gpkg, nc, html
-                  '01':        filtered_data, formatted_data, nc
-                  '02':        filtered_data, formatted_data, gpkg, nc
+        dict: Validated configuration dictionary with normalized paths and
+              outlier algorithm constants sourced from `constants.py`.
               Key highlights:
-              - 'filtered_data_dir':       <output_dir>/filtered_data
-              - 'formatted_data_dir':      <output_dir>/formatted_data
-              - 'nc_dir':                  <output_dir>/nc
-              - 'outlier_qml_file':        normalized path to outlier QML
-              - 'graduated_qml_file':      normalized path to graduated QML
-              - 'ignore_vector_threshold': sourced from constants.py
-              - 'z_score_level':           sourced from constants.py
-              - 'chi_square_level':        sourced from constants.py
-              - 'neighbor_radius_km':      sourced from constants.py
-              - 'min_neighbors':           sourced from constants.py
-              - 'md_min_neighbors':        sourced from constants.py
-              - 'outlier_passes':          sourced from constants.py
-              - 'bearing_precision':       sourced from constants.py
-              - 'speed_precision':         sourced from constants.py
-              - 'displacement_precision':  sourced from constants.py
-              - 'coordinate_precision':    sourced from constants.py
-    
+              - 'sar_drift_directory':      normalized path (batch mode)
+              - 'sar_drift_file':           normalized path (single-file mode)
+              - 'sar_geotiff_file':         normalized path to GeoTIFF
+              - 'netcdf_cdl_file':          normalized path to base CDL file
+              - 'netcdf_template_file':     normalized path to NetCDF template
+              - 'outlier_qml_file':         normalized path to outlier QML
+              - 'graduated_qml_file':       normalized path to graduated QML
+              - 'ignore_vector_threshold':  sourced from constants.py
+              - 'z_score_level':            sourced from constants.py
+              - 'chi_square_level':         sourced from constants.py
+              - 'neighbor_radius_km':       sourced from constants.py
+              - 'min_neighbors':            sourced from constants.py
+              - 'md_min_neighbors':         sourced from constants.py
+              - 'outlier_passes':           sourced from constants.py
+              - 'bearing_precision':        sourced from constants.py
+              - 'speed_precision':          sourced from constants.py
+              - 'displacement_precision':   sourced from constants.py
+              - 'coordinate_precision':     sourced from constants.py
+
     Raises:
-        Exits the script (status code 1) if:
-            - Config file is missing or improperly formatted.
-            - Required files or directories do not exist.
+        SystemExit: If any of the following occur:
+            - Config file argument is missing or the file cannot be opened.
+            - Required keys are absent or unexpected keys are present.
+            - Required files or directories do not exist on disk.
             - Parameter types are invalid (e.g., non-boolean for bool field).
-            - Unexpected or missing keys are present in the JSON.
             - Numeric parameters are out of valid range.
-            - `epsg` is not 3413 or 6931.
-            - `level` is not one of '00', '01', '02', or '03'.
-    
+
     Example:
         $ python sar_drift_converter.py -c config.json
     """
@@ -213,7 +219,6 @@ def read_json_config():
     import util
     import argparse
     import os
-    import shutil
     import json
     from constants import (
         IGNORE_VECTOR_THRESHOLD,
@@ -229,7 +234,6 @@ def read_json_config():
         COORDINATE_PRECISION
     )
 
-
     parser = argparse.ArgumentParser(description=(
         'Converts SAR drift data to NetCDF and/or GeoPackage and/or PNG files.'
         )
@@ -244,20 +248,22 @@ def read_json_config():
     with open(config_file, 'r') as f:
         config = json.load(f)
 
+    # Key validation — strip comment keys before comparison
+    comment_keys = {k for k in config.keys() if k.startswith('_comment')}
+    config_keys_no_comments = set(config.keys()) - comment_keys
 
-    # Key validation
     required_json_keys = {
-        "sar_drift_directory", "sar_drift_filename",  "sar_geotiff_filename",
-        "netcdf_cdl_file", "netcdf_template_file", "outlier_qml_file",
-        "graduated_qml_file", "file_server", "clear_output_dir",
-        "batch_process", "epsg", "delimiter", "skip_rows_before_header",
-        "use_geotiff", "create_region_plot", "vector_stride",
-        "inlier_vector_stride", "quiver_scale_small_area",
-        "quiver_scale_large_area", "verbose", "level", "version"
+        "sar_drift_directory", "sar_drift_filename", "sar_geotiff_filename",
+        "netcdf_cdl_file", "netcdf_template_file",
+        "outlier_qml_file", "graduated_qml_file", "output_dir", "log_dir",
+        "file_server", "clear_output_dir", "batch_process", "delimiter",
+        "skip_rows_before_header", "use_geotiff", "create_region_plot",
+        "vector_stride", "inlier_vector_stride", "quiver_scale_small_area",
+        "quiver_scale_large_area", "verbose", "version"
     }
-    config_keys = set(config.keys())
-    missing = required_json_keys - config_keys
-    extra   = config_keys - required_json_keys
+
+    missing = required_json_keys - config_keys_no_comments
+    extra   = config_keys_no_comments - required_json_keys
     if missing:
         util.error_msg(
             f"Missing required keys in {config_file}: {', '.join(missing)}"
@@ -267,10 +273,8 @@ def read_json_config():
             f"Unexpected keys in {config_file}: {', '.join(extra)}"
         )
 
-
-
     # define schema
-    # (key, expected_type, min_value_or_None, allow_zero)    
+    # (key, expected_type, min_value_or_None, allow_zero)
     schema = [
         ("batch_process",             bool,  None, None),
         ("clear_output_dir",          bool,  None, None),
@@ -281,8 +285,7 @@ def read_json_config():
         ("vector_stride",             int,   1,    False),
         ("inlier_vector_stride",      int,   1,    False),
         ("quiver_scale_small_area",   float, None, None),
-        ("quiver_scale_large_area",   float, None, None),
-        ("epsg",                      int,   None, None)
+        ("quiver_scale_large_area",   float, None, None)
     ]
 
     for key, expected_type, min_val, allow_zero in schema:
@@ -296,27 +299,20 @@ def read_json_config():
             util.error_msg(f'`{key} = {val}` must be >= {min_val}')
         config[key] = expected_type(val)
 
-
-    # epsg validation
-    if config['epsg'] not in [3413, 6931]:
-        util.error_msg('`epsg` must be `3413` or `6931`')
-
-    # level validation
-    if config['level'] not in ['00', '01', '02', '03']:
-        util.error_msg('`level` must be one of: `00`, `01`, `02`, `03`')
-
-
     # path resolution and existence checks
     batch_process = config['batch_process']
+    use_geotiff = config['use_geotiff']
     path_checks = [
-        ('sar_drift_directory', 'sar_drift_directory', batch_process),
-        ('sar_drift_filename', 'sar_drift_file', not batch_process),
-        ('sar_geotiff_filename', 'sar_geotiff_file', config['use_geotiff']),
-        ('netcdf_cdl_file', 'netcdf_cdl_file', True),
+        ('sar_drift_directory',  'sar_drift_directory',  batch_process),
+        ('sar_drift_filename',   'sar_drift_file',       not batch_process),
+        ('sar_geotiff_filename', 'sar_geotiff_file',     use_geotiff),
+        ('netcdf_cdl_file',      'netcdf_cdl_file',      False),
         ('netcdf_template_file', 'netcdf_template_file', True),
-        ('outlier_qml_file', 'outlier_qml_file', True),
-        ('graduated_qml_file', 'graduated_qml_file', True),
-        ('file_server', 'file_server', True)
+        ('outlier_qml_file',     'outlier_qml_file',     True),
+        ('graduated_qml_file',   'graduated_qml_file',   True),
+        ('output_dir',           'output_dir',           True),
+        ('log_dir',              'log_dir',              True),
+        ('file_server',          'file_server',          True)
     ]
     resolved_paths = {}
     for json_key, config_key, must_exist in path_checks:
@@ -325,36 +321,14 @@ def read_json_config():
             util.error_msg(f"Cannot find `{config_key}`: `{path}`")
         resolved_paths[config_key] = path
 
-    
-    # Output directory setup
-    config['output_dir'] = os.path.normpath(
-        os.path.join('level_output', f"{config['level']}")
-    )
-    if os.path.exists(config['output_dir']) and config['clear_output_dir']:
-        print(f"Clearing output directory --> {config['output_dir']}")
-        shutil.rmtree(config['output_dir'])
-        
-
-    subdirs = ['filtered_data', 'formatted_data', 'nc']    
-    subdir_paths = {}
-    for name in subdirs:
-        path = os.path.join(config['output_dir'], name)
-        os.makedirs(path, exist_ok=True)
-        subdir_paths[f'{name}_dir'] = path
-
-    
     # Delimiter decode (\t etc.)
     delimiter = config['delimiter'].encode().decode('unicode_escape')
 
-    
-    # Build final config
+    # Build final config — output_dir is set by create_level_output()
     config = {
         **resolved_paths,
-        'output_dir':              config['output_dir'],
-        **subdir_paths,
         'clear_output_dir':        config['clear_output_dir'],
         'batch_process':           config['batch_process'],
-        'epsg':                    config['epsg'],
         'delimiter':               delimiter,
         'skip_rows_before_header': config['skip_rows_before_header'],
         'ignore_vector_threshold': IGNORE_VECTOR_THRESHOLD,
@@ -367,7 +341,7 @@ def read_json_config():
         'bearing_precision':       BEARING_PRECISION,
         'speed_precision':         SPEED_PRECISION,
         'displacement_precision':  DISPLACEMENT_PRECISION,
-        'coordinate_precision':   COORDINATE_PRECISION,
+        'coordinate_precision':    COORDINATE_PRECISION,
         'use_geotiff':             config['use_geotiff'],
         'create_region_plot':      config['create_region_plot'],
         'vector_stride':           config['vector_stride'],
@@ -375,11 +349,9 @@ def read_json_config():
         'quiver_scale_small_area': config['quiver_scale_small_area'],
         'quiver_scale_large_area': config['quiver_scale_large_area'],
         'verbose':                 config['verbose'],
-        'level':                   config['level'],
-        'version':                 config['version']
+        'version':                 config['version'],
     }
 
-    
     # echo
     if config['verbose']:
         labels = {
@@ -388,14 +360,14 @@ def read_json_config():
             'sar_geotiff_file':       'sar geotiff file',
             'netcdf_cdl_file':        'NetCDF CDL file',
             'netcdf_template_file':   'NetCDF template file',
-            'outlier_qml_file':       'outlier_qml file',
-            'graduated_qml_file':     'graduated_qml file',
-            'file_server':            'file server',
+            'outlier_qml_file':       'outlier qml file',
+            'graduated_qml_file':     'graduated qml file',
             'output_dir':             'output directory',
+            'log_dir':                'log directory',
+            'file_server':            'file server',
+            'clear_output_dir':       'clear output directory',
             'batch_process':          'batch process',
-            'clear_output_dir':       'clear output dir',
             'delimiter':              'delimiter',
-            'epsg':                   'epsg',
             'skip_rows_before_header':'skip rows before header',
             'ignore_vector_threshold':'ignore vector threshold',
             'z_score_level':          'z-score level',
@@ -412,10 +384,9 @@ def read_json_config():
             'quiver_scale_large_area':'quiver scale large area',
             'bearing_precision':      'bearing precision',
             'speed_precision':        'speed precision',
-            'displacement_precision': 'displacement_precision',
-            'coordinate_precision':   'coordinate_precision',
-            'level':                  'level',
-            'version':                'version'
+            'displacement_precision': 'displacement precision',
+            'coordinate_precision':   'coordinate precision',
+            'version':                'version',
         }
         lines = ["CONF PARAMS:"]
         for key, label in labels.items():
@@ -1094,22 +1065,32 @@ def create_daily_output(df_day, scene_output, config, template_ds):
     )
 
 
-def main():
+def create_level_output(level, epsg, config):
     """
     Main execution workflow for converting SAR drift text files into
     GeoPackage, NetCDF, and Plotly HTML outputs.
 
+    Args:
+        level  (str):  Processing level; controls filtering and output files
+                       created. Must be one of: '00', '01', '02', or '03'.
+        epsg   (int):  Output projection EPSG code. Must be 3413 (NSIDC polar
+                       stereographic north) or 6931 (NSIDC ease-grid 2.0
+                       north).
+        config (dict): Validated configuration dictionary returned by
+                       `read_json_config()`. `level` and `epsg` are written
+                       into this dict at the start of execution.
+
     Workflow:
-        1. Load runtime configuration from `config.json` via
-           `read_json_config()`.
-        2. Open the NSIDC polar stereographic NetCDF template specified by
+        1. Validate `level` and `epsg` and assign them into `config`.
+        2. Set up the output directory tree under
+           `level_output/<level>/` and optionally clear it if
+           `config['clear_output_dir']` is True.
+        3. Open the NetCDF template specified by
            `config['netcdf_template_file']` to provide the target grid.
-        3. Glob-match input `.txt` and `.csv` files from
+        4. Glob-match input `.txt` and `.csv` files from
            `config['sar_drift_directory']` (batch mode) or load a single
            file from `config['sar_drift_file']` (single-file mode),
            controlled by `config['batch_process']`.
-        4. Initialise a timestamped log file in `config['output_dir']` via
-           `setup_logger()`.
         5. Read and combine all matched input files into a single DataFrame
            via `combine_into_dataframe()`.
         6. Apply per-row and scene-level quality filters via
@@ -1121,41 +1102,80 @@ def main():
            by `create_daily_output()` to combine scenes into daily files.
         9. Log total elapsed run time on completion.
 
-    Configuration keys used (from `config.json`):
-        - 'batch_process' (bool): If True, process all `.txt`/`.csv` files
-          in `sar_drift_directory`; if False, process `sar_drift_file` only.
+    Configuration keys used:
+        - 'batch_process'      (bool): If True, process all `.txt`/`.csv`
+                                       files in `sar_drift_directory`;
+                                       if False, process `sar_drift_file`
+                                       only.
+        - 'clear_output_dir'   (bool): If True, delete and recreate the
+                                       output directory before processing.
         - 'sar_drift_directory' (str): Input directory for batch processing.
-        - 'sar_drift_file' (str): Path to a single input file.
-        - 'netcdf_template_file' (str): Path to the NSIDC polar
-          stereographic NetCDF template providing the target grid.
-        - 'output_dir' (str): Directory for log file and all outputs.
-        - 'level' (str): Processing level logged at run start.
+        - 'sar_drift_file'      (str): Path to a single input file.
+        - 'netcdf_template_file'(str): Path to the NSIDC NetCDF template
+                                       providing the target grid.
+        - 'output_dir'          (str): Set internally to
+                                       `level_output/<level>/`; used as the
+                                       root for all output subdirectories.
 
     Notes:
         - Progress across days is displayed via a `tqdm` progress bar.
         - Observations where `date_end` falls on a different calendar day
           than `date_start` are logged individually by scene with their
           maximum time span.
-        - This function is intended to be called only when the script is
-          run as a standalone program (`__name__ == '__main__'`).
     """
     
-    import pyproj_setup
+    import util
     import os
+    import shutil
     from datetime import datetime
     from glob import glob
     from tqdm import tqdm
-
+    import logging
     import pandas as pd
     import xarray as xr
-    
-    
-    run_start = datetime.utcnow()
-    
-    # parse user arguments
-    config = read_json_config()
 
     
+    run_start = datetime.utcnow()
+
+
+    # epsg validation
+    if epsg not in [3413, 6931]:
+        util.error_msg('`epsg` must be `3413` or `6931`')
+    else:
+        config['epsg'] = epsg
+        
+    # level validation
+    if level not in ['00', '01', '02', '03']:
+        util.error_msg('`level` must be one of: `00`, `01`, `02`, `03`')
+    else:
+        config['level'] = level
+    
+
+
+    # log activity
+    logger = logging.getLogger('sar_drift_converter')
+    logger.info(
+        f"Run started | config level={config['level']} | "
+        f"EPSG={config['epsg']} | {run_start}"
+    )
+
+        
+    # Output directory setup
+    config['output_dir'] = os.path.normpath(
+        os.path.join('level_output', f"{config['level']}")
+    )
+    if os.path.exists(config['output_dir']) and config['clear_output_dir']:
+        print(f"Clearing output directory --> {config['output_dir']}")
+        shutil.rmtree(config['output_dir'])
+        
+
+    subdirs = ['filtered_data', 'formatted_data', 'nc']    
+    for name in subdirs:
+        path = os.path.join(config['output_dir'], name)
+        os.makedirs(path, exist_ok=True)
+        config[f'{name}_dir'] = path
+        
+        
     # load NSIDC polar stereographic EPSG:3411 NetCDF template
     with xr.open_dataset(config['netcdf_template_file']) as ds:
         template_ds = ds.load()
@@ -1171,13 +1191,7 @@ def main():
     else:
         files = [config['sar_drift_filename']]
         
-        
-    # initialize logger
-    logger, log_path = setup_logger(config['output_dir'])
-    logger.info(
-        f"Run started | config level={config['level']} | "
-        f"EPSG={config['epsg']} | {run_start}"
-    )
+
     logger.info(f"Input directory: {config['sar_drift_directory']}")
     logger.info(f"Found {len(files)} candidate files")
         
@@ -1238,7 +1252,7 @@ def main():
         # combine all created daily files into one
         create_daily_output(df_day, scene_output, config, template_ds)
     
-    
+
     # final log entry
     run_end = datetime.utcnow() 
     elapsed = run_end - run_start
@@ -1247,5 +1261,77 @@ def main():
     )
     
     
+def process_level_output():
+    """
+    Top-level entry point for the SAR drift output generation pipeline.
+
+    Parses and validates configuration via `read_json_config()`, clears and
+    recreates the log directory, initialises a single timestamped log file
+    for the entire run, then dispatches one or more `create_level_output()`
+    calls for the desired processing level and EPSG projection combinations.
+    Logs total elapsed time on completion.
+
+    A single log file covers all level/EPSG combinations in the run. Log
+    entries include the level and EPSG for each processing stage so that
+    output for a specific combination can be filtered from the log.
+
+    This function is intended to be called only when the script is run
+    directly (`__name__ == '__main__'`).
+
+    Workflow:
+        1. Parse and validate runtime configuration via `read_json_config()`.
+        2. Clear the log directory specified by `config['log_dir']` and
+           recreate it to remove logs from previous runs.
+        3. Initialise a single timestamped log file via `setup_logger()`.
+        4. Call `create_level_output()` for each active level/EPSG
+           combination. Inactive combinations are commented out in the
+           source and can be enabled as needed.
+        5. Log total elapsed run time on completion.
+
+    Notes:
+        - To enable additional level/EPSG combinations, uncomment the
+          corresponding `create_level_output()` calls in the source.
+        - Pyproj CRS configuration is applied at startup via `pyproj_setup`.
+        - All level/EPSG combinations share one log file. Filter log entries
+          by level or EPSG to isolate output for a specific combination.
+    """
+    
+    import pyproj_setup
+    import os
+    import shutil
+    from datetime import datetime
+    
+    
+    run_start = datetime.utcnow()
+    
+    # parse user arguments
+    config = read_json_config()
+    
+    # initialize logger
+    # clear and recreate log directory
+    if os.path.exists(config['log_dir']):
+        shutil.rmtree(config['log_dir'])
+    os.makedirs(config['log_dir'], exist_ok=True)
+    logger, log_path = setup_logger(config['log_dir'])
+    logger.info(
+        f"Process started | {run_start}"
+    )
+    
+    
+    create_level_output('01', 3413, config)
+    create_level_output('01', 6931, config)
+    create_level_output('02', 3413, config)
+    create_level_output('02', 6931, config)
+    create_level_output('03', 3413, config)
+    create_level_output('03', 6931, config)
+
+    # final log entry
+    run_end = datetime.utcnow() 
+    elapsed = run_end - run_start
+    logger.info(
+        f"Process completed | {run_end} | elapsed={elapsed}"
+    )
+    
+    
 if __name__ == "__main__":
-    main()
+    process_level_output()
