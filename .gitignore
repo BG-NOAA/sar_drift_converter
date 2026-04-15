@@ -22,6 +22,7 @@ __pycache__
 
 # Ignored folders
 input
+input_test
 layer_to_gpkg
 level_output
 log

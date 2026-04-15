@@ -122,6 +122,9 @@ def read_json_config():
                                             runtime by _set_metadata().
         - "netcdf_template_file"   (str):   Path to NetCDF template file on
                                             which scenes will be built.
+        - "vector_html_file"       (str):   Path to HTML file that has the
+                                            code to display vectors as 
+                                            interactive quivers
         - "outlier_qml_file"       (str):   Path to QML file that applies
                                             outlier category styles to
                                             GeoPackages when opened in QGIS.
@@ -131,6 +134,8 @@ def read_json_config():
                                             GeoPackages when opened in QGIS.
                                             Used for all levels other than
                                             '02'.
+        - "meta_dir"               (str):   Directory for template files
+                                            needed during processing.                             
         - "output_dir"             (str):   Parent directory for all
                                             processing output. Per-level
                                             subdirectories are created
@@ -149,14 +154,14 @@ def read_json_config():
                                             PolarWatch STAC host server.
         - "clear_output_dir"       (bool):  Remove output directory and all
                                             contents from previous runs.
+        - "overwrite"              (bool):  Overwrite files alrady created on
+                                            the file server.
         - "batch_process"          (bool):  If True, process all files in
                                             `sar_drift_directory`; if False,
                                             process single
                                             `sar_drift_filename`.
         - "delimiter"              (str):   Field separator in the input file
                                             (e.g., ",", "\\t").
-        - "skip_rows_before_header"(int):   Number of rows to skip before
-                                            the header in the data file.
         - "use_geotiff"            (bool):  Use a supplied GeoTIFF file as
                                             background for output images.
         - "create_region_plot"     (bool):  If True, create a map of the
@@ -254,10 +259,10 @@ def read_json_config():
 
     required_json_keys = {
         "sar_drift_directory", "sar_drift_filename", "sar_geotiff_filename",
-        "netcdf_cdl_file", "netcdf_template_file",
+        "netcdf_cdl_file", "netcdf_template_file", "vector_html_file",
         "outlier_qml_file", "graduated_qml_file", "output_dir", "log_dir",
-        "file_server", "clear_output_dir", "batch_process", "delimiter",
-        "skip_rows_before_header", "use_geotiff", "create_region_plot",
+        "meta_dir", "file_server", "clear_output_dir", "batch_process",
+        "overwrite", "delimiter", "use_geotiff", "create_region_plot",
         "vector_stride", "inlier_vector_stride", "quiver_scale_small_area",
         "quiver_scale_large_area", "verbose", "version"
     }
@@ -276,16 +281,16 @@ def read_json_config():
     # define schema
     # (key, expected_type, min_value_or_None, allow_zero)
     schema = [
-        ("batch_process",             bool,  None, None),
-        ("clear_output_dir",          bool,  None, None),
-        ("use_geotiff",               bool,  None, None),
-        ("create_region_plot",        bool,  None, None),
-        ("verbose",                   bool,  None, None),
-        ("skip_rows_before_header",   int,   0,    True),
-        ("vector_stride",             int,   1,    False),
-        ("inlier_vector_stride",      int,   1,    False),
-        ("quiver_scale_small_area",   float, None, None),
-        ("quiver_scale_large_area",   float, None, None)
+        ("batch_process",            bool,  None, None),
+        ("clear_output_dir",         bool,  None, None),
+        ("overwrite"       ,         bool,  None, None),
+        ("use_geotiff",              bool,  None, None),
+        ("create_region_plot",       bool,  None, None),
+        ("verbose",                  bool,  None, None),
+        ("vector_stride",            int,   1,    False),
+        ("inlier_vector_stride",     int,   1,    False),
+        ("quiver_scale_small_area",  float, None, None),
+        ("quiver_scale_large_area",  float, None, None)
     ]
 
     for key, expected_type, min_val, allow_zero in schema:
@@ -308,8 +313,10 @@ def read_json_config():
         ('sar_geotiff_filename', 'sar_geotiff_file',     use_geotiff),
         ('netcdf_cdl_file',      'netcdf_cdl_file',      False),
         ('netcdf_template_file', 'netcdf_template_file', True),
+        ('vector_html_file',     'vector_html_file',     True),
         ('outlier_qml_file',     'outlier_qml_file',     True),
         ('graduated_qml_file',   'graduated_qml_file',   True),
+        ('meta_dir',             'meta_dir',             True),
         ('output_dir',           'output_dir',           True),
         ('log_dir',              'log_dir',              True),
         ('file_server',          'file_server',          True)
@@ -329,8 +336,8 @@ def read_json_config():
         **resolved_paths,
         'clear_output_dir':        config['clear_output_dir'],
         'batch_process':           config['batch_process'],
+        'overwrite':               config['overwrite'],
         'delimiter':               delimiter,
-        'skip_rows_before_header': config['skip_rows_before_header'],
         'ignore_vector_threshold': IGNORE_VECTOR_THRESHOLD,
         'z_score_level':           Z_SCORE_LEVEL,
         'chi_square_level':        CHI_SQUARE_LEVEL,
@@ -360,15 +367,17 @@ def read_json_config():
             'sar_geotiff_file':       'sar geotiff file',
             'netcdf_cdl_file':        'NetCDF CDL file',
             'netcdf_template_file':   'NetCDF template file',
+            'vector_html_file':       'vector HTML file',
             'outlier_qml_file':       'outlier qml file',
             'graduated_qml_file':     'graduated qml file',
+            'meta_dir':               'metadata directory',
             'output_dir':             'output directory',
             'log_dir':                'log directory',
             'file_server':            'file server',
             'clear_output_dir':       'clear output directory',
             'batch_process':          'batch process',
+            'overwrite':              'overwrite',
             'delimiter':              'delimiter',
-            'skip_rows_before_header':'skip rows before header',
             'ignore_vector_threshold':'ignore vector threshold',
             'z_score_level':          'z-score level',
             'chi_square_level':       'chi-square level',
@@ -485,8 +494,7 @@ def combine_into_dataframe(files, config):
     
         df = util.read_sar_drift_data_file(
             input_file=read_path,
-            config=config,
-            skip_rows=config['skip_rows_before_header']
+            config=config
         )
         df['_use_75km'] = use_75km
         df['_source_file'] = os.path.basename(read_path)
@@ -497,7 +505,7 @@ def combine_into_dataframe(files, config):
         all_dfs.append(df)
     
 
-    print('Saving all files into one Data Frame...')
+    print('Combining all files into one Data Frame...')
     df_all = pd.concat(all_dfs, ignore_index=True)
     # convert date columns to datetime once
     df_all['date_start'] = pd.to_datetime(
@@ -510,6 +518,8 @@ def combine_into_dataframe(files, config):
     )
     
     logger.info(f"Combined: {df_all.shape[0]} rows from {len(all_dfs)} files")
+    
+    df_all.to_csv(r'input_test/large_run.csv', index=False)
     
     return df_all
     
@@ -690,16 +700,76 @@ def filter_input_data(df_all, config):
     return df_all
 
     
+def daily_outputs_exist(scene_output_stub, config):
+    """Return True if all expected daily output files for a given day already
+    exist on the file server for the configured processing level.
+
+    Constructs the expected output paths using the same naming convention as
+    `create_daily_output` and checks each one with `os.path.exists`. The set
+    of paths checked mirrors exactly which outputs `create_daily_output` would
+    write for `config['level']`.
+
+    Args:
+        scene_output_stub (dict): Must contain:
+            - 'start_date' (pandas.Timestamp)
+            - 'end_date'   (pandas.Timestamp)
+        config (dict): Must contain 'file_server', 'epsg', 'level',
+                       'version', 'formatted_data_dir', 'overwrite'.
+
+    Returns:
+        bool: True if all expected files exist and overwrite is False.
+              Always returns False if config['overwrite'] is True.
+    """
+    
+    import os
+
+    if config['overwrite']:
+        return False
+
+    start = scene_output_stub['start_date'].strftime("%Y%m%d")
+    end   = scene_output_stub['end_date'].strftime("%Y%m%d")
+    epsg  = str(config['epsg'])
+    lvl   = f"Processing Level - {config['level']} (PL{config['level']})"
+    yr    = start[:4]
+    base  = (
+        f"SIVelocity_SAR_{start}_{end}_daily_12km_NH_{config['epsg']}_"
+        f"PL{config['level']}_v{config['version']}"
+    )
+    nc_dir   = os.path.join(config['file_server'], epsg, lvl, yr, 'nc')
+    gpkg_dir = os.path.join(config['file_server'], epsg, lvl, yr, 'gpkg')
+    html_dir = os.path.join(config['file_server'], epsg, lvl, yr, 'html')
+
+    paths_to_check = [
+        # multi-layer NetCDF (uses 'scenes' type token)
+        os.path.join(
+            nc_dir,
+            f"SIVelocity_SAR_{start}_{end}_scenes_12km_NH_{config['epsg']}"
+            f"_PL{config['level']}_v{config['version']}.nc"
+        ),
+        # single-layer NetCDF
+        os.path.join(nc_dir, f"{base}.nc"),
+    ]
+
+    if config['level'] in ['00', '02', '03']:
+        paths_to_check.append(os.path.join(gpkg_dir, f"{base}.gpkg"))
+
+    if config['level'] in ['00', '03']:
+        paths_to_check.append(
+            os.path.join(html_dir, f"{base}_vector.html")
+        )
+
+    return all(os.path.exists(p) for p in paths_to_check)
+
+
 def create_scene_output(day, df_day, config, template_ds):
     """
     Process all File1/File2 scene pairs within a single day's DataFrame and
     produce per-scene output files.
 
-    For each scene pair, this function saves a formatted CSV, runs outlier
-    detection, and writes a per-scene NetCDF file. The post-outlier-detection
-    rows from all scenes are accumulated and returned as a combined DataFrame
-    for the caller to use when producing daily-level GeoPackage and Plotly
-    HTML outputs.
+    For each scene pair, saves a formatted CSV, runs outlier detection, and
+    writes a per-scene NetCDF file. The post-outlier-detection rows from all
+    scenes are accumulated and returned as a combined DataFrame for the caller
+    to use when producing daily-level GeoPackage and vector HTML/JSON outputs.
 
     Args:
         day (str): Date string for the current processing day
@@ -739,14 +809,18 @@ def create_scene_output(day, df_day, config, template_ds):
                                                   detection has been applied.
                                                   Intended for use by the
                                                   caller to produce a single
-                                                  daily GeoPackage and Plotly
-                                                  HTML across all scenes.
+                                                  daily GeoPackage and vector
+                                                  HTML/JSON across all scenes.
                                                   Empty DataFrame if no scenes
                                                   produced rows.
                 - 'start_date' (pandas.Timestamp): Minimum `date_start`
-                                                   across all scenes.
+                                                   across all scenes,
+                                                   pre-computed from `df_day`
+                                                   before the scene loop.
                 - 'end_date' (pandas.Timestamp): Maximum `date_end` across
-                                                 all scenes.
+                                                 all scenes, pre-computed
+                                                 from `df_day` before the
+                                                 scene loop.
                 - 'nc_files' (list[str]): Paths of successfully written
                                           per-scene NetCDF files.
                 - 'gpkg_files' (list[str]): Reserved for per-scene GeoPackage
@@ -754,10 +828,15 @@ def create_scene_output(day, df_day, config, template_ds):
                                             output is produced daily by the
                                             caller.
                 - 'html_files' (list[str]): Reserved for per-scene HTML paths;
-                                            always empty as Plotly HTML output
+                                            always empty as vector HTML output
                                             is produced daily by the caller.
 
     Notes:
+        - `start_date` and `end_date` in the return dict are derived from the
+          full `df_day` DataFrame before the scene loop runs, not accumulated
+          incrementally across scenes. Any scene's min/max is guaranteed to
+          fall within the day-level bounds already established, so per-scene
+          comparisons are not required.
         - A formatted CSV is written for every scene unconditionally, before
           outlier detection is applied.
         - NetCDF output file paths are appended to `nc_files` only when
@@ -765,17 +844,17 @@ def create_scene_output(day, df_day, config, template_ds):
           referencing files that were never created due to all vectors in a
           scene being filtered as outliers.
         - The `scene_i_j` dictionary is populated in-place by
-          `util.create_netcdf` and maps each `pair_basename` to its list of
+          `util.create_netcdf` and maps each `scene_id` to its list of
           (i, j) grid index pairs.
         - Per OSI SAF convention, the reference date in scene filenames
           corresponds to the end of the observation period. Where multiple
           scene pairs exist within a day, the overall start and end timestamps
-          are tracked as the minimum `date_start` and maximum `date_end`
-          across all scenes.
+          are the minimum `date_start` and maximum `date_end` across all
+          scenes.
         - `df_scenes` is assembled by concatenating each per-scene DataFrame
           after outlier detection. The caller is responsible for producing
-          daily-level GeoPackage and Plotly HTML outputs from this combined
-          DataFrame rather than concatenating per-scene output files.
+          daily-level GeoPackage and vector HTML/JSON outputs from this
+          combined DataFrame rather than concatenating per-scene output files.
     """
 
     import util
@@ -783,55 +862,33 @@ def create_scene_output(day, df_day, config, template_ds):
     import logging
     import pandas as pd
 
-
-    # log activity
     logger = logging.getLogger('sar_drift_converter')
-    
+
     scene_i_j = {}
     scene_frames = []
     nc_files = []
     gpkg_files = []
     html_files = []
+
     daily_start_date = pd.to_datetime(df_day['date_start'].min())
-    daily_end_date = pd.to_datetime(df_day['date_end'].max())
-    
+    daily_end_date   = pd.to_datetime(df_day['date_end'].max())
+
     scene_count = 0
     for scene_id, df_scene in df_day.groupby('scene_id'):
         scene_count += 1
-        
+
         logger.info(
             f"Scene {scene_id} | "
             f"rows={len(df_scene)} | "
             f"date_range={day}"
         )
-        
+
         output_path = os.path.join(
             config['formatted_data_dir'],
             f"formatted_{scene_id}.csv"
         )
         df_scene.to_csv(output_path, index=False)
-        
-    
-        """
-        Per OSI SAF, the dates in file names that have motion data
-        the dates in the file typically is the end date of the observation
-        period https://osisaf-hl.met.no/sites/osisaf-hl/files/user_manuals/
-        osisaf_pum_sea-ice-drift-lr_v1p9.pdf
-        (Page 25)
-               
-        For multiple pairs in one period, have included start/end date/time
-        """
-        start_min = pd.to_datetime(df_scene['date_start'].min())
-        if daily_start_date is None or start_min < daily_start_date:
-            daily_start_date = start_min
 
-        end_max = pd.to_datetime(df_scene['date_end'].max())
-        if daily_end_date is None or end_max > daily_end_date:
-            daily_end_date = end_max
-    
-
-
-        # Detect outliers (will return all 00 if not active)
         df_scene = util.outlier_search(
             df=df_scene,
             config=config,
@@ -841,12 +898,10 @@ def create_scene_output(day, df_day, config, template_ds):
             md_neighbors=config['md_min_neighbors'],
             z_score_level=config['z_score_level'],
             chi_square_level=config['chi_square_level'],
-            passes=config['outlier_passes'] 
+            passes=config['outlier_passes']
         )
         scene_frames.append(df_scene)
-        
-        
-        # Create NetCDF always
+
         nc_path = util.create_netcdf(
             df=df_scene,
             base_name=scene_id,
@@ -857,19 +912,19 @@ def create_scene_output(day, df_day, config, template_ds):
         if nc_path:
             nc_files.append(nc_path)
 
-
-    # concatenate all scenes into one daily data frame
+    
     if scene_frames:
         df_scenes = pd.concat(scene_frames, ignore_index=True)
     else:
-        pd.DataFrame()
-        
+        df_scenes = pd.DataFrame()
+
+
     return {
-        'scenes': scene_count,
-        'df_scenes': df_scenes,
+        'scenes':     scene_count,
+        'df_scenes':  df_scenes,
         'start_date': daily_start_date,
-        'end_date': daily_end_date,
-        'nc_files': nc_files,
+        'end_date':   daily_end_date,
+        'nc_files':   nc_files,
         'gpkg_files': gpkg_files,
         'html_files': html_files
     }
@@ -881,13 +936,13 @@ def create_daily_output(df_day, scene_output, config, template_ds):
     and write them to the file server directory.
 
     Takes the per-scene results produced by `create_scene_output` and writes
-    day-level NetCDF, GeoPackage, Plotly HTML, and formatted CSV files. Two
-    NetCDF variants are always produced: a multi-layered file with one time
-    layer per scene pair, and a single-layer daily summary. GeoPackage and
-    HTML outputs are produced based on the configured processing level.
-    Two formatted CSVs are also written unconditionally: one of the raw
-    day's observations and one of the post-outlier-detection rows with
-    processing codes.
+    day-level NetCDF, GeoPackage, vector HTML/JSON, and formatted CSV files.
+    Two NetCDF variants are always produced: a multi-layered file with one
+    time layer per scene pair, and a single-layer daily summary. GeoPackage
+    and vector HTML/JSON outputs are produced based on the configured
+    processing level. Two formatted CSVs are always written unconditionally:
+    one of the raw day's observations and one of the post-outlier-detection
+    rows with processing codes.
 
     Args:
         df_day (pandas.DataFrame): All drift observations for the current day,
@@ -906,9 +961,11 @@ def create_daily_output(df_day, scene_output, config, template_ds):
                                                   input to
                                                   `util.create_shape_package`
                                                   and
-                                                  `util.create_plotly_html`,
+                                                  `util.create_vector
+                                                  _html_and_json`,
                                                   and written to a formatted
-                                                  CSV with processing codes.
+                                                  CSV with processing codes
+                                                  unconditionally.
                 - 'nc_files' (list[str]): Paths of successfully written
                                           per-scene NetCDF files.
                 - 'gpkg_files' (list[str]): Paths of successfully written
@@ -922,14 +979,18 @@ def create_daily_output(df_day, scene_output, config, template_ds):
         config (dict): Configuration dictionary. Must include:
                 - 'file_server' (str): Root path of the PolarWatch STAC file
                   server. Daily outputs are written to subdirectories
-                  structured as `<file_server>/<level>/<year>/<type>/`.
+                  structured as `<file_server>/<epsg>/<level>/<year>/<type>/`.
                 - 'level' (str): Processing level; controls which daily output
                   types are produced:
-                      '00': NetCDF (multi-layer + single), GeoPackage, HTML
+                      '00': NetCDF (multi-layer + single), GeoPackage,
+                            vector HTML/JSON
                       '01': NetCDF (multi-layer + single)
                       '02': NetCDF (multi-layer + single), GeoPackage
-                      '03': NetCDF (multi-layer + single), GeoPackage, HTML
-                - 'epsg' (int): EPSG code included in output filenames.
+                      '03': NetCDF (multi-layer + single), GeoPackage,
+                            vector HTML/JSON
+                - 'epsg' (int): EPSG code included in output filenames and
+                                used as a top-level subdirectory under
+                                `file_server`.
                 - 'version' (str): Version string included in output
                                    filenames.
                 - 'formatted_data_dir' (str): Local directory for the
@@ -947,38 +1008,39 @@ def create_daily_output(df_day, scene_output, config, template_ds):
           where `<type>` is `scenes` for the multi-layered NetCDF and
           `daily` for all other output types.
         - Output directories under `file_server` are created if they do not
-          already exist, structured as `<file_server>/<level>/<year>/<type>/`
-          where `<level>` is the integer value of the processing level (e.g.
-          '03' → '3') and `<year>` is the four-digit start year.
-        - The GeoPackage and Plotly HTML are produced directly from
+          already exist, structured as
+          `<file_server>/<epsg>/<level>/<year>/<type>/` where `<level>` is
+          the full processing level label (e.g. 'Processing Level - 03
+          (PL03)') and `<year>` is the four-digit start year.
+        - The GeoPackage and vector HTML/JSON are produced directly from
           `scene_output['df_scenes']` rather than by merging per-scene
           output files, so each daily product is generated in a single call
           and reflects post-outlier-detection data across all scenes.
-        - Two formatted CSVs are written to `config['formatted_data_dir']`
-          unconditionally: `<start>_<end>_raw.csv` containing `df_day` as
-          received, and `<start>_<end>_processing_codes.csv` containing
-          `scene_output['df_scenes']` with outlier codes applied.
+        - The vector HTML output is accompanied by a JSON data file written
+          to a `data/` subdirectory alongside the HTML file.
+        - Two formatted CSVs are written unconditionally to
+          `config['formatted_data_dir']`: `<start>_<end>_raw.csv` containing
+          `df_day` as received, and `<start>_<end>_processing_codes.csv`
+          containing `scene_output['df_scenes']` with outlier codes applied.
     """
-    
+
     import util
     import os
     import logging
 
-
-    # log activity
     logger = logging.getLogger('sar_drift_converter')
-    
+
     daily_start_date_str = scene_output['start_date'].strftime("%Y%m%d")
     daily_end_date_str = scene_output['end_date'].strftime("%Y%m%d")
     epsg = str(config['epsg'])
     lvl = f"Processing Level - {config['level']} (PL{config['level']})"
     yr = str(daily_start_date_str[0:4])
-    
-    
+
+
     # multiple-layered netcdf
     output_dir = os.path.join(config['file_server'], epsg, lvl, yr, 'nc')
     os.makedirs(output_dir, exist_ok=True)
-    daily_nc_path = os.path.join(
+    scenes_nc_path = os.path.join(
         output_dir,
         f"SIVelocity_SAR_{daily_start_date_str}_{daily_end_date_str}"
         f"_scenes_12km_NH_{config['epsg']}_PL{config['level']}"
@@ -990,10 +1052,10 @@ def create_daily_output(df_day, scene_output, config, template_ds):
         template_ds=template_ds,
         daily_start_date=scene_output['start_date'],
         daily_end_date=scene_output['end_date'],
-        daily_nc_path=daily_nc_path
+        daily_nc_path=scenes_nc_path
     )
-    
-    # one layer netcdf
+
+    # single-layer netcdf
     daily_nc_path = os.path.join(
         output_dir,
         f"SIVelocity_SAR_{daily_start_date_str}_{daily_end_date_str}"
@@ -1009,8 +1071,8 @@ def create_daily_output(df_day, scene_output, config, template_ds):
         daily_nc_path=daily_nc_path,
         multi_layered=False
     )
-    
-    
+
+
     # GeoPackage
     if config['level'] in ['00', '02', '03']:
         output_dir = os.path.join(config['file_server'], epsg, lvl, yr, 'gpkg')
@@ -1028,37 +1090,44 @@ def create_daily_output(df_day, scene_output, config, template_ds):
         )
 
 
-    # Plotly HTML
+    # JSON vectors
     if config['level'] in ['00', '03']:
         output_dir = os.path.join(config['file_server'], epsg, lvl, yr, 'html')
+        data_dir = os.path.join(output_dir, "data")
         os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(data_dir, exist_ok=True)
+
         html_path = os.path.join(
             output_dir,
             f"SIVelocity_SAR_{daily_start_date_str}_{daily_end_date_str}"
             f"_daily_12km_NH_{config['epsg']}_PL{config['level']}"
             f"_v{config['version']}.html"
         )
-
-        html_path = util.create_plotly_html(
+        json_path = os.path.join(
+            data_dir, f"si_velocity_{daily_start_date_str}.json"
+        )
+        util.create_vector_html_and_json(
             df=scene_output['df_scenes'],
             html_path=html_path,
+            data_dir=data_dir,
+            json_path=json_path,
             config=config
         )
 
 
-    # save formatted CSV per day
+    # formatted CSVs (always written)
     output_path = os.path.join(
         config['formatted_data_dir'],
         f"{daily_start_date_str}_{daily_end_date_str}_raw.csv"
     )
     df_day.to_csv(output_path, index=False)
-    
+
     output_path = os.path.join(
         config['formatted_data_dir'],
         f"{daily_start_date_str}_{daily_end_date_str}_processing_codes.csv"
     )
     scene_output['df_scenes'].to_csv(output_path, index=False)
-    
+
     logger.info(
         f"Day {daily_start_date_str}_{daily_end_date_str} complete | "
         f"scenes={scene_output['scenes']}"
@@ -1235,11 +1304,24 @@ def create_level_output(level, epsg, config):
     
    
     # create output: group by day, then by scene within each day
+    start_days = {}
     for day, df_day in tqdm(
             df_all.groupby('date_range'), "Processing days..."
         ):
-    
         
+        # Build a lightweight stub to check file server before processing
+        stub = {
+            'start_date': pd.to_datetime(df_day['date_start']).min(),
+            'end_date':   pd.to_datetime(df_day['date_end']).max(),
+        }
+        
+        if daily_outputs_exist(stub, config):
+            logger.info(
+                f"Skipping {stub['start_date'].strftime('%Y%m%d')} — "
+                f"all level {config['level']} outputs already exist"
+            )
+            continue
+
         # create output for each scene
         scene_output = create_scene_output(
             day=day,
@@ -1249,6 +1331,14 @@ def create_level_output(level, epsg, config):
         )
         
         
+        # check start days will not be overwritten
+        key = scene_output['start_date'].strftime("%Y%m%d")
+        if not key in start_days:
+            start_days[key] = ''
+        else:
+            print(f"Duplicate {key}")
+            exit()
+            
         # combine all created daily files into one
         create_daily_output(df_day, scene_output, config, template_ds)
     
@@ -1261,7 +1351,7 @@ def create_level_output(level, epsg, config):
     )
     
     
-def process_level_output():
+def process_level_output(test=False):
     """
     Top-level entry point for the SAR drift output generation pipeline.
 
@@ -1318,12 +1408,16 @@ def process_level_output():
     )
     
     
-    create_level_output('01', 3413, config)
-    create_level_output('01', 6931, config)
-    create_level_output('02', 3413, config)
-    create_level_output('02', 6931, config)
-    create_level_output('03', 3413, config)
-    create_level_output('03', 6931, config)
+    if test:
+        create_level_output('00', 3413, config)
+    else:
+        create_level_output('01', 3413, config)
+        create_level_output('01', 6931, config)
+        create_level_output('02', 3413, config)
+        create_level_output('02', 6931, config)
+        create_level_output('03', 3413, config)
+        create_level_output('03', 6931, config)
+
 
     # final log entry
     run_end = datetime.utcnow() 

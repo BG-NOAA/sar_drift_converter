@@ -234,6 +234,39 @@ def error_msg(msg):
 #===================
 # Internal functions
 #===================
+def _detect_skip_rows(input_file):
+    """Peek at the input file to determine how many rows to skip before
+    the header.
+
+    Reads up to the first 3 lines and checks each one to see if it contains
+    the expected header fields ('File1' and 'File2'). Returns the 0-based
+    index of the header line, which is the number of rows pd.read_csv
+    should skip.
+
+    Args:
+        input_file: Path to the SAR drift gfilter text file.
+
+    Returns:
+        Number of rows to skip (0 if header is on line 1).
+
+    Raises:
+        Error if no header row is found within the first 10 lines.
+    """
+    
+    with open(input_file, 'r') as f:
+        for i, line in enumerate(f):
+            if i >= 10:
+                break
+            if 'File1' in line and 'File2' in line:
+                return i
+            
+            
+    error_msg(
+        "Could not locate header row ('File1', 'File2') in first 10 lines of "
+        f"{input_file}"
+    )
+    
+    
 def _set_metadata(config):
     """
     Generate a NetCDF metadata template from an EPSG-specific CDL file
@@ -312,7 +345,7 @@ def _set_metadata(config):
     return xr.open_dataset(ncgen_ofile_nc, decode_times=False)
 
 
-def _calculate_drift_daily(lat1, lon1, lat2, lon2, duration_s, epsg):
+def _calculate_drift_daily(lat1, lon1, lat2, lon2, duration, epsg):
     """
     Compute sea-ice drift kinematics from start/end geographic coordinates.
  
@@ -327,7 +360,7 @@ def _calculate_drift_daily(lat1, lon1, lat2, lon2, duration_s, epsg):
         lon1 (array-like): Starting longitudes in decimal degrees (EPSG:4326).
         lat2 (array-like): Ending latitudes in decimal degrees (EPSG:4326).
         lon2 (array-like): Ending longitudes in decimal degrees (EPSG:4326).
-        duration_s (array-like): Observation duration in seconds
+        duration (array-like): Observation duration in seconds
                                   (Time2_JS − Time1_JS).
         config (dict): Configuration dictionary. Expected keys:
             - 'epsg' (int): EPSG code for the target projected CRS used for
@@ -353,12 +386,12 @@ def _calculate_drift_daily(lat1, lon1, lat2, lon2, duration_s, epsg):
                 - 'bearing'   : forward azimuth from start to end (degrees)
  
             Velocity components (EPSG:`config['epsg']`):
-                - 'u_ms' : dx / duration_s  (m s⁻¹)
-                - 'v_ms' : dy / duration_s  (m s⁻¹)
+                - 'u' : dx / duration  (m s⁻¹)
+                - 'v' : dy / duration  (m s⁻¹)
  
             Speed:
-                - 'speed_ms'   : distance / duration_s (m s⁻¹)
-                - 'speed_kmdy' : (distance / 1000) / (duration_s / 86400)
+                - 'speed_ms'   : distance / duration (m s⁻¹)
+                - 'speed_kmdy' : (distance / 1000) / (duration / 86400)
                                   (km day⁻¹)
  
     Notes:
@@ -366,7 +399,7 @@ def _calculate_drift_daily(lat1, lon1, lat2, lon2, duration_s, epsg):
           `always_xy=True`, so longitude is passed before latitude.
         - Geodesic distance and forward azimuth are computed with
           `pyproj.Geod(ellps='WGS84').inv(lon1, lat1, lon2, lat2)`.
-        - `u_ms` and `v_ms` are Cartesian velocity components in the target
+        - `u` and `v` are Cartesian velocity components in the target
           projection space. For EPSG:3413 the x-axis points roughly eastward
           and the y-axis roughly northward, but note that the source file's
           `U_vel_ms` / `V_vel_ms` fields use the opposite convention (U drives
@@ -374,7 +407,7 @@ def _calculate_drift_daily(lat1, lon1, lat2, lon2, duration_s, epsg):
           projected displacements and are self-consistent.
         - `speed_ms` and `speed_kmdy` are derived from geodesic distance, not
           from `sqrt(dx² + dy²)`. They are therefore not exactly equal to
-          `sqrt(u_ms² + v_ms²)` due to projection distortion; the discrepancy
+          `sqrt(u² + v²)` due to projection distortion; the discrepancy
           is typically ~3–5% at high latitudes.
           
     Coauthor:
@@ -405,10 +438,10 @@ def _calculate_drift_daily(lat1, lon1, lat2, lon2, duration_s, epsg):
         'distance': distance,
         'distance_geod': distance_geod,
         'bearing': fwd_azimuth,
-        'u_ms': dx / duration_s,
-        'v_ms': dy / duration_s,
-        'speed_ms': distance / duration_s,
-        'speed_kmdy': (distance / 1000) / (duration_s / SECONDS_PER_DAY)
+        'u': dx / duration,
+        'v': dy / duration,
+        'speed_ms': distance / duration,
+        'speed_kmdy': (distance / 1000) / (duration / SECONDS_PER_DAY)
     }
         
 
@@ -522,6 +555,48 @@ def _embed_qml_style(gpkg_path, layer_name, config):
     conn.commit()    
     conn.close()
 
+
+def _add_json_templates(data_dir, config):
+    """
+    Copy reference map template files into the viewer's data directory if
+    they are not already present.
+
+    Ensures that the static GeoJSON files required by the HTML viewer
+    (land, coastline, graticules, grid) are available in `data_dir` before
+    the viewer is served. Files that already exist at the destination are
+    left untouched.
+
+    Args:
+        data_dir (str): Destination directory where template files must be
+                        present. Typically the `data/` subdirectory adjacent
+                        to the HTML viewer file.
+        config (dict): Configuration dictionary. Must include:
+                - 'meta_dir' (str): Directory containing the source template
+                  files. Expected files are 'land.json', 'coastline.json',
+                  'graticules.json', and 'grid.json'.
+
+    Returns:
+        None
+
+    Notes:
+        - Only missing files are copied; existing files are not overwritten.
+        - `data_dir` must already exist before this function is called.
+    """
+    
+    import os
+    import shutil
+
+    template_names = [
+        'land.geojson', 'coastline.geojson', 'graticule.geojson', 'grid.json'
+    ]
+
+    for template_name in template_names:
+        src_path = os.path.join(config['meta_dir'], template_name)
+        dest_path = os.path.join(data_dir, template_name)
+        if not os.path.exists(dest_path):
+            shutil.copy(src_path, dest_path)
+    
+
 #=============
 # Calculations
 #=============
@@ -583,7 +658,7 @@ def _circular_std(a):
 # Data I/O
 #=========
 
-def read_sar_drift_data_file(input_file, config, skip_rows=None):
+def read_sar_drift_data_file(input_file, config):
     """
     Read and preprocess a SAR ice-drift text data file into a standardized
     DataFrame.
@@ -601,7 +676,7 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
         2. Strip whitespace from column names.
         3. Convert Julian seconds timestamps (`Time1_JS`, `Time2_JS`) to
            human-readable datetime strings (`date_start`, `date_end`).
-        4. Compute observation duration in seconds (`duration_s`).
+        4. Compute observation duration in seconds (`duration`).
         5. Project start/end lat/lon to EPSG:`config['epsg']` and compute
            displacement, velocity, speed, bearing, and geodesic distance via
            `_calculate_drift_daily`.
@@ -622,24 +697,19 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
                                           to read.
         config (dict): Parsing and precision configuration. Expected keys:
             - 'delimiter' (str): Field delimiter passed to `pd.read_csv`.
-            - 'skip_rows_before_header' (int): Number of rows to skip before
-              the header row.
             - 'epsg' (int): EPSG code for the target projected CRS used by
               `_calculate_drift_daily` (e.g. 3413 for NSIDC Sea Ice Polar
               Stereographic North). Controls the projection used for X1, Y1,
-              X2, Y2, dx, dy, u_ms, and v_ms.
+              X2, Y2, dx, dy, u, and v.
             - 'coordinate_precision' (int): Decimal places for geographic
               coordinates (Lat1, Lon1, Lat2, Lon2) and projected coordinates
               (X1, Y1, X2, Y2).
             - 'displacement_precision' (int): Decimal places for
-              `sea_ice_x_displacement`, `sea_ice_y_displacement`, `u_ms`,
-              and `v_ms`.
+              `sea_ice_x_displacement`, `sea_ice_y_displacement`, `u` and `v`.
             - 'speed_precision' (int): Decimal places for `sea_ice_speed`,
               `sea_ice_speed_kmdy`, `distance`, and `distance_geod`.
             - 'bearing_precision' (int): Decimal places for
               `direction_of_sea_ice_displacement`.
-        skip_rows (list[int] or None): Row indices to skip when reading the
-            file, passed directly to `pd.read_csv`. Defaults to None.
     
     Returns:
         pandas.DataFrame: Cleaned and enriched SAR drift DataFrame. Raw source
@@ -657,7 +727,7 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
                                   (from Time1_JS)
             - 'date_end'   (str): End datetime in '%Y-%m-%d %H:%M:%S'
                                   (from Time2_JS)
-            - 'duration_s' (float): Observation duration in seconds
+            - 'duration' (float): Observation duration in seconds
                                     (Time2_JS - Time1_JS); not rounded.
     
         Projected coordinates (EPSG:`config['epsg']`, meters; rounded to
@@ -669,8 +739,8 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
         `displacement_precision`):
             - 'sea_ice_x_displacement' (float): X2 - X1  (m)
             - 'sea_ice_y_displacement' (float): Y2 - Y1  (m)
-            - 'u_ms' (float): sea_ice_x_displacement / duration_s  (m/s)
-            - 'v_ms' (float): sea_ice_y_displacement / duration_s  (m/s)
+            - 'u' (float): sea_ice_x_displacement / duration  (m/s)
+            - 'v' (float): sea_ice_y_displacement / duration  (m/s)
     
         Speed and direction (rounded to `speed_precision` unless noted):
             - 'sea_ice_speed'      (float): geodesic speed (m/s)
@@ -700,22 +770,16 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
           dropped after processing.
     """
     
+    import logging
     import numpy as np
     import pandas as pd
     from datetime import datetime, timedelta
     
-    # The project database for pyproj is properly set by the code above
-    # Okay to ignore this warning and only this warning
-    import warnings
-    warnings.filterwarnings(
-        "ignore",
-        category=UserWarning,
-        module="pyproj",
-        message="pyproj unable to set database path"
-    )
-    
     
     # Read the SAR drift data file
+    skip_rows = _detect_skip_rows(input_file)
+    logger = logging.getLogger('sar_drift_converter')
+    logger.info(f'Input file rows skipped before header {skip_rows}')
     df = pd.read_csv(
         input_file, delimiter=config['delimiter'],
         header=0, engine='c', skiprows=skip_rows
@@ -739,7 +803,7 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
     
 
     # Calculate duration of observations in seconds
-    df['duration_s'] = (
+    df['duration'] = (
         df['Time2_JS'] - df['Time1_JS']
     )
     
@@ -748,7 +812,7 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
         lon1=df['Lon1'].values,
         lat2=df['Lat2'].values,
         lon2=df['Lon2'].values,
-        duration_s=df['duration_s'].values,
+        duration=df['duration'].values,
         epsg=config['epsg']
     )
     
@@ -766,8 +830,8 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
     df['sea_ice_y_displacement'] = np.round(
         drift['dy'], config['displacement_precision']
     )
-    df['u_ms'] = np.round(drift['u_ms'], config['displacement_precision'])
-    df['v_ms'] = np.round(drift['v_ms'], config['displacement_precision'])
+    df['u'] = np.round(drift['u'], config['displacement_precision'])
+    df['v'] = np.round(drift['v'], config['displacement_precision'])
     df['sea_ice_speed'] = np.round(
         drift['speed_ms'],
         config['speed_precision']
@@ -802,16 +866,18 @@ def read_sar_drift_data_file(input_file, config, skip_rows=None):
         inplace=True
     )
     
-    df.drop(
-        [
-            'Time1_JS', 'Time2_JS',
-            'U_vel_ms', 'V_vel_ms', 'Speed_kmdy', 'Bear_deg',
-            'img1_mean', 'img1_std', 'img2_mean', 'img2_std',
-            'img1s_mean', 'img1s_std', 'Npnt', 'Offset1', 'Offset2'
-        ],
-        axis=1,
-        inplace=True
-    )
+    
+    # reduce data frame    
+    needed_cols = [
+        'File1', 'File2','Maxcorr1', 'Maxcorr2', 
+        'longitude_1', 'latitude_1', 'longitude_2', 'latitude_2',
+        'date_start', 'date_end', 'duration', 'X1', 'Y1', 'X2', 'Y2',
+        'sea_ice_x_displacement', 'sea_ice_y_displacement', 'u', 'v',
+        'sea_ice_speed', 'sea_ice_speed_kmdy',
+        'direction_of_sea_ice_displacement', 'distance', 'distance_geod',
+        'sensor1', 'sensor2', 'scene_id'
+    ]
+    df = df[needed_cols]
     
     return df
 
@@ -1267,7 +1333,7 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
             Expected columns (as produced by `read_sar_drift_data_file`):
                 - 'date_start' (datetime-like): Start timestamp for the vector.
                 - 'date_end' (datetime-like): End timestamp for the vector.
-                - 'duration_s' (float): Observation duration in seconds.
+                - 'duration' (float): Observation duration in seconds.
                 - 'longitude_1' (float): Starting longitude (degrees,
                   EPSG:4326); used to locate each vector on the NSIDC 12.5 km
                   polar stereographic grid regardless of the projected CRS
@@ -1320,7 +1386,7 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
         2. For level '03': retain only rows where `outlier_category` is '00'
            or '01' (inliers), recode `outlier_category` to −1, and return
            early if no rows survive.
-        3. Derive the scene reference time and time bounds from `duration_s`,
+        3. Derive the scene reference time and time bounds from `duration`,
            `date_start`, and `date_end`.
         4. Compute error flags (`bearing_error`, `speed_error`,
            `measurement_error`) for levels '00'/'01'; set to −9 otherwise.
@@ -1363,7 +1429,10 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
     from datetime import datetime
     import xarray as xr
     import logging
- 
+
+    
+    # log activity
+    logger = logging.getLogger('sar_drift_converter')
  
     # standardize date/time stamps
     df_copy = df.copy()
@@ -1381,6 +1450,7 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
         if df_copy.shape[0] == 0:
             # it might be possible the data frame was labelled
             # as all outliers.
+            logger.info('All outliers found. No data to process.')
             return None
     
     layer_id_str = df_copy['scene_id'].iloc[0]
@@ -1452,7 +1522,6 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
     try:
         # set NetCDF standard attributes from CDL template
         meta_ds = _set_metadata(config)
-        
 
      
         # keep attrs from the CDL skeleton
@@ -1566,7 +1635,7 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
             idx_list.append(index_key)
      
             if index_key in seen_key:
-                print(f'Duplicate entry found for {ix}, {iy}')
+                logger.info(f'Duplicate entry found for {ix}, {iy}')
      
             seen_key.add(index_key)
      
@@ -1662,8 +1731,7 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
             }
         )
      
-        # log activity
-        logger = logging.getLogger('sar_drift_converter')
+
         logger.info(f'Created NetCDF {output_file_path}')
  
     finally:
@@ -1700,14 +1768,14 @@ def create_shape_package(df, gpkg_path, config):
                                          ('%Y-%m-%d %H:%M:%S').
                     - 'date_end'   (str): End datetime
                                          ('%Y-%m-%d %H:%M:%S').
-                    - 'duration_s' (float): Observation duration (s).
+                    - 'duration' (float): Observation duration (s).
                 Sensor identifiers:
                     - 'sensor1', 'sensor2' (str): Satellite/sensor IDs.
                 Science variables:
                     - 'sea_ice_x_displacement' (float): X displacement (m).
                     - 'sea_ice_y_displacement' (float): Y displacement (m).
-                    - 'u_ms' (float): X velocity component (m s⁻¹).
-                    - 'v_ms' (float): Y velocity component (m s⁻¹).
+                    - 'u' (float): X velocity component (m s⁻¹).
+                    - 'v' (float): Y velocity component (m s⁻¹).
                     - 'sea_ice_speed' (float): Drift speed (m s⁻¹).
                     - 'sea_ice_speed_kmdy' (float): Drift speed (km day⁻¹).
                     - 'direction_of_sea_ice_displacement' (float): Forward
@@ -1770,9 +1838,9 @@ def create_shape_package(df, gpkg_path, config):
         'scene_id', 'sensor1', 'sensor2',
         'longitude_1', 'latitude_1', 'longitude_2', 'latitude_2',
         'X1', 'Y1', 'X2', 'Y2',
-        'date_start', 'date_end', 'duration_s',
+        'date_start', 'date_end', 'duration',
         'sea_ice_x_displacement', 'sea_ice_y_displacement',
-        'u_ms', 'v_ms','sea_ice_speed', 'sea_ice_speed_kmdy',
+        'u', 'v','sea_ice_speed', 'sea_ice_speed_kmdy',
         'direction_of_sea_ice_displacement', 'distance', 'distance_geod'
     ]
     
@@ -1828,189 +1896,142 @@ def create_shape_package(df, gpkg_path, config):
     logger.info(f'Created GeoPackage {gpkg_path}')
            
     
-def create_plotly_html(df, html_path, config):
+def create_vector_html_and_json(df, html_path, data_dir, json_path, config):
     """
-    Create an interactive Plotly map of sea-ice drift vectors from a DataFrame.
+    Serialize drift vector observations to a compact JSON file and write
+    an accompanying interactive HTML viewer.
 
-    Renders each drift vector as a colored line segment on a stereographic
-    polar projection, with start and end points marked separately. Line color
-    encodes drift speed via the Viridis colorscale. The map is written to a
-    self-contained HTML file using a CDN-hosted Plotly bundle.
+    Writes a single JSON object containing date metadata and a list of
+    per-vector entries, then produces a self-contained HTML file that loads
+    the JSON from the `data/` subdirectory and renders drift vectors on an
+    interactive Leaflet polar stereographic map. For level '03', only inlier
+    vectors are retained and their outlier category is recoded to '-1' before
+    writing.
 
     Args:
         df (pandas.DataFrame): Input drift observations. Expected columns:
                 - 'longitude_1', 'latitude_1' (float): Start position
-                                                        (EPSG:4326, degrees).
+                  (EPSG:4326, degrees).
                 - 'longitude_2', 'latitude_2' (float): End position
-                                                        (EPSG:4326, degrees).
-                - 'sea_ice_x_displacement' (float): X displacement (m);
-                  combined with `sea_ice_y_displacement` to compute speed
-                  magnitude for colorscale normalization.
-                - 'sea_ice_y_displacement' (float): Y displacement (m).
-                - 'duration_s' (float): Observation duration (s); used to
-                  convert displacement magnitude to m day⁻¹.
-                - 'direction_of_sea_ice_displacement' (float): Forward azimuth
-                  (degrees); shown in end-point hover text.
-                - 'sensor1', 'sensor2' (str): Satellite identifiers; shown
-                  in end-point hover text.
-                - 'outlier_category' (str): Two-digit outlier code; required
-                  for level '03', where only rows with values '00' or '01'
-                  are retained before plotting.
-        html_path (str): Full path for the output HTML file.
+                  (EPSG:4326, degrees).
+                - 'duration' (float): Observation duration (s); written as
+                  a rounded integer in each vector entry.
+                - 'date_start' (datetime-like): Start timestamp; the minimum
+                  value across all rows is written as `date1`
+                  (format: 'YYYY-MM-DD').
+                - 'date_end' (datetime-like): End timestamp; the maximum
+                  value across all rows is written as `date2`
+                  (format: 'YYYY-MM-DD').
+                - 'outlier_category' (str): Two-digit outlier code. For level
+                  '03', only rows with values '00' or '01' are retained and
+                  the value is recoded to '-1' before writing.
+        html_path (str): Full path for the output HTML viewer file. The
+                         parent directory must already exist. The HTML file
+                         references the JSON using only the basename of
+                         `json_path` under a `data/` prefix, so the JSON
+                         file must be placed in a `data/` subdirectory
+                         relative to the HTML file's location.
+        data_dir (str): Directory where reference GeoJSON template files
+                        (land, coastline, graticule) are confirmed to exist
+                        via `_add_json_templates`. Must be the `data/`
+                        subdirectory served alongside the HTML file.
+        json_path (str): Full path for the output JSON file. Parent directory
+                         must already exist.
         config (dict): Configuration dictionary. Must include:
                 - 'level' (str): Processing level; if '03', only inlier
-                  vectors (`outlier_category` in ['00', '01']) are plotted.
-    
-    Returns:
-        None
-        
-    Notes:
-        - Speed magnitude is computed as the Euclidean norm of
-          (`sea_ice_x_displacement`, `sea_ice_y_displacement`) divided by
-          `duration_s`, scaled to m day⁻¹.
-        - Line colors are sampled from the Viridis colorscale using
-          per-vector min-max normalized magnitude. An invisible trace with
-          a colorbar is added separately so the scale renders correctly.
-        - Start points are plotted in green; end points in red with hover
-          text showing speed, bearing, coordinates, and sensor identifiers.
-        - The map uses a stereographic projection centred at 90°N, with
-          the latitude axis constrained to 60°–90°N.
-        - The map title is derived from the stem of `html_path`.
-        - The HTML file is written with ``include_plotlyjs='cdn'``, so an
-          internet connection is required to view the output.
-    """
-    
-    import os
-    import numpy as np
-    import plotly.graph_objects as go
+                  vectors (`outlier_category` in ['00', '01']) are written
+                  and their `outlier_category` is recoded to '-1'.
 
-    SECONDS_PER_DAY = 86_400
-    
-    
+    Returns:
+        tuple[str, str] or tuple[None, None]: A two-element tuple
+            `(json_path, html_path)` with the paths of the files written,
+            or `(None, None)` if level is '03' and no rows survive the
+            inlier filter.
+
+    Notes:
+        - Each entry in the `vectors` list follows the format:
+            `[lon1, lat1, lon2, lat2, speed_x100, outlier_category]`
+            where `speed_x100` is drift speed in km/day multiplied by 100
+            and rounded to the nearest integer.
+        - `count` reflects the number of vectors actually written, after
+          any level '03' filtering.
+        - The JSON is written without indentation for compact output.
+        - The HTML viewer is produced by reading the template at
+          `config['html_template_file']` and replacing the hardcoded JSON
+          filename in the `fetch('data/...')` call with the basename of
+          `json_path`. All other HTML content is written unchanged.
+        - The HTML viewer requires a `data/` subdirectory adjacent to the
+          HTML file containing the JSON output and the reference GeoJSON
+          files (land, coastline, graticule) confirmed by
+          `_add_json_templates`.
+    """
+
+    import json
+    import re
+    import logging
+
+    logger = logging.getLogger('sar_drift_converter')
+
+    # confirm template GeoJSON reference files are in data_dir
+    _add_json_templates(data_dir, config)
+
+    df_local = df.copy()
+
     # For level 03, retain only inlier vectors (outlier_category 00 or 01),
     # then recode to -1 to signal that outlier filtering has been applied.
     if config['level'] == '03':
-        outlier_filter = df['outlier_category'].isin(['00', '01'])
-        df = df[outlier_filter].copy()
-        if df.shape[0] == 0:
+        outlier_filter = df_local['outlier_category'].isin(['00', '01'])
+        df_local = df_local[outlier_filter].copy()
+        df_local['outlier_category'] = '-1'
+        if df_local.shape[0] == 0:
             # it might be possible the data frame was labelled
-            # as all outliers.
-            return None
+            # as all outliers. Highly unlikely, but it needs to be
+            # handled
+            return
 
-    mag = np.hypot(
-        df['sea_ice_x_displacement'],
-        df['sea_ice_y_displacement']
-    ) / df['duration_s'] * SECONDS_PER_DAY
+    date1 = df_local['date_start'].min().strftime('%Y-%m-%d')
+    date2 = df_local['date_end'].max().strftime('%Y-%m-%d')
 
+    vectors = [
+        [
+            round(float(row.longitude_1), 3),
+            round(float(row.latitude_1), 3),
+            round(float(row.longitude_2), 3),
+            round(float(row.latitude_2), 3),
+            int(round(row.sea_ice_speed_kmdy * 100)),
+            row.outlier_category
+        ]
+        for row in df_local.itertuples(index=False)
+    ]
 
-    # normalize mag to 0-1 for colorscale lookup
-    mag_min, mag_max = np.nanmin(mag), np.nanmax(mag)
-    mag_norm = (mag - mag_min) / (mag_max - mag_min + 1e-9)
+    payload = {
+        'date1':   date1,
+        'date2':   date2,
+        'count':   len(vectors),
+        'vectors': vectors
+    }
 
-    # sample viridis colorscale
-    import plotly.colors as pc
-    def mag_to_color(val):
-        return pc.sample_colorscale('Viridis', val)[0]
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, separators=(',', ':'))
 
-    fig = go.Figure()
+    logger.info(f'Created JSON {json_path}')
 
-    # one trace per vector, colored by speed
-    vectors = zip(
-        df['longitude_1'], df['latitude_1'],
-        df['longitude_2'], df['latitude_2'],
-        mag, mag_norm
-    )
-    for i, (lon1, lat1, lon2, lat2, m, mn) in enumerate(vectors):
-        fig.add_trace(go.Scattergeo(
-            lon=[lon1, lon2],
-            lat=[lat1, lat2],
-            mode='lines',
-            line=dict(width=1.5, color=mag_to_color(mn)),
-            hoverinfo='skip',
-            showlegend=False
-        ))
+    # write HTML viewer, substituting the JSON filename into the template
+    import os
+    json_basename = os.path.basename(json_path)
+    with open(config['vector_html_file'], 'r', encoding='utf-8') as f:
+        html_content = f.read()
 
-        
-    # start points - green
-    fig.add_trace(go.Scattergeo(
-        lon=df['longitude_1'],
-        lat=df['latitude_1'],
-        mode='markers',
-        marker=dict(size=4, color='green', symbol='circle'),
-        hoverinfo='skip',
-        name='Start points'
-    ))
-    
-    
-    # end points - red
-    fig.add_trace(go.Scattergeo(
-        lon=df['longitude_2'],
-        lat=df['latitude_2'],
-        mode='markers',
-        marker=dict(size=4, color='red', symbol='circle'),
-        text=[
-            f'Speed: {m:.1f} m/day<br>'
-            f'Bearing: {b:.0f}°<br>'
-            f'Lon: {lo:.4f}  Lat: {la:.4f}<br>'
-            f'Sat: {s1}/{s2}'
-            for m, b, lo, la, s1, s2 in zip(
-                mag,
-                df['direction_of_sea_ice_displacement'],
-                df['longitude_2'], df['latitude_2'],
-                df['sensor1'], df['sensor2']
-            )
-        ],
-        hoverinfo='text',
-        name='End points'
-    ))        
-
-
-    # invisible trace just for the colorbar
-    fig.add_trace(go.Scattergeo(
-        lon=df['longitude_2'],
-        lat=df['latitude_2'],
-        mode='markers',
-        marker=dict(
-            size=4,
-            opacity=0,
-            color=mag,
-            colorscale='Viridis',
-            colorbar=dict(title='Speed (m/day)', thickness=15, len=0.5),
-            showscale=True
-        ),
-        hoverinfo='skip',
-        showlegend=False
-    ))
-
-
-    basename = os.path.splitext(os.path.basename(html_path))[0]
-    fig.update_layout(
-        title=dict(
-            text=(
-                f'Sea-ice Drift Vectors — {basename}<br>'
-                f'<sup>Observations: {len(df)} | EPSG:4326</sup>'
-            ),
-            x=0.5
-        ),
-        geo=dict(
-            projection_type='stereographic',
-            projection_rotation=dict(lat=90, lon=0),
-            center=dict(lat=75, lon=0),
-            showland=True, landcolor='lightgray',
-            showocean=True, oceancolor='aliceblue',
-            showcoastlines=True, coastlinecolor='black',
-            lataxis=dict(range=[60, 90]),
-            projection_scale=1.0,  # lower = more zoomed out, adjust to taste
-        ),
-        dragmode='zoom',
-        width=2000,
-        height=2000
+    html_content = re.sub(
+        r"fetch\('data/si_velocity_[^']+'\)",
+        f"fetch('data/{json_basename}')",
+        html_content
     )
 
-    fig.write_html(html_path, include_plotlyjs='cdn')
+    with open(html_path, 'w', encoding='utf-8') as f:
+        f.write(html_content)
 
-    import logging
-    logging.getLogger('sar_drift').info(f'Created Plotly HTML {html_path}')
+    logger.info(f'Created HTML viewer {html_path}')
     
     
 def combine_daily_netcdf_files(config, nc_files, template_ds,
@@ -2083,6 +2104,7 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
           error occurs during merging or writing.
     """
 
+    import os
     import numpy as np
     import pandas as pd
     import xarray as xr
@@ -2401,7 +2423,9 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
             df_filter = update_df['overwrite']
             update_df = update_df[df_filter].drop(columns='overwrite')
             update_df = update_df.sort_values(['i', 'j'])
-            log_path = os.path.join(config['output_dir'], 'cell_update_log.csv')
+            log_path = os.path.join(
+                config['output_dir'], 'cell_update_log.csv'
+            )
             update_df.to_csv(log_path, index=False)
 
     finally:

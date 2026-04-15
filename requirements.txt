@@ -1,13 +1,9 @@
 cartopy
-dask
 geopandas
 matplotlib
-matplotlib-map-utils
-matplotlib-scalebar
 netCDF4
 numpy
 pandas
-plotly
 pyproj
 rasterio>=1.3.0
 scipy

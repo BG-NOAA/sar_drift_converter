@@ -3,20 +3,20 @@ channels:
   - conda-forge
   - defaults
 dependencies:
+  - cartopy
   - geopandas
-  - matplotlib-map-utils
-  - matplotlib-scalebar
+  - matplotlib
   - netCDF4  
   - numpy
   - pandas
   - pip
   - pip:
       - nc-time-axis  
-  - plotly
   - pyproj
   - python=3.10
   - rasterio  
   - scipy
   - scikit-learn
   - shapely
+  - tqdm
   - xarray
