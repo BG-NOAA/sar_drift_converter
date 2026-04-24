@@ -75,7 +75,8 @@ All runs are driven by a JSON config file passed via `-c config.json`. Every key
 | `netcdf_template_file` | str | Path to the NSIDC polar stereographic NetCDF template providing the target grid |
 | `outlier_qml_file` | str | Path to QML style file for outlier-category coloring in QGIS (applied for level `02`) |
 | `graduated_qml_file` | str | Path to QML style file for graduated-speed coloring in QGIS (applied for all levels other than `02`) |
-| `vector_html_file` | str | Path to the HTML viewer template used to generate the daily vector HTML output |
+| `html_with_outlier_template` | str | Path to the HTML viewer template used to generate the daily vector HTML output with outlier filter |
+| `html_without_outlier_template` | str | Path to the HTML viewer template used to generate the daily vector HTML output without outlier filter |
 | `meta_dir` | str | Directory containing static reference files (`land.geojson`, `coastline.geojson`, `graticule.geojson`, `grid.json`) copied into the HTML `data/` subdirectory at runtime. Also contains CDL for NetCDF, HTML templates and QML files for GeoPackages |
 
 > **Note:** `output_dir`, `formatted_data_dir`, `nc_dir`, and `filtered_data_dir` are **not** config.json keys. They are derived automatically by the script as subdirectories of `level_output/<level>/`.
@@ -143,11 +144,11 @@ Versioned algorithm parameters are defined in `constants.py` so that changes are
 | Parameter | Default | Columns affected |
 |-----------|---------|-----------------|
 | `COORDINATE_PRECISION` | `4` | `latitude_1`, `longitude_1`, `latitude_2`, `longitude_2`, `X1`, `Y1`, `X2`, `Y2` |
-| `DISPLACEMENT_PRECISION` | `4` | `sea_ice_x_displacement`, `sea_ice_y_displacement`, `u_ms`, `v_ms` |
+| `DISPLACEMENT_PRECISION` | `4` | `sea_ice_x_displacement`, `sea_ice_y_displacement`, `u`, `v` |
 | `SPEED_PRECISION` | `1` | `sea_ice_speed`, `sea_ice_speed_kmdy`, `distance` |
 | `BEARING_PRECISION` | `0` | `direction_of_sea_ice_displacement` |
 
-> **Note:** Rounding is applied with `numpy.round()` immediately after computation. `SPEED_PRECISION = 1` means speed values like `0.0592 m s⁻¹` are stored as `0.1` in the CSV and GeoPackage. Use the unrounded `u_ms` / `v_ms` components to verify speed independently: `SQRT(u_ms² + v_ms²) × 86400 / 1000` reproduces `sea_ice_speed_kmdy` before rounding.
+> **Note:** Rounding is applied with `numpy.round()` immediately after computation. `SPEED_PRECISION = 1` means speed values like `0.0592 m s⁻¹` are stored as `0.1` in the CSV and GeoPackage. Use the unrounded `u` / `v` components to verify speed independently: `SQRT(u² + v²) × 86400 / 1000` reproduces `sea_ice_speed_kmdy` before rounding.
 
 ---
 
@@ -268,7 +269,7 @@ These columns are added by `read_sar_drift_data_file` and `outlier_search` and a
 | `scene_id` | — | — | Combination of `File1` and `File2` joined by `_`; used to group observations into scene pairs |
 | `date_start` | — | — | Start datetime converted from `Time1_JS` (format: `YYYY-MM-DD HH:MM:SS`) |
 | `date_end` | — | — | End datetime converted from `Time2_JS` |
-| `duration_s` | — | s | Observation duration (`Time2_JS − Time1_JS`) |
+| `duration` | — | s | Observation duration (`Time2_JS − Time1_JS`) |
 | `longitude_1` | EPSG:4326 | degrees | Starting longitude (renamed from `Lon1`); rounded to `coordinate_precision` decimal places |
 | `latitude_1` | EPSG:4326 | degrees | Starting latitude (renamed from `Lat1`); rounded to `coordinate_precision` decimal places |
 | `longitude_2` | EPSG:4326 | degrees | Ending longitude (renamed from `Lon2`); rounded to `coordinate_precision` decimal places |
@@ -281,9 +282,9 @@ These columns are added by `read_sar_drift_data_file` and `outlier_search` and a
 | `Y2` | EPSG:`config['epsg']` | m | Projected y-coordinate of end position; rounded to `coordinate_precision` decimal places |
 | `sea_ice_x_displacement` | EPSG:`config['epsg']` | m | X displacement (`X2 − X1`); rounded to `displacement_precision` decimal places |
 | `sea_ice_y_displacement` | EPSG:`config['epsg']` | m | Y displacement (`Y2 − Y1`); rounded to `displacement_precision` decimal places |
-| `u_ms` | EPSG:`config['epsg']` | m s⁻¹ | X-component of velocity (`sea_ice_x_displacement / duration_s`); rounded to `displacement_precision` decimal places |
-| `v_ms` | EPSG:`config['epsg']` | m s⁻¹ | Y-component of velocity (`sea_ice_y_displacement / duration_s`); rounded to `displacement_precision` decimal places |
-| `sea_ice_speed` | geodesic | m s⁻¹ | Drift speed from geodesic distance / `duration_s`; rounded to `speed_precision` decimal places |
+| `u` | EPSG:`config['epsg']` | m s⁻¹ | X-component of velocity (`sea_ice_x_displacement / duration`); rounded to `displacement_precision` decimal places |
+| `v` | EPSG:`config['epsg']` | m s⁻¹ | Y-component of velocity (`sea_ice_y_displacement / duration`); rounded to `displacement_precision` decimal places |
+| `sea_ice_speed` | geodesic | m s⁻¹ | Drift speed from geodesic distance / `duration`; rounded to `speed_precision` decimal places |
 | `sea_ice_speed_kmdy` | geodesic | km/day | Drift speed in km/day from geodesic distance; rounded to `speed_precision` decimal places |
 | `direction_of_sea_ice_displacement` | geodesic | degrees | Forward azimuth from geodesic inverse calculation (WGS84); rounded to `bearing_precision` decimal places |
 | `distance` | geodesic | m | Geodesic distance between start and end positions (WGS84); rounded to `speed_precision` decimal places |
@@ -332,7 +333,7 @@ Layer name: `drift_lines`. CRS: EPSG:`config['epsg']`. Geometry: `LineString` fr
 | `Y2` | EPSG:`config['epsg']` | m | Projected y-coordinate of end position |
 | `date_start` | — | — | Start datetime string (`YYYY-MM-DD HH:MM:SS`) |
 | `date_end` | — | — | End datetime string (`YYYY-MM-DD HH:MM:SS`) |
-| `duration_s` | — | s | Observation duration in seconds |
+| `duration` | — | s | Observation duration in seconds |
 | `sea_ice_x_displacement` | EPSG:`config['epsg']` | m | X displacement |
 | `sea_ice_y_displacement` | EPSG:`config['epsg']` | m | Y displacement |
 | `u` | EPSG:`config['epsg']` | m s⁻¹ | X-component of velocity |

@@ -109,76 +109,57 @@ def read_json_config():
     `constants.py` into the returned config dictionary.
 
     Expected JSON keys (must match exactly):
-        - "sar_drift_directory"    (str):   Path to directory containing
-                                            multiple SAR drift delimited files
-                                            for batch processing.
-        - "sar_drift_filename"     (str):   Path to a single SAR drift
-                                            delimited text file.
-        - "sar_geotiff_filename"   (str):   Path to the SAR backscatter
-                                            GeoTIFF image.
-        - "netcdf_cdl_file"        (str):   Path to the base CDL file used
-                                            for NetCDF metadata. The EPSG-
-                                            specific variant is resolved at
-                                            runtime by _set_metadata().
-        - "netcdf_template_file"   (str):   Path to NetCDF template file on
-                                            which scenes will be built.
-        - "vector_html_file"       (str):   Path to HTML file that has the
-                                            code to display vectors as 
-                                            interactive quivers
-        - "outlier_qml_file"       (str):   Path to QML file that applies
-                                            outlier category styles to
-                                            GeoPackages when opened in QGIS.
-                                            Used for level '02'.
-        - "graduated_qml_file"     (str):   Path to QML file that applies
-                                            graduated vector styles to
-                                            GeoPackages when opened in QGIS.
-                                            Used for all levels other than
-                                            '02'.
-        - "meta_dir"               (str):   Directory for template files
-                                            needed during processing.                             
-        - "output_dir"             (str):   Parent directory for all
-                                            processing output. Per-level
-                                            subdirectories are created
-                                            beneath this path by
-                                            create_level_output() before
-                                            files are finalized to
-                                            `file_server`. Typically set
-                                            to "level_output".
-        - "log_dir"                (str):   Directory for the run log file.
-                                            Cleared at the start of each
-                                            script run and recreated with a
-                                            fresh timestamped log file.
-                                            Typically set to "log".                                            
-        - "file_server"            (str):   Path to where output files will
-                                            be saved and retrieved from the
-                                            PolarWatch STAC host server.
-        - "clear_output_dir"       (bool):  Remove output directory and all
-                                            contents from previous runs.
-        - "overwrite"              (bool):  Overwrite files alrady created on
-                                            the file server.
-        - "batch_process"          (bool):  If True, process all files in
-                                            `sar_drift_directory`; if False,
-                                            process single
-                                            `sar_drift_filename`.
-        - "delimiter"              (str):   Field separator in the input file
-                                            (e.g., ",", "\\t").
-        - "use_geotiff"            (bool):  Use a supplied GeoTIFF file as
-                                            background for output images.
-        - "create_region_plot"     (bool):  If True, create a map of the
-                                            observed region with vectors
-                                            overlaid on the GeoTIFF; if False,
-                                            render vectors only.
-        - "vector_stride"          (int):   Display every nth vector (1 = all
-                                            vectors).
-        - "inlier_vector_stride"   (int):   Display every nth inlier vector
-                                            (1 = all).
-        - "quiver_scale_small_area"(float): Quiver arrow scale for small area
-                                            plots.
-        - "quiver_scale_large_area"(float): Quiver arrow scale for large area
-                                            plots.
-        - "verbose"                (bool):  Print detailed parameter info to
-                                            the console.
-        - "version"                (str):   Version of application.
+        - "sar_drift_directory"   (str):   Path to directory containing
+                                           multiple SAR drift delimited files
+                                           for batch processing.
+        - "sar_drift_filename"    (str):   Path to a single SAR drift
+                                           delimited text file.
+        - "sar_geotiff_filename"  (str):   Path to the SAR backscatter
+                                           GeoTIFF image.
+        - "netcdf_cdl_file"       (str):   Path to the base CDL file used for
+                                           NetCDF metadata. The EPSG-specific
+                                           variant is resolved at runtime by
+                                           _set_metadata().
+        - "netcdf_template_file"  (str):   Path to NetCDF template file on
+                                           which scenes will be built.
+        - "html_vector_template"  (str):   Path to HTML file that has the code
+                                           to display vectors as interactive
+                                           quivers with outliers                                            
+        - "outlier_qml_file"      (str):   Path to QML file that applies
+                                           outlier category styles to
+                                           GeoPackages when opened in QGIS.
+                                           Used for level '02'.
+        - "graduated_qml_file"    (str):   Path to QML file that applies
+                                           graduated vector styles to
+                                           GeoPackages when opened in QGIS.
+                                           Used for all levels other than '02'.
+        - "meta_dir"              (str):   Directory for template files needed
+                                           during processing.                             
+        - "output_dir"            (str):   Parent directory for all processing
+                                           output. Per-level subdirectories
+                                           are created beneath this path by
+                                           create_level_output() before files
+                                           are finalized to `file_server`.
+                                           Typically set to "level_output".
+        - "log_dir"               (str):   Directory for the run log file.
+                                           Cleared at the start of each script
+                                           run and recreated with a fresh
+                                           timestamped log file.
+        - "file_server"           (str):   Path to where output files will be
+                                           saved and retrieved from the
+                                           PolarWatch STAC host server.
+        - "clear_output_dir"      (bool):  Remove output directory and all
+                                           contents from previous runs.
+        - "overwrite"             (bool):  Overwrite files already created on
+                                           the file server.
+        - "batch_process"         (bool):  If True, process all files in
+                                           `sar_drift_directory`; if False,
+                                           process single `sar_drift_filename`.
+        - "delimiter"             (str):   Field separator in the input
+                                           file (e.g., ",", "\\t").
+        - "verbose"               (bool):  Print detailed parameter info to
+                                           the console.
+        - "version"               (str):   Version of application.
 
     Keys beginning with "_comment" are permitted in the JSON file and are
     silently ignored during validation.
@@ -192,7 +173,6 @@ def read_json_config():
               Key highlights:
               - 'sar_drift_directory':      normalized path (batch mode)
               - 'sar_drift_file':           normalized path (single-file mode)
-              - 'sar_geotiff_file':         normalized path to GeoTIFF
               - 'netcdf_cdl_file':          normalized path to base CDL file
               - 'netcdf_template_file':     normalized path to NetCDF template
               - 'outlier_qml_file':         normalized path to outlier QML
@@ -258,13 +238,12 @@ def read_json_config():
     config_keys_no_comments = set(config.keys()) - comment_keys
 
     required_json_keys = {
-        "sar_drift_directory", "sar_drift_filename", "sar_geotiff_filename",
-        "netcdf_cdl_file", "netcdf_template_file", "vector_html_file",
-        "outlier_qml_file", "graduated_qml_file", "output_dir", "log_dir",
-        "meta_dir", "file_server", "clear_output_dir", "batch_process",
-        "overwrite", "delimiter", "use_geotiff", "create_region_plot",
-        "vector_stride", "inlier_vector_stride", "quiver_scale_small_area",
-        "quiver_scale_large_area", "verbose", "version"
+        "sar_drift_directory", "sar_drift_filename",
+        "netcdf_cdl_file", "netcdf_template_file",
+        "html_vector_template", "outlier_qml_file", "graduated_qml_file",
+        "output_dir", "log_dir", "meta_dir", "file_server",
+        "clear_output_dir", "batch_process", "overwrite", "delimiter",
+        "verbose", "version"
     }
 
     missing = required_json_keys - config_keys_no_comments
@@ -284,13 +263,7 @@ def read_json_config():
         ("batch_process",            bool,  None, None),
         ("clear_output_dir",         bool,  None, None),
         ("overwrite"       ,         bool,  None, None),
-        ("use_geotiff",              bool,  None, None),
-        ("create_region_plot",       bool,  None, None),
-        ("verbose",                  bool,  None, None),
-        ("vector_stride",            int,   1,    False),
-        ("inlier_vector_stride",     int,   1,    False),
-        ("quiver_scale_small_area",  float, None, None),
-        ("quiver_scale_large_area",  float, None, None)
+        ("verbose",                  bool,  None, None)
     ]
 
     for key, expected_type, min_val, allow_zero in schema:
@@ -306,20 +279,18 @@ def read_json_config():
 
     # path resolution and existence checks
     batch_process = config['batch_process']
-    use_geotiff = config['use_geotiff']
     path_checks = [
-        ('sar_drift_directory',  'sar_drift_directory',  batch_process),
-        ('sar_drift_filename',   'sar_drift_file',       not batch_process),
-        ('sar_geotiff_filename', 'sar_geotiff_file',     use_geotiff),
-        ('netcdf_cdl_file',      'netcdf_cdl_file',      False),
-        ('netcdf_template_file', 'netcdf_template_file', True),
-        ('vector_html_file',     'vector_html_file',     True),
-        ('outlier_qml_file',     'outlier_qml_file',     True),
-        ('graduated_qml_file',   'graduated_qml_file',   True),
-        ('meta_dir',             'meta_dir',             True),
-        ('output_dir',           'output_dir',           True),
-        ('log_dir',              'log_dir',              True),
-        ('file_server',          'file_server',          True)
+        ('sar_drift_directory', 'sar_drift_directory', batch_process),
+        ('sar_drift_filename', 'sar_drift_file', not batch_process),
+        ('netcdf_cdl_file', 'netcdf_cdl_file', False),
+        ('netcdf_template_file',  'netcdf_template_file', True),
+        ('html_vector_template', 'html_vector_template', True),
+        ('outlier_qml_file', 'outlier_qml_file', True),
+        ('graduated_qml_file', 'graduated_qml_file', True),
+        ('meta_dir', 'meta_dir', True),
+        ('output_dir', 'output_dir', True),
+        ('log_dir', 'log_dir', True),
+        ('file_server', 'file_server', True)
     ]
     resolved_paths = {}
     for json_key, config_key, must_exist in path_checks:
@@ -349,53 +320,40 @@ def read_json_config():
         'speed_precision':         SPEED_PRECISION,
         'displacement_precision':  DISPLACEMENT_PRECISION,
         'coordinate_precision':    COORDINATE_PRECISION,
-        'use_geotiff':             config['use_geotiff'],
-        'create_region_plot':      config['create_region_plot'],
-        'vector_stride':           config['vector_stride'],
-        'inlier_vector_stride':    config['inlier_vector_stride'],
-        'quiver_scale_small_area': config['quiver_scale_small_area'],
-        'quiver_scale_large_area': config['quiver_scale_large_area'],
         'verbose':                 config['verbose'],
-        'version':                 config['version'],
+        'version':                 config['version']
     }
 
     # echo
     if config['verbose']:
         labels = {
-            'sar_drift_directory':    'sar drift directory',
-            'sar_drift_file':         'sar drift file',
-            'sar_geotiff_file':       'sar geotiff file',
-            'netcdf_cdl_file':        'NetCDF CDL file',
-            'netcdf_template_file':   'NetCDF template file',
-            'vector_html_file':       'vector HTML file',
-            'outlier_qml_file':       'outlier qml file',
-            'graduated_qml_file':     'graduated qml file',
-            'meta_dir':               'metadata directory',
-            'output_dir':             'output directory',
-            'log_dir':                'log directory',
-            'file_server':            'file server',
-            'clear_output_dir':       'clear output directory',
-            'batch_process':          'batch process',
-            'overwrite':              'overwrite',
-            'delimiter':              'delimiter',
-            'ignore_vector_threshold':'ignore vector threshold',
-            'z_score_level':          'z-score level',
-            'chi_square_level':       'chi-square level',
-            'neighbor_radius_km':     'neighbor radius (km)',
-            'min_neighbors':          'minimum neighbors',
-            'md_min_neighbors':       'MD minimum neighbors',
-            'outlier_passes':         'outlier passes',
-            'use_geotiff':            'use geotiff image',
-            'create_region_plot':     'create region plot',
-            'vector_stride':          'vector stride',
-            'inlier_vector_stride':   'inlier vector stride',
-            'quiver_scale_small_area':'quiver scale small area',
-            'quiver_scale_large_area':'quiver scale large area',
-            'bearing_precision':      'bearing precision',
-            'speed_precision':        'speed precision',
-            'displacement_precision': 'displacement precision',
-            'coordinate_precision':   'coordinate precision',
-            'version':                'version',
+            'sar_drift_directory':           'sar drift directory',
+            'sar_drift_file':                'sar drift file',
+            'netcdf_cdl_file':               'NetCDF CDL file',
+            'netcdf_template_file':          'NetCDF template file',
+            'html_vector_template':          'HTML vector template file',
+            'outlier_qml_file':              'outlier qml file',
+            'graduated_qml_file':            'graduated qml file',
+            'meta_dir':                      'metadata directory',
+            'output_dir':                    'output directory',
+            'log_dir':                       'log directory',
+            'file_server':                   'file server',
+            'clear_output_dir':              'clear output directory',
+            'batch_process':                 'batch process',
+            'overwrite':                     'overwrite',
+            'delimiter':                     'delimiter',
+            'ignore_vector_threshold':       'ignore vector threshold',
+            'z_score_level':                 'z-score level',
+            'chi_square_level':              'chi-square level',
+            'neighbor_radius_km':            'neighbor radius (km)',
+            'min_neighbors':                 'minimum neighbors',
+            'md_min_neighbors':              'MD minimum neighbors',
+            'outlier_passes':                'outlier passes',
+            'bearing_precision':             'bearing precision',
+            'speed_precision':               'speed precision',
+            'displacement_precision':        'displacement precision',
+            'coordinate_precision':          'coordinate precision',
+            'version':                       'version'
         }
         lines = ["CONF PARAMS:"]
         for key, label in labels.items():
@@ -403,124 +361,146 @@ def read_json_config():
         print('\n'.join(lines))
 
     return config
-
-
+    
+    
 def combine_into_dataframe(files, config):
     """
-    Read a list of SAR drift gfilter files into a single combined DataFrame.
-
+    Read a list of SAR drift gfilter files into a single combined raw
+    DataFrame using parallel file reads across multiple CPU cores.
+ 
     Iterates over the provided file paths, skipping any 75 km files
     encountered directly (they are resolved automatically from their paired
     50 km entry). For each 50 km file, checks whether a corresponding 75 km
-    file exists and, if so, reads the 75 km file in its place. This preference
-    for the 75 km file improves spatial coverage where available. All
-    per-file DataFrames are concatenated into a single DataFrame with
-    datetime columns parsed once after combining.
-
+    file exists and, if so, reads the 75 km file in its place. File reads
+    are parallelized using ProcessPoolExecutor to reduce wall-clock time on
+    multi-core machines. All per-file DataFrames are concatenated into a
+    single raw DataFrame with datetime columns parsed once after combining.
+ 
+    The returned DataFrame contains only EPSG-independent columns. Projection-
+    dependent columns (X1, Y1, X2, Y2, displacement, velocity, speed,
+    bearing) are NOT added here. Call `util._apply_projection(df_raw, epsg,
+    config)` separately for each target EPSG after this function returns.
+    This design allows the expensive parallel file I/O to run exactly once
+    regardless of how many EPSG projections are required.
+ 
     Args:
         files (list[str]): Paths to candidate gfilter input files, typically
             glob-matched from `config['sar_drift_directory']`. Files with
-            '_0075000m_' in their path are silently skipped; they are only
+            `_0075000m_` in their path are silently skipped; they are only
             read when resolved from a paired 50 km entry.
         config (dict): Configuration dictionary. Must include:
-                - 'skip_rows_before_header' (int): Number of rows to skip
-                  before the header when reading each file, passed directly
-                  to `util.read_sar_drift_data_file`.
-
+                - `delimiter` (str): Field delimiter passed to
+                  `util.read_sar_drift_data_file`.
+                - `max_workers` (int, optional): Maximum number of worker
+                  processes for parallel file reads. Defaults to
+                  min(32, os.cpu_count()) if not set.
+ 
     Returns:
-        pandas.DataFrame: Combined DataFrame of all successfully read drift
-            observations with the following additions beyond the columns
+        pandas.DataFrame: Combined raw DataFrame of all successfully read
+            drift observations. Contains only EPSG-independent columns as
             produced by `util.read_sar_drift_data_file`:
-                - '_use_75km' (bool): True if the 75 km file was read in
+                - `File1`, `File2` (str): Scene pair filenames.
+                - `Maxcorr1`, `Maxcorr2` (float): Cross-correlation scores.
+                - `latitude_1`, `longitude_1` (float): Start position
+                  (EPSG:4326, degrees).
+                - `latitude_2`, `longitude_2` (float): End position
+                  (EPSG:4326, degrees).
+                - `date_start` (pandas.Timestamp): Parsed start datetime.
+                - `date_end` (pandas.Timestamp): Parsed end datetime.
+                - `duration` (float): Observation duration in seconds.
+                - `sensor1`, `sensor2` (str): Satellite identifiers.
+                - `scene_id` (str): `File1`_`File2`.
+                - `_use_75km` (bool): True if the 75 km file was read in
                   place of the 50 km file for this observation's scene.
-                - '_source_file' (str): Basename of the file that was
-                  actually read.
-                - 'date_start' (pandas.Timestamp): Parsed from the string
-                  column produced by `read_sar_drift_data_file`
-                  (format: '%Y-%m-%d %H:%M:%S').
-                - 'date_end' (pandas.Timestamp): Same as above for end time.
-
+                - `_source_file` (str): Basename of the file actually read.
+ 
+    Raises:
+        Exception: Re-raises any exception encountered during file reading
+            via the worker function `_read_gfilter_file`, causing the
+            executor to terminate and propagating the error to the caller.
+            Processing halts immediately on the first file read failure.
+ 
     Notes:
-        - 75 km files are identified by the substring '_0075000m_' in the
+        - 75 km files are identified by the substring `_0075000m_` in the
           file path. Any such file appearing directly in `files` is skipped
           and counted as a candidate but not read, as it will be resolved
           from its paired 50 km entry.
         - The 75 km counterpart of a 50 km file is derived by replacing
-          '_0050000m_' with '_0075000m_' in the normalized path. If the
-          resulting path is unchanged (i.e. the file is not a 50 km file)
-          or the 75 km path does not exist on disk, the original 50 km path
-          is read instead.
-        - File extensions containing an underscore suffix (e.g. `.txt_0`)
+          `_0050000m_` with `_0075000m_` in the normalized path. If the
+          resulting path is unchanged or the 75 km path does not exist on
+          disk, the original 50 km path is read instead.
+        - File extensions containing an underscore suffix (e.g. .txt_0)
           are normalized by truncating at the first underscore before the
           75 km path substitution is attempted.
+        - Header row position is detected automatically per file by
+          `_detect_skip_rows` inside `util.read_sar_drift_data_file`. No
+          configuration key is required for this.
         - Date columns are parsed to pandas Timestamps once after all files
           are concatenated, rather than per-file, for efficiency.
-    """    
-    
+        - Worker count defaults to min(32, os.cpu_count()) and can be
+          overridden via config['max_workers'].
+        - On Windows the ProcessPoolExecutor uses the `spawn` start method.
+          The entry point must be protected by `if __name__ == "__main__":`
+          to prevent recursive worker spawning.
+    """
+
     import util
     import os
     import logging
     import pandas as pd
     from tqdm import tqdm
+    from concurrent.futures import ProcessPoolExecutor
 
-
-    # log activity
     logger = logging.getLogger('sar_drift_converter')
-    
+
+    candidate_files = [f for f in files if '_0075000m_' not in f]
+    max_workers = min(32, os.cpu_count())
+
+    logger.info(
+        f"Reading {len(candidate_files)} gfilter files "
+        f"using {max_workers} workers"
+    )
+    files_75km = len(files) - len(candidate_files)
+    logger.info(
+        f"{files_75km} 75km files identified for substitution "
+        f"(will replace paired 50km files where available) | "
+        f"Difference of candidate files and files read for processing"
+    )
+
+    args = [(f, config) for f in candidate_files]
     all_dfs = []
-    file_idx = 0
-    for gfilter_path in tqdm(files, "Reading gfilter files..."):
-        if '_0075000m_' in gfilter_path:
-            continue  # handled via 50km entry
-            
-        file_idx += 1
-        # if file_idx == 6:
-        #     break
-    
-        basename, ext = os.path.splitext(gfilter_path)
-        if '_' in ext:
-            ext = ext.split('_')[0]
-        normalized_gfilter_path = basename + ext
-    
-        gfilter_path_75km = normalized_gfilter_path.replace(
-            '_0050000m_', '_0075000m_'
-        )
-        # only consider 75km if path actually changed and file exists
-        use_75km = (
-            gfilter_path_75km != normalized_gfilter_path
-            and os.path.exists(gfilter_path_75km)
-        )
-        read_path = gfilter_path_75km if use_75km else gfilter_path
-    
-        df = util.read_sar_drift_data_file(
-            input_file=read_path,
-            config=config
-        )
-        df['_use_75km'] = use_75km
-        df['_source_file'] = os.path.basename(read_path)
-        logger.info(
-            f"Read: {os.path.basename(read_path)} | "
-            f"use_75km={use_75km} | rows={df.shape[0]}"
-        )
-        all_dfs.append(df)
-    
+    failed = 0
+
+
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        results = list(tqdm(
+            executor.map(util._read_gfilter_file, args),
+            total=len(args),
+            desc='Reading gfilter files...'
+        ))
+
+    all_dfs = [r for r in results if r is not None]
+    failed = len(results) - len(all_dfs)
+
+    if failed:
+        logger.warning(f"{failed} file(s) failed to read and were skipped")
+        
 
     print('Combining all files into one Data Frame...')
     df_all = pd.concat(all_dfs, ignore_index=True)
-    # convert date columns to datetime once
+
     df_all['date_start'] = pd.to_datetime(
-        df_all['date_start'],
-        format='%Y-%m-%d %H:%M:%S'
+        df_all['date_start'], format='%Y-%m-%d %H:%M:%S'
     )
     df_all['date_end'] = pd.to_datetime(
-        df_all['date_end'],
-        format='%Y-%m-%d %H:%M:%S'
+        df_all['date_end'], format='%Y-%m-%d %H:%M:%S'
     )
-    
-    logger.info(f"Combined: {df_all.shape[0]} rows from {len(all_dfs)} files")
-    
-    df_all.to_csv(r'input_test/large_run.csv', index=False)
-    
+
+    logger.info(
+        f"Combined: {df_all.shape[0]} rows from {len(all_dfs)} files "
+        f"({failed} failed)"
+    )
+
     return df_all
     
 
@@ -599,14 +579,22 @@ def filter_input_data(df_all, config):
     import os
     import logging
     import pandas as pd
-
+    from tqdm import tqdm
 
     # log activity
     logger = logging.getLogger('sar_drift_converter')
     
     if config['level'] in ['02', '03']:
         accepted = []
-        for (file1, file2), df_scene in df_all.groupby(['File1', 'File2']):
+        scenes = list(df_all.groupby(['File1', 'File2']))
+        total_scenes = len(scenes)
+        chunks = max(1, total_scenes // 20)
+        for (file1, file2), df_scene in tqdm(
+                scenes, desc='Filtering scenes...',
+                total=total_scenes,
+                miniters=chunks,
+                mininterval=0
+            ):
             scene_id = f"{file1}_{file2}"
             use_75km = df_scene['_use_75km'].iloc[0]
             initial_row_size = df_scene.shape[0]
@@ -668,9 +656,9 @@ def filter_input_data(df_all, config):
                 f"Accepted scene: {scene_id} | final rows={df_scene.shape[0]}"
             )
             accepted.append(df_scene)
+            
     
-    
-        print('Updating filtered rows in one DataFrame...')
+        print('Updating Data Frame with filtered data...')
         df_all = pd.concat(accepted, ignore_index=True)
         df_all['date_start'] = pd.to_datetime(
             df_all['date_start'],
@@ -689,7 +677,7 @@ def filter_input_data(df_all, config):
     
     # save filtered combined CSV
     if config['level'] == "00":
-        print('Saving combined DataFrame...')
+        print('Saving combined Data Frame...')
         df_all.to_csv(
             os.path.join(
                 config['filtered_data_dir'],'filtered_combined.csv'
@@ -700,68 +688,7 @@ def filter_input_data(df_all, config):
     return df_all
 
     
-def daily_outputs_exist(scene_output_stub, config):
-    """Return True if all expected daily output files for a given day already
-    exist on the file server for the configured processing level.
-
-    Constructs the expected output paths using the same naming convention as
-    `create_daily_output` and checks each one with `os.path.exists`. The set
-    of paths checked mirrors exactly which outputs `create_daily_output` would
-    write for `config['level']`.
-
-    Args:
-        scene_output_stub (dict): Must contain:
-            - 'start_date' (pandas.Timestamp)
-            - 'end_date'   (pandas.Timestamp)
-        config (dict): Must contain 'file_server', 'epsg', 'level',
-                       'version', 'formatted_data_dir', 'overwrite'.
-
-    Returns:
-        bool: True if all expected files exist and overwrite is False.
-              Always returns False if config['overwrite'] is True.
-    """
-    
-    import os
-
-    if config['overwrite']:
-        return False
-
-    start = scene_output_stub['start_date'].strftime("%Y%m%d")
-    end   = scene_output_stub['end_date'].strftime("%Y%m%d")
-    epsg  = str(config['epsg'])
-    lvl   = f"Processing Level - {config['level']} (PL{config['level']})"
-    yr    = start[:4]
-    base  = (
-        f"SIVelocity_SAR_{start}_{end}_daily_12km_NH_{config['epsg']}_"
-        f"PL{config['level']}_v{config['version']}"
-    )
-    nc_dir   = os.path.join(config['file_server'], epsg, lvl, yr, 'nc')
-    gpkg_dir = os.path.join(config['file_server'], epsg, lvl, yr, 'gpkg')
-    html_dir = os.path.join(config['file_server'], epsg, lvl, yr, 'html')
-
-    paths_to_check = [
-        # multi-layer NetCDF (uses 'scenes' type token)
-        os.path.join(
-            nc_dir,
-            f"SIVelocity_SAR_{start}_{end}_scenes_12km_NH_{config['epsg']}"
-            f"_PL{config['level']}_v{config['version']}.nc"
-        ),
-        # single-layer NetCDF
-        os.path.join(nc_dir, f"{base}.nc"),
-    ]
-
-    if config['level'] in ['00', '02', '03']:
-        paths_to_check.append(os.path.join(gpkg_dir, f"{base}.gpkg"))
-
-    if config['level'] in ['00', '03']:
-        paths_to_check.append(
-            os.path.join(html_dir, f"{base}_vector.html")
-        )
-
-    return all(os.path.exists(p) for p in paths_to_check)
-
-
-def create_scene_output(day, df_day, config, template_ds):
+def create_scene_output(day, df_day, config, template_ds, exists):
     """
     Process all File1/File2 scene pairs within a single day's DataFrame and
     produce per-scene output files.
@@ -799,6 +726,18 @@ def create_scene_output(day, df_day, config, template_ds):
                                           iterations.
         template_ds (xarray.Dataset): NetCDF template dataset passed
                                       directly to `util.create_netcdf`.
+        exists (dict): Output existence flags as returned by
+            `check_existing_files`. The following keys are used:
+                - `nc_scenes` (bool): If True and `nc_daily` is also True,
+                  per-scene NetCDF files are not written since neither
+                  daily NetCDF variant needs them. If either is False,
+                  per-scene NetCDF files are written because both daily
+                  NetCDF variants depend on them as inputs to
+                  `util.combine_daily_netcdf_files`.
+                - `nc_daily` (bool): See `nc_scenes` above.
+            Outlier detection always runs regardless of these flags since
+            `df_scenes` is required by the caller for GeoPackage and
+            vector HTML/JSON outputs.
 
     Returns:
         dict: Summary of the day's scene processing, containing:
@@ -823,13 +762,6 @@ def create_scene_output(day, df_day, config, template_ds):
                                                  scene loop.
                 - 'nc_files' (list[str]): Paths of successfully written
                                           per-scene NetCDF files.
-                - 'gpkg_files' (list[str]): Reserved for per-scene GeoPackage
-                                            paths; always empty as GeoPackage
-                                            output is produced daily by the
-                                            caller.
-                - 'html_files' (list[str]): Reserved for per-scene HTML paths;
-                                            always empty as vector HTML output
-                                            is produced daily by the caller.
 
     Notes:
         - `start_date` and `end_date` in the return dict are derived from the
@@ -867,8 +799,6 @@ def create_scene_output(day, df_day, config, template_ds):
     scene_i_j = {}
     scene_frames = []
     nc_files = []
-    gpkg_files = []
-    html_files = []
 
     daily_start_date = pd.to_datetime(df_day['date_start'].min())
     daily_end_date   = pd.to_datetime(df_day['date_end'].max())
@@ -883,11 +813,12 @@ def create_scene_output(day, df_day, config, template_ds):
             f"date_range={day}"
         )
 
-        output_path = os.path.join(
-            config['formatted_data_dir'],
-            f"formatted_{scene_id}.csv"
-        )
-        df_scene.to_csv(output_path, index=False)
+        if config['level'] == '00':
+            output_path = os.path.join(
+                config['formatted_data_dir'],
+                f"formatted_{scene_id}.csv"
+            )
+            df_scene.to_csv(output_path, index=False)
 
         df_scene = util.outlier_search(
             df=df_scene,
@@ -902,15 +833,17 @@ def create_scene_output(day, df_day, config, template_ds):
         )
         scene_frames.append(df_scene)
 
-        nc_path = util.create_netcdf(
-            df=df_scene,
-            base_name=scene_id,
-            config=config,
-            template_ds=template_ds,
-            scene_i_j=scene_i_j
-        )
-        if nc_path:
-            nc_files.append(nc_path)
+        # only write NetCDF if it doesn't already exist
+        if not exists['nc_scenes'] or not exists['nc_daily']:
+            nc_path = util.create_netcdf(
+                df=df_scene,
+                base_name=scene_id,
+                config=config,
+                template_ds=template_ds,
+                scene_i_j=scene_i_j
+            )
+            if nc_path:
+                nc_files.append(nc_path)
 
     
     if scene_frames:
@@ -925,12 +858,10 @@ def create_scene_output(day, df_day, config, template_ds):
         'start_date': daily_start_date,
         'end_date':   daily_end_date,
         'nc_files':   nc_files,
-        'gpkg_files': gpkg_files,
-        'html_files': html_files
     }
             
     
-def create_daily_output(df_day, scene_output, config, template_ds):
+def create_daily_output(df_day, scene_output, config, template_ds, exists):
     """
     Combine all per-scene output files for a single day into daily products
     and write them to the file server directory.
@@ -1026,6 +957,7 @@ def create_daily_output(df_day, scene_output, config, template_ds):
 
     import util
     import os
+    import shutil
     import logging
 
     logger = logging.getLogger('sar_drift_converter')
@@ -1038,43 +970,46 @@ def create_daily_output(df_day, scene_output, config, template_ds):
 
 
     # multiple-layered netcdf
-    output_dir = os.path.join(config['file_server'], epsg, lvl, yr, 'nc')
-    os.makedirs(output_dir, exist_ok=True)
-    scenes_nc_path = os.path.join(
-        output_dir,
-        f"SIVelocity_SAR_{daily_start_date_str}_{daily_end_date_str}"
-        f"_scenes_12km_NH_{config['epsg']}_PL{config['level']}"
-        f"_v{config['version']}.nc"
-    )
-    util.combine_daily_netcdf_files(
-        config=config,
-        nc_files=scene_output['nc_files'],
-        template_ds=template_ds,
-        daily_start_date=scene_output['start_date'],
-        daily_end_date=scene_output['end_date'],
-        daily_nc_path=scenes_nc_path
-    )
+    if not exists['nc_scenes']:
+        output_dir = os.path.join(config['file_server'], epsg, lvl, yr, 'nc')
+        os.makedirs(output_dir, exist_ok=True)
+        scenes_nc_path = os.path.join(
+            output_dir,
+            f"SIVelocity_SAR_{daily_start_date_str}_{daily_end_date_str}"
+            f"_scenes_12km_NH_{config['epsg']}_PL{config['level']}"
+            f"_v{config['version']}.nc"
+        )
+        util.combine_daily_netcdf_files(
+            config=config,
+            nc_files=scene_output['nc_files'],
+            template_ds=template_ds,
+            daily_start_date=scene_output['start_date'],
+            daily_end_date=scene_output['end_date'],
+            daily_nc_path=scenes_nc_path
+        )
+
 
     # single-layer netcdf
-    daily_nc_path = os.path.join(
-        output_dir,
-        f"SIVelocity_SAR_{daily_start_date_str}_{daily_end_date_str}"
-        f"_daily_12km_NH_{config['epsg']}_PL{config['level']}"
-        f"_v{config['version']}.nc"
-    )
-    util.combine_daily_netcdf_files(
-        config=config,
-        nc_files=scene_output['nc_files'],
-        template_ds=template_ds,
-        daily_start_date=scene_output['start_date'],
-        daily_end_date=scene_output['end_date'],
-        daily_nc_path=daily_nc_path,
-        multi_layered=False
-    )
+    if not exists['nc_daily']:
+        daily_nc_path = os.path.join(
+            output_dir,
+            f"SIVelocity_SAR_{daily_start_date_str}_{daily_end_date_str}"
+            f"_daily_12km_NH_{config['epsg']}_PL{config['level']}"
+            f"_v{config['version']}.nc"
+        )
+        util.combine_daily_netcdf_files(
+            config=config,
+            nc_files=scene_output['nc_files'],
+            template_ds=template_ds,
+            daily_start_date=scene_output['start_date'],
+            daily_end_date=scene_output['end_date'],
+            daily_nc_path=daily_nc_path,
+            multi_layered=False
+        )
 
 
     # GeoPackage
-    if config['level'] in ['00', '02', '03']:
+    if not exists['gpkg']:
         output_dir = os.path.join(config['file_server'], epsg, lvl, yr, 'gpkg')
         os.makedirs(output_dir, exist_ok=True)
         gpkg_path = os.path.join(
@@ -1090,43 +1025,50 @@ def create_daily_output(df_day, scene_output, config, template_ds):
         )
 
 
-    # JSON vectors
-    if config['level'] in ['00', '03']:
-        output_dir = os.path.join(config['file_server'], epsg, lvl, yr, 'html')
+    # JSON vectors and HTML viewer
+    if not exists['json']:
+        output_dir = os.path.join(config['file_server'], epsg, lvl)
         data_dir = os.path.join(output_dir, "data")
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(data_dir, exist_ok=True)
 
         html_path = os.path.join(
             output_dir,
-            f"SIVelocity_SAR_{daily_start_date_str}_{daily_end_date_str}"
-            f"_daily_12km_NH_{config['epsg']}_PL{config['level']}"
-            f"_v{config['version']}.html"
+            config['html_vector_template']
         )
+                
         json_path = os.path.join(
             data_dir, f"si_velocity_{daily_start_date_str}.json"
         )
+        available_dates_path = os.path.join(
+            data_dir, 'available_dates.json'
+        )
+        
         util.create_vector_html_and_json(
             df=scene_output['df_scenes'],
             html_path=html_path,
             data_dir=data_dir,
             json_path=json_path,
+            available_dates_path=available_dates_path,
             config=config
         )
 
 
-    # formatted CSVs (always written)
-    output_path = os.path.join(
-        config['formatted_data_dir'],
-        f"{daily_start_date_str}_{daily_end_date_str}_raw.csv"
-    )
-    df_day.to_csv(output_path, index=False)
+    if config['level'] == '00':
+        # formatted CSVs
+        output_path = os.path.join(
+            config['formatted_data_dir'],
+            f"{daily_start_date_str}_{daily_end_date_str}_raw.csv"
+        )
+        df_day.to_csv(output_path, index=False)
+    
+        output_path = os.path.join(
+            config['formatted_data_dir'],
+            f"{daily_start_date_str}_{daily_end_date_str}_"
+            "processing_codes.csv"
+        )
+        scene_output['df_scenes'].to_csv(output_path, index=False)
 
-    output_path = os.path.join(
-        config['formatted_data_dir'],
-        f"{daily_start_date_str}_{daily_end_date_str}_processing_codes.csv"
-    )
-    scene_output['df_scenes'].to_csv(output_path, index=False)
 
     logger.info(
         f"Day {daily_start_date_str}_{daily_end_date_str} complete | "
@@ -1134,7 +1076,7 @@ def create_daily_output(df_day, scene_output, config, template_ds):
     )
 
 
-def create_level_output(level, epsg, config):
+def create_level_output(df_all, level, epsg, config):
     """
     Main execution workflow for converting SAR drift text files into
     GeoPackage, NetCDF, and Plotly HTML outputs.
@@ -1249,25 +1191,6 @@ def create_level_output(level, epsg, config):
     with xr.open_dataset(config['netcdf_template_file']) as ds:
         template_ds = ds.load()
 
-
-    # find files to process
-    files= []
-    if config['batch_process']:
-        all_files = glob(os.path.join(config['sar_drift_directory'], '*'))
-        for file in all_files:
-            if ('.txt' in file) or ('.csv' in file):
-                files.append(file)
-    else:
-        files = [config['sar_drift_filename']]
-        
-
-    logger.info(f"Input directory: {config['sar_drift_directory']}")
-    logger.info(f"Found {len(files)} candidate files")
-        
-    
-    # read all files into one DataFrame
-    df_all = combine_into_dataframe(files, config)
-    
     
     # apply row-level filters per File1/File2 scene group
     df_all = filter_input_data(df_all, config)
@@ -1280,67 +1203,75 @@ def create_level_output(level, epsg, config):
     )
     
     
-    # log rows that span more than one calendar day
-    multi_day = (
-        pd.to_datetime(df_all['date_end']).dt.strftime('%Y%m%d') !=
-        df_all['date_range']
-    )
-    if multi_day.any():
-        multi_count = multi_day.sum()
-        logger.info(
-            f"{multi_count} observations span more than one calendar day"
-        )
-        # log per scene
-        for scene_id, grp in df_all[multi_day].groupby('scene_id'):
-            max_span = (
-                pd.to_datetime(grp['date_end']).max() -
-                pd.to_datetime(grp['date_start']).min()
-            )
-            if max_span > pd.Timedelta(days=1):
-                logger.info(
-                    f"Multi-day scene: {scene_id} | "
-                    f"rows={grp.shape[0]} | max_span={max_span}"
-                )
+    ####################################################
+    # NEEDED TO DEBUG BUT NOT NECESSARY TO LOG ANYMORE #
+    ####################################################
+    # # log rows that span more than one calendar day
+    # multi_day = (
+    #     pd.to_datetime(df_all['date_end']).dt.strftime('%Y%m%d') !=
+    #     df_all['date_range']
+    # )
+    # if multi_day.any():
+    #     multi_count = multi_day.sum()
+    #     logger.info(
+    #         f"{multi_count} observations span more than one calendar day"
+    #     )
+    #     # log per scene
+    #     for scene_id, grp in df_all[multi_day].groupby('scene_id'):
+    #         max_span = (
+    #             pd.to_datetime(grp['date_end']).max() -
+    #             pd.to_datetime(grp['date_start']).min()
+    #         )
+    #         if max_span > pd.Timedelta(days=1):
+    #             logger.info(
+    #                 f"Multi-day scene: {scene_id} | "
+    #                 f"rows={grp.shape[0]} | max_span={max_span}"
+    #             )
     
    
     # create output: group by day, then by scene within each day
     start_days = {}
     for day, df_day in tqdm(
             df_all.groupby('date_range'), "Processing days..."
-        ):
+        ):        
         
-        # Build a lightweight stub to check file server before processing
+        logger.info(f"Processing day: {day}")
+        
         stub = {
             'start_date': pd.to_datetime(df_day['date_start']).min(),
             'end_date':   pd.to_datetime(df_day['date_end']).max(),
         }
-        
-        if daily_outputs_exist(stub, config):
-            logger.info(
-                f"Skipping {stub['start_date'].strftime('%Y%m%d')} — "
-                f"all level {config['level']} outputs already exist"
-            )
-            continue
 
-        # create output for each scene
+        exists = util._check_existing_files(stub, config)
+        
+        
+
+        # if all(exists.values()):
+        #     logger.info(
+        #         f"Skipping {stub['start_date'].strftime('%Y%m%d')}. "
+        #         f"All level {config['level']} outputs already exist"
+        #     )
+        #     continue
+
+        # create scene output with outliers if applicable
         scene_output = create_scene_output(
             day=day,
             df_day=df_day,
             config=config,
-            template_ds=template_ds
+            template_ds=template_ds,
+            exists=exists
         )
-        
-        
-        # check start days will not be overwritten
-        key = scene_output['start_date'].strftime("%Y%m%d")
-        if not key in start_days:
+
+        key = scene_output['start_date'].strftime('%Y%m%d')
+        if key not in start_days:
             start_days[key] = ''
         else:
             print(f"Duplicate {key}")
             exit()
+
             
         # combine all created daily files into one
-        create_daily_output(df_day, scene_output, config, template_ds)
+        create_daily_output(df_day, scene_output, config, template_ds, exists)            
     
 
     # final log entry
@@ -1354,42 +1285,70 @@ def create_level_output(level, epsg, config):
 def process_level_output(test=False):
     """
     Top-level entry point for the SAR drift output generation pipeline.
-
-    Parses and validates configuration via `read_json_config()`, clears and
-    recreates the log directory, initialises a single timestamped log file
-    for the entire run, then dispatches one or more `create_level_output()`
-    calls for the desired processing level and EPSG projection combinations.
+ 
+    Parses and validates configuration via `read_json_config()`, compresses
+    any existing log files to ZIP archives, initialises a fresh timestamped
+    log file, reads all input gfilter files in parallel into a single raw
+    DataFrame, applies coordinate projections for each target EPSG, then
+    dispatches `create_level_output()` for each level/EPSG combination.
     Logs total elapsed time on completion.
-
-    A single log file covers all level/EPSG combinations in the run. Log
-    entries include the level and EPSG for each processing stage so that
-    output for a specific combination can be filtered from the log.
-
+ 
     This function is intended to be called only when the script is run
-    directly (`__name__ == '__main__'`).
-
+    directly (`__name__ == "__main__"`).
+ 
     Workflow:
         1. Parse and validate runtime configuration via `read_json_config()`.
-        2. Clear the log directory specified by `config['log_dir']` and
-           recreate it to remove logs from previous runs.
-        3. Initialise a single timestamped log file via `setup_logger()`.
-        4. Call `create_level_output()` for each active level/EPSG
-           combination. Inactive combinations are commented out in the
-           source and can be enabled as needed.
-        5. Log total elapsed run time on completion.
-
+        2. Compress any existing `.log` files in `config['log_dir']` to
+           `.zip` archives, then initialise a fresh timestamped log file
+           via `setup_logger()`.
+        3. Glob-match all `.txt`|`.csv` input files from
+           `config['sar_drift_directory']` (batch mode) or use the single
+           file at `config['sar_drift_filename']` (single-file mode).
+        4. Read all input files in parallel into a single raw DataFrame
+           (`combine_into_dataframe`). File reads use ProcessPoolExecutor
+           across all available CPU cores. Processing halts immediately on
+           any file read failure.
+        5. Apply EPSG-dependent coordinate projection once per target EPSG
+           (`util._apply_projection`), producing one projected DataFrame
+           per CRS. EPSGs processed: [3413, 6931]. This step is cheap
+           (vectorized numpy/pyproj) compared to file I/O and runs after
+           all files are combined.
+        6. For each level/EPSG combination, call `create_level_output()`
+           with the pre-projected DataFrame for that EPSG.
+        7. Log total elapsed run time on completion.
+ 
+    Args:
+        test (bool): If True, only processing level '00' is run instead of
+            the full production set ('01', '02', '03'). Defaults to
+            False.
+ 
     Notes:
-        - To enable additional level/EPSG combinations, uncomment the
-          corresponding `create_level_output()` calls in the source.
+        - Processing levels are hardcoded: ['01', '02', '03'] in
+          production, ['00'] in test mode. They are not read from
+          `config.json`.
+        - EPSG codes are hardcoded as [3413, 6931]. Up to four EPSGs are
+          supported without meaningful performance impact since file I/O
+          runs only once and projection is applied per EPSG from the
+          already-loaded DataFrame.
+        - Previous log files are compressed to ZIP before the new log is
+          created, preserving run history without accumulating uncompressed
+          log files.
+        - All level/EPSG combinations share one log file for the run.
+          Filter log entries by level or EPSG to isolate output for a
+          specific combination.
         - Pyproj CRS configuration is applied at startup via `pyproj_setup`.
-        - All level/EPSG combinations share one log file. Filter log entries
-          by level or EPSG to isolate output for a specific combination.
+        - On Windows, ProcessPoolExecutor uses the `spawn` start method.
+          This function must only be called from within a
+          `if __name__ == "__main__"` guard to prevent recursive worker
+          spawning.
     """
     
     import pyproj_setup
+    import util
     import os
-    import shutil
     from datetime import datetime
+    import zipfile
+    from glob import glob
     
     
     run_start = datetime.utcnow()
@@ -1398,25 +1357,61 @@ def process_level_output(test=False):
     config = read_json_config()
     
     # initialize logger
-    # clear and recreate log directory
-    if os.path.exists(config['log_dir']):
-        shutil.rmtree(config['log_dir'])
     os.makedirs(config['log_dir'], exist_ok=True)
+    for log_file in glob(os.path.join(config['log_dir'], '*.log')):        
+        zip_path = log_file.replace('.log', '.zip')
+        print(f'Compressing {log_file}')
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            zf.write(log_file, os.path.basename(log_file))
+        os.remove(log_file)
     logger, log_path = setup_logger(config['log_dir'])
     logger.info(
         f"Process started | {run_start}"
     )
-    
-    
-    if test:
-        create_level_output('00', 3413, config)
+
+
+    # find files to process
+    print("Gathering files to process...")
+    files= []
+    if config['batch_process']:
+        all_files = glob(os.path.join(config['sar_drift_directory'], '*'))
+        for file in all_files:
+            if ('.txt' in file) or ('.csv' in file):
+                files.append(file)
     else:
-        create_level_output('01', 3413, config)
-        create_level_output('01', 6931, config)
-        create_level_output('02', 3413, config)
-        create_level_output('02', 6931, config)
-        create_level_output('03', 3413, config)
-        create_level_output('03', 6931, config)
+        files = [config['sar_drift_filename']]
+        
+
+    logger.info(f"Input directory: {config['sar_drift_directory']}")
+    logger.info(f"Found {len(files)} candidate files")
+    
+    
+    # read data files and load them into a data frame
+    df_raw = combine_into_dataframe(files, config)
+
+    espg_list = [3413, 6931]
+    if test:
+        processing_levels = ['00']
+    else:
+        processing_levels = ['01', '02', '03']
+    
+    obs_read=df_raw.shape[0]
+    total_days=df_raw['date_start'].dt.date.nunique()
+    total_scenes=len(df_raw[['File1', 'File2']].drop_duplicates())
+    logger.info(
+        f'Input data totals | total observations: {obs_read}; '
+        f'total days: {total_days}; total scenes: {total_scenes}'
+    )
+    
+    df_by_epsg = {}
+    for epsg in espg_list:
+        df_by_epsg[epsg] = util._apply_projection(df_raw, epsg, config)
+    
+    for level in processing_levels:
+        for epsg in espg_list:
+            config['level'] = level
+            config['epsg'] = epsg
+            create_level_output(df_by_epsg[epsg], level, epsg, config)
 
 
     # final log entry

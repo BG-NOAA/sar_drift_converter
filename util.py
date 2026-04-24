@@ -234,23 +234,288 @@ def error_msg(msg):
 #===================
 # Internal functions
 #===================
+
+def _init_stats(obs_read, total_days, total_scenes, processing_levels):
+    """
+    Initialize a nested statistics dictionary for each processing level.
+
+    Args:
+        processing_levels (list[str]): e.g. ['01', '02', '03']
+
+    Returns:
+        dict: Keyed by level string. Each value is a dict of
+              accumulators ready for in-place mutation during the run.
+    """
+    stats = {}
+    stats['obs_read'] = obs_read
+    stats['total_days'] = total_days
+    stats['total_scenes'] = total_scenes
+    for level in processing_levels:
+        stats[level] = {
+            # filtering (filter_input_data)
+            'obs_dropped_bearing_speed':  0,
+            'obs_dropped_maxcorr_row':    0,
+            'scenes_rejected_maxcorr':    0,
+            'scenes_rejected_threshold':  0,
+            'scenes_accepted':            0,
+            'scenes_using_75km':          0,
+
+            # per-day accumulators
+            'day': {
+                'scenes_per_day':  0,
+                'vectors_per_day': 0,
+                'speed': {
+                    'mean':    0.0,
+                    'median':  0.0,
+                    'std_dev': 0.0,
+                    'min':     0.0,
+                    'max':     0.0
+                },
+                'outliers': {
+                    'distance':     0,
+                    'bearing':      0,
+                    'mahalanobis':  0,
+                    'dist_bear':    0,
+                    'md_dist':      0,
+                    'md_bear':      0,
+                    'md_dist_bear': 0
+                }
+            }
+        }
+    return stats
+
+
+def _summarize_stats(stats):
+    import numpy as np
+    
+    final_stats = {}
+    final_stats['obs_read'] = stats['obs_read']
+    final_stats['total_days'] = stats['total_days']
+    final_stats['total_scenes'] = stats['total_scenes']
+    
+    # for level, level_stats in stats.items():
+    #     final_stats['level'] =  level
+    #     final_stats['scenes_per_day_mean'] = np.mean(level_stats['day']['scenes_per_day'])
+    #     final_stats['speed_mean'] = np.mean(level_stats['day']['speed']['mean'])
+            
+    return final_stats
+
+
+def _read_gfilter_file(args):
+    """
+    Resolve the correct file path for a single gfilter entry and read it
+    into a raw DataFrame. Intended for use as a module-level worker
+    function with ProcessPoolExecutor.
+ 
+    Checks whether a 75 km counterpart exists for the given 50 km file and
+    reads the 75 km version if so. Adds `_use_75km` and `_source_file`
+    columns to the returned DataFrame. The returned DataFrame contains only
+    EPSG-independent columns as produced by `util.read_sar_drift_data_file`;
+    projection-dependent columns are added later by `util._apply_projection`.
+ 
+    This function must be defined at module level (not nested inside another
+    function) so that it can be pickled by ProcessPoolExecutor on Windows,
+    where the `spawn` start method is used.
+ 
+    Args:
+        args (tuple): A two-element tuple of (gfilter_path, config) where
+            gfilter_path (str) is the path to the 50 km gfilter file and
+            config (dict) is the configuration dictionary passed directly
+            to `util.read_sar_drift_data_file`. Must include `delimiter`.
+ 
+    Returns:
+        pandas.DataFrame: Single-file raw DataFrame with `_use_75km` (bool)
+            and `_source_file` (str) columns appended.
+ 
+    Raises:
+        Exception: Re-raises any exception encountered during file reading,
+            causing the ProcessPoolExecutor in the caller to terminate and
+            propagate the error to the main process. Processing halts
+            immediately on failure.
+ 
+    Notes:
+        - File extensions containing an underscore suffix (e.g. '.txt_0')
+          are normalized by truncating at the first underscore before the
+          75 km path substitution is attempted.
+        - The 75 km counterpart path is derived by replacing `_0050000m_`
+          with `_0075000m_` in the normalized path. If the path is unchanged
+          or the 75 km file does not exist, the original path is used.
+        - Header row detection is handled automatically inside
+          `util.read_sar_drift_data_file` via `_detect_skip_rows`.
+    """
+    
+    import util
+    import os
+
+    gfilter_path, config = args
+
+    basename, ext = os.path.splitext(gfilter_path)
+    if '_' in ext:
+        ext = ext.split('_')[0]
+    normalized = basename + ext
+
+    path_75km = normalized.replace('_0050000m_', '_0075000m_')
+    use_75km = (path_75km != normalized and os.path.exists(path_75km))
+    read_path = path_75km if use_75km else gfilter_path
+
+    try:
+        df = util.read_sar_drift_data_file(input_file=read_path, config=config)
+        df['_use_75km'] = use_75km
+        df['_source_file'] = os.path.basename(read_path)
+        return df
+    except Exception as e:
+        import traceback
+        print(
+            f"ERROR reading {os.path.basename(read_path)}: "
+            f"{type(e).__name__}: {e}"
+        )
+        traceback.print_exc()
+        raise
+    
+
+def _check_existing_files(scene_output_stub, config):
+    """
+    Check which expected daily output files already exist for a given day.
+
+    Returns a dictionary mapping each output type to a bool indicating
+    whether that file already exists on disk. This allows the processing
+    loop to skip only the specific outputs that are already present rather
+    than skipping the entire day, enabling partial-day resume after an
+    interrupted run.
+
+    Args:
+        scene_output_stub (dict): Lightweight dict containing date bounds
+            for the day being checked. Must contain:
+                - `start_date` (pandas.Timestamp): Minimum date_start for
+                  the day.
+                - `end_date`   (pandas.Timestamp): Maximum date_end for
+                  the day.
+        config (dict): Configuration dictionary. Must include:
+                - `file_server` (str): Root output path.
+                - `epsg` (int): Target projected CRS code.
+                - `level` (str): Processing level ('00'–'03').
+                - `version` (str): Version string for filename construction.
+                - `overwrite` (bool): If True, all values are returned as
+                  False regardless of file existence, except `json` which
+                  is returned as True for levels that do not produce JSON
+                  output ('01', '02').
+
+    Returns:
+        dict: Keys are output type strings, values are bool indicating
+            whether the file exists on disk. Possible keys:
+                - `nc_scenes` (bool): Multi-layer scenes NetCDF.
+                - `nc_daily`  (bool): Single-layer daily NetCDF.
+                - `gpkg`      (bool): GeoPackage. Always True for levels
+                  that do not produce GeoPackage output ('01').
+                - `json`      (bool): Vector JSON data file. Always True
+                  for levels that do not produce JSON output ('01', '02').
+            If `config['overwrite']` is True, all values are False except
+            `json`, which is True for levels '01' and '02'.
+
+    Notes:
+        - The checked paths mirror exactly the paths written by
+          `create_daily_output` for the same level/EPSG/version combination.
+        - `gpkg` and `json` are set to True (treated as already existing)
+          for levels that never produce those outputs, so callers can check
+          `all(exists.values())` uniformly to decide whether to skip a day
+          entirely.
+        - GeoPackage is produced for levels '00', '02', and '03'. The
+          existence check uses the daily base filename with a `.gpkg`
+          extension under `<file_server>/<epsg>/<level>/<year>/gpkg/`.
+        - JSON is produced for levels '00' and '03' only. The existence
+          check looks for `si_velocity_<start>.json` under
+          `<file_server>/<epsg>/<level>/data/`.
+        - When `overwrite` is True, all values are False for levels that
+          produce that output type, causing those outputs to be regenerated
+          unconditionally.
+    """
+    
+    import os
+
+    if config['overwrite']:
+        if config['level'] in ['00', '03']:
+            return {
+                'nc_scenes': False,
+                'nc_daily':  False,
+                'gpkg':      False,
+                'json':      False
+            }
+        elif config['level'] == '01':
+            return {
+                'nc_scenes': False,
+                'nc_daily':  False,
+                'gpkg':      True,
+                'json':      True
+            }
+        elif config['level'] == '02':
+            return {
+                'nc_scenes': False,
+                'nc_daily':  False,
+                'gpkg':      False,
+                'json':      True
+            }
+
+
+
+    start = scene_output_stub['start_date'].strftime('%Y%m%d')
+    end   = scene_output_stub['end_date'].strftime('%Y%m%d')
+    epsg  = str(config['epsg'])
+    lvl   = f"Processing Level - {config['level']} (PL{config['level']})"
+    yr    = start[:4]
+    base  = (
+        f"SIVelocity_SAR_{start}_{end}_daily_12km_NH_{config['epsg']}_"
+        f"PL{config['level']}_v{config['version']}"
+    )
+    nc_dir   = os.path.join(config['file_server'], epsg, lvl, yr, 'nc')
+    gpkg_dir = os.path.join(config['file_server'], epsg, lvl, yr, 'gpkg')
+    data_dir = os.path.join(config['file_server'], epsg, lvl, 'data')
+
+
+    # check GeoPackage
+    gpkg_exists = True
+    if config['level'] in ['00', '02', '03']:
+        gpkg_exists = os.path.exists(os.path.join(gpkg_dir, f"{base}.gpkg"))
+        
+    # check JSON        
+    json_exists = True
+    if config['level'] in ['00', '03']:
+        json_exists = os.path.exists(
+            os.path.join(data_dir, f"si_velocity_{start}.json")
+        )
+
+    
+    result = {
+        'nc_scenes': os.path.exists(os.path.join(
+            nc_dir,
+            f"SIVelocity_SAR_{start}_{end}_scenes_12km_NH_{config['epsg']}"
+            f"_PL{config['level']}_v{config['version']}.nc"
+        )),
+        'nc_daily': os.path.exists(os.path.join(nc_dir, f"{base}.nc")),
+        'gpkg':     gpkg_exists,
+        'json':     json_exists
+    }
+    return result
+
+
 def _detect_skip_rows(input_file):
-    """Peek at the input file to determine how many rows to skip before
+    """
+    Peek at the input file to determine how many rows to skip before
     the header.
 
-    Reads up to the first 3 lines and checks each one to see if it contains
+    Reads up to the first 10 lines and checks each one to see if it contains
     the expected header fields ('File1' and 'File2'). Returns the 0-based
     index of the header line, which is the number of rows pd.read_csv
     should skip.
 
     Args:
-        input_file: Path to the SAR drift gfilter text file.
+        input_file (str): Path to the SAR drift gfilter text file.
 
     Returns:
-        Number of rows to skip (0 if header is on line 1).
+        int: Number of rows to skip (0 if header is on the first line).
 
     Raises:
-        Error if no header row is found within the first 10 lines.
+        SystemExit: Via `util.error_msg` if no header row is found within
+                    the first 10 lines.
     """
     
     with open(input_file, 'r') as f:
@@ -289,8 +554,8 @@ def _set_metadata(config):
                                        (e.g. 'meta/sar_drift_output.cdl').
             - 'epsg' (str | int): EPSG code used to select the correct
                                   CDL file (e.g. 3413).
-            - 'level' (str): Processing level used in the output .nc
-                             filename (e.g. 'scene', 'daily').
+            - 'level' (str): Processing level used in the output .nc filename
+                             (e.g. '03'). One of '00', '01', '02', '03'.
 
     Returns:
         xarray.Dataset: Dataset containing only metadata from the
@@ -345,6 +610,131 @@ def _set_metadata(config):
     return xr.open_dataset(ncgen_ofile_nc, decode_times=False)
 
 
+def _apply_projection(df_raw, epsg, config):
+    """
+    Apply a projected coordinate transformation to a raw SAR drift DataFrame.
+
+    Reprojects start and end positions from EPSG:4326 to the target CRS
+    specified by `epsg` using `_calculate_drift_daily`, then assigns all
+    projection-dependent columns to a copy of the input DataFrame. Columns
+    that are independent of projection — timestamps, raw geographic
+    coordinates, duration, sensor identifiers, and source file metadata —
+    are preserved unchanged from `df_raw`.
+
+    This function is intended to be called once per EPSG after
+    `combine_into_dataframe` has loaded and concatenated all raw input
+    files, allowing the expensive parallel file I/O step to run exactly
+    once regardless of how many target projections are required.
+
+    Args:
+        df_raw (pandas.DataFrame): Raw combined DataFrame as returned by
+            `combine_into_dataframe` after `read_sar_drift_data_file` has
+            been called for each file. Must contain the following columns:
+                - 'latitude_1', 'longitude_1' (float): Start position
+                  (EPSG:4326, degrees).
+                - 'latitude_2', 'longitude_2' (float): End position
+                  (EPSG:4326, degrees).
+                - 'duration' (float): Observation duration in seconds.
+        epsg (int): EPSG code for the target projected CRS
+                    (e.g. 3413 for NSIDC Sea Ice Polar Stereographic North,
+                    6931 for EASE-Grid 2.0 North).
+        config (dict): Configuration dictionary. Must include:
+                - 'speed_precision' (int): Decimal places for rounding speed,
+                  displacement, and distance columns.
+                - 'bearing_precision' (int): Decimal places for rounding
+                  the bearing column.
+
+    Returns:
+        pandas.DataFrame: Copy of `df_raw` with the following columns
+            added based on the target `epsg`:
+
+            Projected coordinates (EPSG:`epsg`, metres):
+                - 'X1' (float): x-coordinate of start position.
+                - 'Y1' (float): y-coordinate of start position.
+                - 'X2' (float): x-coordinate of end position.
+                - 'Y2' (float): y-coordinate of end position.
+
+            Displacement and velocity (EPSG:`epsg`):
+                - 'sea_ice_x_displacement' (float): X2 − X1 (m), rounded
+                  to `config['speed_precision']` decimal places.
+                - 'sea_ice_y_displacement' (float): Y2 − Y1 (m), rounded
+                  to `config['speed_precision']` decimal places.
+                - 'u' (float): sea_ice_x_displacement / duration
+                  (m s⁻¹).
+                - 'v' (float): sea_ice_y_displacement / duration
+                  (m s⁻¹).
+
+            Speed and direction (geodesic, WGS84 ellipsoid):
+                - 'sea_ice_speed' (float): Geodesic speed (m s⁻¹), rounded
+                  to `config['speed_precision']` decimal places.
+                - 'sea_ice_speed_kmdy' (float): Geodesic speed (km day⁻¹),
+                  rounded to `config['speed_precision']` decimal places.
+                - 'direction_of_sea_ice_displacement' (float): Forward
+                  azimuth (degrees), rounded to
+                  `config['bearing_precision']` decimal places.
+                - 'distance' (float): Geodesic distance (m), rounded to
+                  `config['speed_precision']` decimal places.
+
+    Notes:
+        - The returned DataFrame is a copy; `df_raw` is not modified.
+        - Speed and direction columns (`sea_ice_speed`, `sea_ice_speed_kmdy`,
+          `direction_of_sea_ice_displacement`, `distance`) are derived from
+          the WGS84 geodesic and are mathematically independent of the target
+          EPSG. They are computed here because `_calculate_drift_daily`
+          produces them alongside the projection-dependent quantities.
+        - `X1`, `Y1`, `X2`, `Y2`, `sea_ice_x_displacement`,
+          `sea_ice_y_displacement`, `u_ms`, and `v_ms` will differ between
+          EPSG:3413 and EPSG:6931 because the Cartesian axes of each
+          projection are oriented differently.
+        - A pyproj warning about database path setup is suppressed inside
+          `_calculate_drift_daily` because it is expected in this runtime
+          environment.
+    """
+
+    import numpy as np
+
+    df = df_raw.copy()
+
+    drift = _calculate_drift_daily(
+        lat1=df['latitude_1'].values,
+        lon1=df['longitude_1'].values,
+        lat2=df['latitude_2'].values,
+        lon2=df['longitude_2'].values,
+        duration=df['duration'].values,
+        epsg=epsg
+    )
+
+    df['X1'] = drift['X1']
+    df['Y1'] = drift['Y1']
+    df['X2'] = drift['X2']
+    df['Y2'] = drift['Y2']
+    df['sea_ice_x_displacement'] = np.round(
+        drift['dx'], config['speed_precision']
+    )
+    df['sea_ice_y_displacement'] = np.round(
+        drift['dy'], config['speed_precision']
+    )
+    df['u'] = drift['u']
+    df['v'] = drift['v']
+    df['sea_ice_speed'] = np.round(
+        drift['speed_ms'], config['speed_precision']
+    )
+    df['sea_ice_speed_kmdy'] = np.round(
+        drift['speed_kmdy'], config['speed_precision']
+    )
+    df['direction_of_sea_ice_displacement'] = np.round(
+        drift['bearing'], config['bearing_precision']
+    )
+    df['distance'] = np.round(
+        drift['distance'], config['speed_precision']
+    )
+    df['distance_geod'] = np.round(
+        drift['distance_geod'], config['speed_precision']
+    )
+
+    return df
+
+
 def _calculate_drift_daily(lat1, lon1, lat2, lon2, duration, epsg):
     """
     Compute sea-ice drift kinematics from start/end geographic coordinates.
@@ -362,11 +752,10 @@ def _calculate_drift_daily(lat1, lon1, lat2, lon2, duration, epsg):
         lon2 (array-like): Ending longitudes in decimal degrees (EPSG:4326).
         duration (array-like): Observation duration in seconds
                                   (Time2_JS − Time1_JS).
-        config (dict): Configuration dictionary. Expected keys:
-            - 'epsg' (int): EPSG code for the target projected CRS used for
-              coordinate transformation and displacement computation
-              (e.g. 3413 for NSIDC Sea Ice Polar Stereographic North,
-              3411 for NSIDC Polar Stereographic North with Hughes ellipsoid).
+        epsg (int): EPSG code for the target projected CRS used for
+                    coordinate transformation and displacement computation
+                    (e.g. 3413 for NSIDC Sea Ice Polar Stereographic North,
+                    6931 for EASE-Grid 2.0).
  
     Returns:
         dict: Dictionary of derived drift quantities with the following keys:
@@ -587,7 +976,7 @@ def _add_json_templates(data_dir, config):
     import shutil
 
     template_names = [
-        'land.geojson', 'coastline.geojson', 'graticule.geojson', 'grid.json'
+        'land.geojson', '10m_coastline_50N.geojson', 'graticule_50N.geojson'
     ]
 
     for template_name in template_names:
@@ -661,224 +1050,139 @@ def _circular_std(a):
 def read_sar_drift_data_file(input_file, config):
     """
     Read and preprocess a SAR ice-drift text data file into a standardized
-    DataFrame.
-    
-    This function loads a SAR drift data file (CSV-like text) using parsing
-    rules provided in `config`, cleans column names, and derives projected
-    coordinates, displacement, velocity, speed, and sensor identifier fields.
-    Several raw source columns are renamed for consistency with NetCDF/
-    GeoPackage output naming, and columns that are not needed downstream
-    are dropped.
-    
+    raw DataFrame.
+
+    Loads a SAR drift data file (CSV-like text) using parsing rules provided
+    in `config`, cleans column names, converts Julian-second timestamps to
+    human-readable datetime strings, computes observation duration, extracts
+    sensor and scene identifiers, renames geographic coordinate columns for
+    consistency with downstream output naming, and reduces the DataFrame to
+    only the columns needed for downstream processing.
+
+    Projection-dependent quantities (projected coordinates, displacement,
+    velocity, speed, bearing) are NOT computed here. They depend on a target
+    EPSG and are applied separately by `_apply_projection` after all files
+    have been read and combined. This separation allows the expensive file
+    I/O step to run exactly once regardless of how many target projections
+    are required.
+
     Processing steps:
-        1. Read the file with `pandas.read_csv()` using delimiter and header
-           offsets from `config`.
-        2. Strip whitespace from column names.
-        3. Convert Julian seconds timestamps (`Time1_JS`, `Time2_JS`) to
+        1. Detect the header row automatically via `_detect_skip_rows`,
+           which scans the first 10 lines for the row containing 'File1'
+           and 'File2'.
+        2. Read the file with `pandas.read_csv()` using the detected row
+           offset and the delimiter from `config`.
+        3. Strip whitespace from column names.
+        4. Convert Julian seconds timestamps (`Time1_JS`, `Time2_JS`) to
            human-readable datetime strings (`date_start`, `date_end`).
-        4. Compute observation duration in seconds (`duration`).
-        5. Project start/end lat/lon to EPSG:`config['epsg']` and compute
-           displacement, velocity, speed, bearing, and geodesic distance via
-           `_calculate_drift_daily`.
-        6. Round all coordinate, displacement, velocity, speed, bearing, and
-           distance fields according to precision keys in `config`.
-        7. Extract sensor identifiers from `File1`/`File2` into `sensor1`/
-           `sensor2`.
-        8. Rename geographic coordinate columns:
+        5. Compute observation duration in seconds (`duration`).
+        6. Extract sensor identifiers from `File1`/`File2` into `sensor1`/
+           `sensor2` and construct `scene_id`.
+        7. Rename geographic coordinate columns:
                Lat1 → latitude_1,  Lon1 → longitude_1
                Lat2 → latitude_2,  Lon2 → longitude_2
-        9. Drop source columns that are not used in any output:
-               Time1_JS, Time2_JS, U_vel_ms, V_vel_ms, Speed_kmdy, Bear_deg,
-               img1_mean, img1_std, img2_mean, img2_std, img1s_mean, img1s_std,
-               Npnt, Offset1, Offset2
-    
+        8. Reduce the DataFrame to only the columns needed for downstream
+           processing.
+
     Args:
         input_file (str or pathlib.Path): Path to the SAR drift data file
                                           to read.
-        config (dict): Parsing and precision configuration. Expected keys:
+        config (dict): Parsing configuration. Expected keys:
             - 'delimiter' (str): Field delimiter passed to `pd.read_csv`.
-            - 'epsg' (int): EPSG code for the target projected CRS used by
-              `_calculate_drift_daily` (e.g. 3413 for NSIDC Sea Ice Polar
-              Stereographic North). Controls the projection used for X1, Y1,
-              X2, Y2, dx, dy, u, and v.
-            - 'coordinate_precision' (int): Decimal places for geographic
-              coordinates (Lat1, Lon1, Lat2, Lon2) and projected coordinates
-              (X1, Y1, X2, Y2).
-            - 'displacement_precision' (int): Decimal places for
-              `sea_ice_x_displacement`, `sea_ice_y_displacement`, `u` and `v`.
-            - 'speed_precision' (int): Decimal places for `sea_ice_speed`,
-              `sea_ice_speed_kmdy`, `distance`, and `distance_geod`.
-            - 'bearing_precision' (int): Decimal places for
-              `direction_of_sea_ice_displacement`.
-    
+
     Returns:
-        pandas.DataFrame: Cleaned and enriched SAR drift DataFrame. Raw source
-        columns are preserved (except those listed as dropped above) together
-        with the following derived and renamed columns:
-    
-        Renamed geographic coordinates (rounded to `coordinate_precision`):
-            - 'latitude_1'  (float): Starting latitude  (degrees, from Lat1)
-            - 'longitude_1' (float): Starting longitude (degrees, from Lon1)
-            - 'latitude_2'  (float): Ending latitude    (degrees, from Lat2)
-            - 'longitude_2' (float): Ending longitude   (degrees, from Lon2)
-    
-        Derived timestamps and duration:
-            - 'date_start' (str): Start datetime in '%Y-%m-%d %H:%M:%S'
-                                  (from Time1_JS)
-            - 'date_end'   (str): End datetime in '%Y-%m-%d %H:%M:%S'
-                                  (from Time2_JS)
-            - 'duration' (float): Observation duration in seconds
-                                    (Time2_JS - Time1_JS); not rounded.
-    
-        Projected coordinates (EPSG:`config['epsg']`, meters; rounded to
-        `coordinate_precision`):
-            - 'X1', 'Y1': Start position
-            - 'X2', 'Y2': End position
-    
-        Displacement and velocity (EPSG:`config['epsg']`; rounded to
-        `displacement_precision`):
-            - 'sea_ice_x_displacement' (float): X2 - X1  (m)
-            - 'sea_ice_y_displacement' (float): Y2 - Y1  (m)
-            - 'u' (float): sea_ice_x_displacement / duration  (m/s)
-            - 'v' (float): sea_ice_y_displacement / duration  (m/s)
-    
-        Speed and direction (rounded to `speed_precision` unless noted):
-            - 'sea_ice_speed'      (float): geodesic speed (m/s)
-            - 'sea_ice_speed_kmdy' (float): geodesic speed (km/day)
-            - 'direction_of_sea_ice_displacement' (float): forward azimuth
-                                            (degrees); rounded to
-                                            `bearing_precision`
-            - 'distance'      (float): projected displacement magnitude (m)
-            - 'distance_geod' (float): geodesic great-circle distance (m)
-    
-        Sensor and scene identifiers:
-            - 'scene_id' (str): Combination of 'File1' and 'File2' separated
-                                by underscore
-            - 'sensor1'  (str): Satellite identifier from File1
-                                (prefix before first underscore)
-            - 'sensor2'  (str): Satellite identifier from File2
-                                (prefix before first underscore)
-    
+        pandas.DataFrame: Cleaned raw SAR drift DataFrame containing the
+            following columns:
+
+            Renamed geographic coordinates (EPSG:4326, degrees):
+                - 'latitude_1'  (float): Starting latitude  (from Lat1).
+                - 'longitude_1' (float): Starting longitude (from Lon1).
+                - 'latitude_2'  (float): Ending latitude    (from Lat2).
+                - 'longitude_2' (float): Ending longitude   (from Lon2).
+
+            Derived timestamps and duration:
+                - 'date_start' (str): Start datetime string
+                  ('%Y-%m-%d %H:%M:%S'), converted from Time1_JS.
+                - 'date_end'   (str): End datetime string
+                  ('%Y-%m-%d %H:%M:%S'), converted from Time2_JS.
+                - 'duration' (float): Observation duration in seconds
+                  (Time2_JS − Time1_JS).
+
+            Sensor and scene identifiers:
+                - 'sensor1'  (str): Satellite identifier from File1
+                                    (prefix before first underscore).
+                - 'sensor2'  (str): Satellite identifier from File2.
+                - 'scene_id' (str): File1 and File2 joined by underscore.
+
+            Scene pair identifiers and correlation scores:
+                - 'File1', 'File2' (str): Raw scene pair filenames.
+                - 'Maxcorr1', 'Maxcorr2' (float): Cross-correlation scores
+                  used for scene-level quality filtering downstream.
+
     Notes:
         - SAR time fields `Time1_JS` and `Time2_JS` are seconds since
-          2000-01-01 00:00:00.
-        - A specific `pyproj` warning about database path setup is suppressed
-          because it is expected in this runtime environment.
-        - Required source columns: 'Time1_JS', 'Time2_JS', 'Lat1', 'Lon1',
-          'Lat2', 'Lon2', 'File1', 'File2'. The columns 'Bear_deg',
-          'Speed_kmdy', 'U_vel_ms', 'V_vel_ms' must also be present but are
-          dropped after processing.
+          2000-01-01 00:00:00 UTC.
+        - Header row detection is performed automatically by
+          `_detect_skip_rows`. No configuration key or argument is required
+          to control this — the function always scans the file to locate
+          the header.
+        - Projection-dependent columns (X1, Y1, X2, Y2,
+          sea_ice_x_displacement, sea_ice_y_displacement, u, v,
+          sea_ice_speed, sea_ice_speed_kmdy,
+          direction_of_sea_ice_displacement, distance, distance_geod)
+          are not present in the returned DataFrame. Call
+          `_apply_projection(df, epsg, config)` to add them after all
+          files have been combined.
     """
-    
-    import logging
-    import numpy as np
+
     import pandas as pd
     from datetime import datetime, timedelta
-    
-    
-    # Read the SAR drift data file
+
     skip_rows = _detect_skip_rows(input_file)
-    logger = logging.getLogger('sar_drift_converter')
-    logger.info(f'Input file rows skipped before header {skip_rows}')
+
+    # read the SAR drift data file
     df = pd.read_csv(
         input_file, delimiter=config['delimiter'],
         header=0, engine='c', skiprows=skip_rows
     )
     df.columns = df.columns.str.strip()
 
-    
-    # Add the appropriate input file to a data frame
-    # Julian seconds start from date 01-01-2000
+    # convert Julian seconds (epoch: 2000-01-01) to datetime strings
     base_time = datetime(2000, 1, 1)
-
-    # Create new Date* columnc by converting Time_JS* columns to datetime
-    df['date_start'] = df["Time1_JS"].apply(
+    df['date_start'] = df['Time1_JS'].apply(
         lambda x: base_time + timedelta(seconds=x)
-        )
+    )
     df['date_start'] = df['date_start'].dt.strftime('%Y-%m-%d %H:%M:%S')
-    df['date_end'] = df["Time2_JS"].apply(
+    df['date_end'] = df['Time2_JS'].apply(
         lambda x: base_time + timedelta(seconds=x)
-        )
+    )
     df['date_end'] = df['date_end'].dt.strftime('%Y-%m-%d %H:%M:%S')
-    
 
-    # Calculate duration of observations in seconds
-    df['duration'] = (
-        df['Time2_JS'] - df['Time1_JS']
-    )
-    
-    drift = _calculate_drift_daily(
-        lat1=df['Lat1'].values,
-        lon1=df['Lon1'].values,
-        lat2=df['Lat2'].values,
-        lon2=df['Lon2'].values,
-        duration=df['duration'].values,
-        epsg=config['epsg']
-    )
-    
-    df['Lat1'] = np.round(df['Lat1'], config['coordinate_precision'])
-    df['Lon1'] = np.round(df['Lon1'], config['coordinate_precision'])
-    df['Lat2'] = np.round(df['Lat2'], config['coordinate_precision'])
-    df['Lon2'] = np.round(df['Lon2'], config['coordinate_precision'])
-    df['X1'] = np.round(drift['X1'], config['coordinate_precision'])
-    df['Y1'] = np.round(drift['Y1'], config['coordinate_precision'])
-    df['X2'] = np.round(drift['X2'], config['coordinate_precision'])
-    df['Y2'] = np.round(drift['Y2'], config['coordinate_precision'])
-    df['sea_ice_x_displacement'] = np.round(
-        drift['dx'], config['displacement_precision']
-    )
-    df['sea_ice_y_displacement'] = np.round(
-        drift['dy'], config['displacement_precision']
-    )
-    df['u'] = np.round(drift['u'], config['displacement_precision'])
-    df['v'] = np.round(drift['v'], config['displacement_precision'])
-    df['sea_ice_speed'] = np.round(
-        drift['speed_ms'],
-        config['speed_precision']
-    )
-    df['sea_ice_speed_kmdy'] = np.round(
-        drift['speed_kmdy'],
-        config['speed_precision']
-    )
-    df['direction_of_sea_ice_displacement'] = np.round(
-        drift['bearing'], config['bearing_precision']
-    )
-    df['distance'] = np.round(
-        drift['distance'], config['speed_precision']
-    )
-    df['distance_geod'] = np.round(
-        drift['distance_geod'], config['speed_precision']
-    )
-    
-    
-    # identify satellites for analysis
-    df['sensor1'] = df["File1"].str.partition("_")[0]
-    df['sensor2'] = df["File2"].str.partition("_")[0]
+    # observation duration in seconds
+    df['duration'] = df['Time2_JS'] - df['Time1_JS']
+
+    # sensor and scene identifiers
+    df['sensor1']  = df['File1'].str.partition('_')[0]
+    df['sensor2']  = df['File2'].str.partition('_')[0]
     df['scene_id'] = df['File1'] + '_' + df['File2']
-    
-    df.rename(columns=
-              {
-                  'Lat1': 'latitude_1',
-                  'Lon1': 'longitude_1',
-                  'Lat2': 'latitude_2',
-                  'Lon2': 'longitude_2'
-        },
-        inplace=True
-    )
-    
-    
-    # reduce data frame    
+
+    # rename geographic coordinate columns
+    df.rename(columns={
+        'Lat1': 'latitude_1',
+        'Lon1': 'longitude_1',
+        'Lat2': 'latitude_2',
+        'Lon2': 'longitude_2'
+    }, inplace=True)
+
+    # reduce to only columns needed downstream
     needed_cols = [
-        'File1', 'File2','Maxcorr1', 'Maxcorr2', 
+        'File1', 'File2', 'Maxcorr1', 'Maxcorr2',
         'longitude_1', 'latitude_1', 'longitude_2', 'latitude_2',
-        'date_start', 'date_end', 'duration', 'X1', 'Y1', 'X2', 'Y2',
-        'sea_ice_x_displacement', 'sea_ice_y_displacement', 'u', 'v',
-        'sea_ice_speed', 'sea_ice_speed_kmdy',
-        'direction_of_sea_ice_displacement', 'distance', 'distance_geod',
+        'date_start', 'date_end', 'duration',
         'sensor1', 'sensor2', 'scene_id'
     ]
     df = df[needed_cols]
-    
+
     return df
 
 
@@ -1026,7 +1330,7 @@ def outlier_search(df, config, base_name, radius_km,
     from scipy.stats import chi2
     
     if config['level'] == '01':
-        # no outlier deteection required
+        # no outlier detection required
         df['outlier_category'] = '-9'
         return df
     
@@ -1034,7 +1338,7 @@ def outlier_search(df, config, base_name, radius_km,
     out_df = df.reset_index(drop=True).copy()
     
     radius_m = radius_km * 1000
-    iter_prev_inliers = None
+    iter_prev_inliers = -1
     
     # create scene groupings based on `File` and `File2` values
     out_df = out_df.sort_values(by=['File1', 'File2'], ascending=True)
@@ -1067,17 +1371,15 @@ def outlier_search(df, config, base_name, radius_km,
         # instantiate pool data frame
         # keep any inlier whether confident or not
         pool_df = out_df[out_df['outlier_category'].isin(['00', '01'])].copy() 
-        inlier_count = (out_df['outlier_category'] == '01').sum()
-        
-        
-        # stop if stable
-        if iter_prev_inliers is not None and \
-            inlier_count == iter_prev_inliers:
-                break
-        iter_prev_inliers = inlier_count
 
         
-        # create neighbors for each scene            
+        # base category set to all zeros
+        base_cat = np.zeros(len(out_df), dtype=np.int8)
+        mask_d = mask_b = mask_md = np.zeros(len(out_df), dtype=bool)
+        mask_d_b = mask_md_d = np.zeros(len(out_df), dtype=bool)
+        mask_md_b = mask_md_d_b = np.zeros(len(out_df), dtype=bool)
+        
+        # create neighbors for each scene
         for scene_id, scene_df in pool_df.groupby("scene", sort=False):
             xy = scene_df[["X1", "Y1"]].to_numpy()
             
@@ -1244,9 +1546,6 @@ def outlier_search(df, config, base_name, radius_km,
             ).astype(np.int8) # force 0/1 not True/False
             
             
-            # base category set to all zeros
-            base_cat = np.zeros(len(out_df), dtype=np.int8)
-            
             # order matters
             mask_md_d_b = md_filter & distance_filter & bearing_filter
             mask_md_d   = md_filter & distance_filter & ~bearing_filter
@@ -1291,27 +1590,33 @@ def outlier_search(df, config, base_name, radius_km,
                 base_cat.astype(str) + statistical_confidence_flag.astype(str)
             )
             
-            # log outlier counts per pass
-            total = len(out_df)
-            n_inliers = int((base_cat == 0).sum())
-            n_distance = int(mask_d.sum())
-            n_bearing = int(mask_b.sum())
-            n_md = int(mask_md.sum())
-            n_d_b = int(mask_d_b.sum())
-            n_md_d = int(mask_md_d.sum())
-            n_md_b = int(mask_md_b.sum())
-            n_md_d_b = int(mask_md_d_b.sum())
-            n_outliers = total - n_inliers
-            
-            logger = logging.getLogger('sar_drift_converter')
-            logger.info(
-                f"Scene {base_name} | Pass {pass_idx + 1} | "
-                f"total={total} | inliers={n_inliers} | "
-                f"outliers={n_outliers} | distance={n_distance} | "
-                f"bearing={n_bearing} | mahalanobis={n_md} | "
-                f"dist+bear={n_d_b} | md+dist={n_md_d} | "
-                f"md+bear={n_md_b} | md+dist+bear={n_md_d_b}"
-            )
+        # log outlier counts per pass
+        total = len(out_df)
+        n_inliers = int((base_cat == 0).sum())
+        n_distance = int(mask_d.sum())
+        n_bearing = int(mask_b.sum())
+        n_md = int(mask_md.sum())
+        n_d_b = int(mask_d_b.sum())
+        n_md_d = int(mask_md_d.sum())
+        n_md_b = int(mask_md_b.sum())
+        n_md_d_b = int(mask_md_d_b.sum())
+        n_outliers = total - n_inliers
+        
+        logger = logging.getLogger('sar_drift_converter')
+        logger.info(
+            f"Scene {base_name} | Pass {pass_idx + 1} | "
+            f"total={total} | inliers={n_inliers} | "
+            f"outliers={n_outliers} | distance={n_distance} | "
+            f"bearing={n_bearing} | mahalanobis={n_md} | "
+            f"dist+bear={n_d_b} | md+dist={n_md_d} | "
+            f"md+bear={n_md_b} | md+dist+bear={n_md_d_b}"
+        )
+        
+        
+        # stability check
+        if n_inliers == iter_prev_inliers:
+            break
+        iter_prev_inliers = n_inliers
         
     
     return out_df
@@ -1748,10 +2053,13 @@ def create_shape_package(df, gpkg_path, config):
     Create a GeoPackage containing drift line vectors for SAR drift data.
 
     Builds LineString geometries from projected start and end coordinates
-    (EPSG:`config['epsg']`) and writes them as a single `drift_lines` layer
-    within a GeoPackage. A QML style file is embedded directly into the
-    GeoPackage's `layer_styles` table for automatic styling when opened in
-    QGIS.
+    (EPSG:`config['epsg']`) and writes them to a GeoPackage. For levels
+    '00' and '02', one layer is written per scene pair, named
+    `drift_vectors_<scene_id>`. For level '03', a single `drift_vectors`
+    layer is written containing only inlier vectors (outlier_category '00'
+    or '01'), with outlier_category recoded to -1. A QML style file is
+    embedded directly into the GeoPackage's `layer_styles` table for each
+    layer for automatic styling when opened in QGIS.
 
     Args:
         df (pandas.DataFrame): Input DataFrame containing drift vectors, as
@@ -1771,7 +2079,7 @@ def create_shape_package(df, gpkg_path, config):
                     - 'duration' (float): Observation duration (s).
                 Sensor identifiers:
                     - 'sensor1', 'sensor2' (str): Satellite/sensor IDs.
-                Science variables:
+                Measurement variables:
                     - 'sea_ice_x_displacement' (float): X displacement (m).
                     - 'sea_ice_y_displacement' (float): Y displacement (m).
                     - 'u' (float): X velocity component (m s⁻¹).
@@ -1781,27 +2089,32 @@ def create_shape_package(df, gpkg_path, config):
                     - 'direction_of_sea_ice_displacement' (float): Forward
                                                                    azimuth
                                                                    (degrees).
-                    - 'distance'      (float): Euclidean displacement distance
-                                               in projected space:
-                                               sqrt(dx² + dy²) (m).
-                    - 'distance_geod' (float): Geodesic distance on the WGS84
-                                               ellipsoid (m). Present in the
-                                               GeoPackage.
+                    - 'distance' (float): Euclidean displacement distance
+                                          in projected space:
+                                          sqrt(dx² + dy²) (m).
+                    - 'distance_geod' (float): Geodesic distance on the
+                                               WGS84 ellipsoid (m).
                 Outlier flag (level-dependent):
                     - 'outlier_category' (str): Two-digit outlier code;
                       included when config['level'] in ['00', '02', '03'].
-                      For level '03', only rows with values '00' or '01' are
-                      retained and the value is recoded to −1 before writing.
+                      For level '03', only rows with values '00' or '01'
+                      are retained and the value is recoded to -1 before
+                      writing.
+                Scene identifier:
+                    - 'scene_id' (str): Used as part of the layer name for
+                      levels '00' and '02'.
         gpkg_path (str): Full path for the output GeoPackage file.
         config (dict): Configuration dictionary containing:
                 - 'epsg' (int): EPSG code of the projected CRS used for
                                 `X1`, `Y1`, `X2`, `Y2` coordinates and set
                                 as the GeoPackage layer CRS.
-                - 'level' (str): Processing level; controls whether
-                                 `outlier_category` is included
-                                 ('00', '02', or '03' = include, otherwise
-                                 omit) and whether inlier filtering is
-                                 applied ('03' only).
+                - 'level' (str): Processing level; controls layer structure
+                                 and outlier filtering:
+                                     '00': one layer per scene, all vectors
+                                     '02': one layer per scene, all vectors
+                                           with outlier_category included
+                                     '03': single layer, inliers only,
+                                           outlier_category recoded to -1
                 - 'outlier_qml_file' (str): Path to the QML style file used
                                             for level '02' (colors vectors
                                             by outlier category).
@@ -1811,8 +2124,9 @@ def create_shape_package(df, gpkg_path, config):
                                               magnitude).
 
     Returns:
-        None
-        
+        None, or None early if level '03' and no inlier rows survive
+        filtering.
+
     Notes:
         - Geometry is a `LineString` from `(X1, Y1)` to `(X2, Y2)` in
           EPSG:`config['epsg']` projected metres, not from geographic
@@ -1823,13 +2137,28 @@ def create_shape_package(df, gpkg_path, config):
         - Only the columns listed in `needed_cols` (plus `outlier_category`
           where applicable) are written; all other DataFrame columns are
           excluded.
-        - The QML style is embedded via `_embed_qml_style`, so end users do
-          not need the QML file present to load the styled layer in QGIS.
+        - For levels '00' and '02', layers are named
+          `drift_vectors_<scene_id>`. The first scene is written with
+          mode='w' and subsequent scenes with mode='a' to append layers
+          without overwriting.
+        - For level '03', duplicate starting positions (longitude_1,
+          latitude_1) are dropped keeping the last occurrence, and a
+          warning is logged if any duplicates are found.
+        - The QML style is embedded via `_embed_qml_style` for each layer,
+          so end users do not need the QML file present to load the styled
+          layer in QGIS.
     """
 
+    import os
     import logging
     import geopandas as gpd
     from shapely.geometry import LineString
+
+    logger = logging.getLogger('sar_drift_converter')
+    
+    if config['overwrite'] and os.path.exists(gpkg_path):
+        # make sure GeoPackage doesn't append to existing file
+        os.remove(gpkg_path)
     
     df_local = df.copy()
 
@@ -1850,9 +2179,40 @@ def create_shape_package(df, gpkg_path, config):
     df_local=df_local[needed_cols]
     
     
-    # For level 03, retain only inlier vectors (outlier_category 00 or 01),
-    # then recode to -1 to signal that outlier filtering has been applied.
-    if config['level'] == '03':
+    if config['level'] in ['00', '02']:
+        # write one layer per scene
+        scene_idx = 0
+        for scene_id, df_scene in df_local.groupby('scene_id'):
+            df_scene = df_scene.copy()
+            layer_name = f'drift_vectors_{scene_id}'
+            
+            df_scene['geometry_line'] = df_scene.apply(
+                lambda row: LineString(
+                    [(row['X1'], row['Y1']), (row['X2'], row['Y2'])]
+                ),
+                axis=1
+            )
+        
+            gdf_line = gpd.GeoDataFrame(df_scene, geometry='geometry_line')
+            gdf_line['geometry_type'] = 'line'
+            gdf_line = gdf_line.rename(
+                columns={'geometry_line': 'geometry'}
+            ).set_geometry('geometry')
+            gdf_line = gdf_line.set_crs(f'EPSG:{config["epsg"]}')
+        
+            # append mode adds layers if file exists
+            write_mode = 'w' if scene_idx == 0 else 'a'
+            gdf_line.to_file(
+                gpkg_path, layer=layer_name, driver='GPKG', mode=write_mode
+            )
+            scene_idx += 1
+        
+            # embed QML style for this layer
+            _embed_qml_style(gpkg_path, layer_name, config)
+            
+    else:
+        # For level 03, retain only inlier vectors (outlier_category 00 or 01),
+        # then recode to -1 to signal that outlier filtering has been applied.
         outlier_filter = df_local['outlier_category'].isin(['00', '01'])
         df_local = df_local[outlier_filter].copy()
         df_local['outlier_category'] = -1
@@ -1860,43 +2220,54 @@ def create_shape_package(df, gpkg_path, config):
             # it might be possible the data frame was labelled
             # as all outliers.
             return None
+        else:
+            dupes = df_local.duplicated(
+                subset=['longitude_1', 'latitude_1'],
+                keep='last'
+            )
+            if dupes.any():
+                logger.warning(
+                    f"Level 03 GeoPackage: dropping {dupes.sum()} duplicate "
+                    "starting lon/lat vector(s) — keeping last occurrence"
+                )
+            df_local = df_local[~dupes]            
     
-    df_local['geometry_line'] = df_local.apply(
-        lambda row: LineString(
-            [
-                (row['X1'], row['Y1']),
-                (row['X2'], row['Y2'])
-            ]
-        ),
-        axis=1
-    )
+        df_local['geometry_line'] = df_local.apply(
+            lambda row: LineString(
+                [
+                    (row['X1'], row['Y1']),
+                    (row['X2'], row['Y2'])
+                ]
+            ),
+            axis=1
+        )
+        
+        
+        # Create GeoDataFrame for lines (lines only)
+        gdf_line = gpd.GeoDataFrame(
+            df_local, geometry='geometry_line'
+        )
+        # Add a column to distinguish geometry type    
+        gdf_line['geometry_type'] = 'line'  
+        
+       
+        # Save as a single GeoPackage file (supports mixed geometries)    
+        gdf_line = gdf_line.rename(
+            columns={'geometry_line': 'geometry'}
+        ).set_geometry('geometry')
+        gdf_line = gdf_line.set_crs(f'EPSG:{config["epsg"]}')
+        gdf_line.to_file(gpkg_path, layer='drift_vectors', driver='GPKG')
+        
     
-    
-    # Create GeoDataFrame for lines (lines only)
-    gdf_line = gpd.GeoDataFrame(
-        df_local, geometry='geometry_line'
-    )
-    # Add a column to distinguish geometry type    
-    gdf_line['geometry_type'] = 'line'  
-    
-   
-    # Save as a single GeoPackage file (supports mixed geometries)    
-    gdf_line = gdf_line.rename(
-        columns={'geometry_line': 'geometry'}
-    ).set_geometry('geometry')
-    gdf_line = gdf_line.set_crs(f'EPSG:{config["epsg"]}')
-    gdf_line.to_file(gpkg_path, layer='drift_lines', driver='GPKG')
-    
-
-    # embed .qml outlier layer style
-    _embed_qml_style(gpkg_path, 'drift_lines', config)
+        # embed .qml outlier layer style
+        _embed_qml_style(gpkg_path, 'drift_vectors', config)
     
     # log activity
-    logger = logging.getLogger('sar_drift_converter')
     logger.info(f'Created GeoPackage {gpkg_path}')
            
     
-def create_vector_html_and_json(df, html_path, data_dir, json_path, config):
+def create_vector_html_and_json(df, html_path, data_dir, json_path,
+                                available_dates_path, config):
     """
     Serialize drift vector observations to a compact JSON file and write
     an accompanying interactive HTML viewer.
@@ -1966,14 +2337,20 @@ def create_vector_html_and_json(df, html_path, data_dir, json_path, config):
           `_add_json_templates`.
     """
 
+    import os
+    import shutil
     import json
-    import re
     import logging
 
     logger = logging.getLogger('sar_drift_converter')
 
     # confirm template GeoJSON reference files are in data_dir
     _add_json_templates(data_dir, config)
+    
+    # confirm HTML viewer exists
+    if not os.path.exists(html_path):
+        shutil.copy(config['html_vector_template'], html_path)
+
 
     df_local = df.copy()
 
@@ -1988,7 +2365,19 @@ def create_vector_html_and_json(df, html_path, data_dir, json_path, config):
             # as all outliers. Highly unlikely, but it needs to be
             # handled
             return
-
+        else:
+            dupes = df_local.duplicated(
+                subset=['longitude_1', 'latitude_1'],
+                keep='last'
+            )
+            if dupes.any():
+                logger.warning(
+                    f"Level 03 HTML: dropping {dupes.sum()} duplicate "
+                    "starting lon/lat vector(s) — keeping last occurrence"
+                )
+            df_local = df_local[~dupes]
+            
+            
     date1 = df_local['date_start'].min().strftime('%Y-%m-%d')
     date2 = df_local['date_end'].max().strftime('%Y-%m-%d')
 
@@ -2012,27 +2401,23 @@ def create_vector_html_and_json(df, html_path, data_dir, json_path, config):
     }
 
     with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump(payload, f, separators=(',', ':'))
+        json.dump(payload, f, separators=(',', ':'))                
 
     logger.info(f'Created JSON {json_path}')
-
-    # write HTML viewer, substituting the JSON filename into the template
-    import os
-    json_basename = os.path.basename(json_path)
-    with open(config['vector_html_file'], 'r', encoding='utf-8') as f:
-        html_content = f.read()
-
-    html_content = re.sub(
-        r"fetch\('data/si_velocity_[^']+'\)",
-        f"fetch('data/{json_basename}')",
-        html_content
-    )
-
-    with open(html_path, 'w', encoding='utf-8') as f:
-        f.write(html_content)
-
-    logger.info(f'Created HTML viewer {html_path}')
     
+    
+    # update available dates
+    if os.path.exists(available_dates_path):
+        with open(available_dates_path, 'r', encoding='utf-8') as f:
+            available_dates = json.load(f)
+    else:
+        available_dates = []
+    if date1 not in available_dates:
+        available_dates.append(date1.replace('-',''))
+        available_dates = sorted(available_dates)
+        with open(available_dates_path, 'w', encoding='utf-8') as f:
+            json.dump(available_dates, f, separators=(',', ':'))
+
     
 def combine_daily_netcdf_files(config, nc_files, template_ds,
                                daily_start_date, daily_end_date,
@@ -2066,10 +2451,10 @@ def combine_daily_netcdf_files(config, nc_files, template_ds,
             grid coordinate arrays (`x`, `y`) and grid dimensions. Must
             share the same projection and coordinate spacing as the input
             scene files.
-        daily_start_date (str): Start date of the daily mosaic in `YYYYMMDD`
-            format; used to set `time_coverage_start` global attribute.
-        daily_end_date (str): End date of the daily mosaic in `YYYYMMDD`
-            format; used to set `time_coverage_end` global attribute.
+        daily_start_date (pandas.Timestamp): Start date of the daily mosaic;
+            used to set `time_coverage_start` global attribute.
+        daily_end_date (pandas.Timestamp): End date of the daily mosaic;
+            used to set `time_coverage_end` global attribute.
         daily_nc_path (str): Full path for the output daily NetCDF file.
         multi_layered (bool): If `True` (default), each scene is written as
             a separate time layer. If `False`, all scenes are mosaicked into

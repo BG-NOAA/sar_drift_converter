@@ -42,6 +42,7 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0b1a2e; colo
 
 .loading { position: absolute; inset: 0; background: rgba(11,26,46,0.85); display: flex; align-items: center; justify-content: center; z-index: 2000; font-size: 16px; color: #8ab4d8; }
 .loading.hidden { display: none; }
+.no-data-overlay.hidden { display: none; }
 .spinner { width: 28px; height: 28px; border: 3px solid #1a3a5c; border-top-color: #3a8fd4; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 10px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -51,6 +52,31 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0b1a2e; colo
 .stat { background: #162d4a; border-radius: 4px; padding: 6px 8px; text-align: center; }
 .stat .stat-val { font-size: 16px; font-weight: 600; color: #fff; }
 .stat .stat-label { font-size: 10px; color: #8ab4d8; }
+
+/* ── Date navigator ── */
+.date-nav { display: flex; align-items: center; gap: 6px; }
+.date-nav input[type=date] {
+  flex: 1; padding: 7px 8px; background: #162d4a; border: 1px solid #1a3a5c;
+  color: #e0e0e0; border-radius: 4px; font-size: 13px; font-family: inherit;
+  color-scheme: dark;
+}
+.date-nav input[type=date]:focus { outline: none; border-color: #3a8fd4; }
+.nav-btn {
+  width: 32px; height: 32px; background: #162d4a; border: 1px solid #1a3a5c;
+  color: #8ab4d8; border-radius: 4px; font-size: 16px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  line-height: 1;
+}
+.nav-btn:hover:not(:disabled) { background: #1e3d60; color: #fff; border-color: #3a8fd4; }
+.nav-btn:disabled { opacity: 0.3; cursor: default; }
+
+.date-status { font-size: 11px; color: #8ab4d8; text-align: center; margin-top: 2px; min-height: 14px; }
+.date-status.error { color: #e07070; }
+
+.no-data-overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 1500; pointer-events: none; }
+.no-data-msg { background: rgba(15,37,64,0.93); border: 1px solid #1a3a5c; border-radius: 8px; padding: 20px 28px; text-align: center; font-size: 15px; color: #8ab4d8; }
+.no-data-msg strong { display: block; color: #fff; font-size: 16px; margin-bottom: 6px; }
 </style>
 </head>
 <body>
@@ -62,30 +88,45 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0b1a2e; colo
 
 <div class="main">
   <div class="sidebar">
+
+    <!-- DATE NAVIGATION -->
+    <div>
+      <h2>Date</h2>
+      <div class="date-nav">
+        <button class="nav-btn" id="btnPrev" title="Previous day" disabled>&#8249;</button>
+        <input type="date" id="datePicker">
+        <button class="nav-btn" id="btnNext" title="Next day" disabled>&#8250;</button>
+      </div>
+      <div class="date-status" id="dateStatus">Loading available dates…</div>
+    </div>
+
+    <!-- MAP OVERVIEW -->
     <div>
       <h2>Dataset</h2>
       <div class="info-box">
         <div class="title">SAR Sea Ice Velocity</div>
         <div class="meta">
           Daily sea ice motion vectors derived from SAR imagery.<br>
-          Resolution: 12 km · CRS: EPSG:3411<br>
+          Resolution: 12.5 km · CRS: EPSG:3413<br>
           Date: <span id="dateRange">—</span><br>
           Vectors: <span id="vecCount">—</span>
         </div>
       </div>
     </div>
 
+	<!-- OUTLIER CHECKBOX -->
     <div>
       <h2>Filter</h2>
-      <div class="cb-row"><input type="checkbox" id="hideOutliers"><label for="hideOutliers">Hide flagged outliers</label></div>
+
     </div>
 
+	<!-- VIEW SELECTOR -->
     <div>
       <h2>Display</h2>
       <label for="colorBy">Color By</label>
       <select id="colorBy">
         <option value="speed" selected>Ice Drift Speed (km/day)</option>
-        <option value="bearing">Bearing (°)</option>
+        <option value="bearing">Drift Direction (bearing °)</option>
       </select>
       <label for="scaleRange" style="margin-top:8px">Arrow Scale</label>
       <input type="range" id="scaleRange" min="0.5" max="5" step="0.25" value="2">
@@ -93,6 +134,7 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0b1a2e; colo
       <input type="range" id="opacityRange" min="0.2" max="1" step="0.05" value="0.8">
     </div>
 
+	<!-- HIGH-LEVEL STATISTICS -->
     <div>
       <h2>Statistics</h2>
       <div class="stats">
@@ -103,6 +145,7 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0b1a2e; colo
       </div>
     </div>
 
+	<!-- ABOUT -->
     <div>
       <h2>About</h2>
       <div class="info-box">
@@ -114,6 +157,7 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0b1a2e; colo
     </div>
   </div>
 
+  <!-- MAP -->
   <div class="map-wrap">
     <div id="map"></div>
     <div class="hover-info" id="hoverInfo">
@@ -126,6 +170,12 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0b1a2e; colo
       <canvas class="legend-bar" id="legendBar" width="200" height="14"></canvas>
       <div class="legend-labels"><span>0</span><span>5</span><span>10</span><span>15</span><span>20+</span></div>
     </div>
+    <div class="no-data-overlay hidden" id="noDataOverlay">
+      <div class="no-data-msg">
+        <strong>No data available</strong>
+        No drift vectors found for this date.<br>Select another day using the date picker.
+      </div>
+    </div>
     <div class="loading" id="loading"><div class="spinner"></div>Loading data…</div>
   </div>
 </div>
@@ -134,28 +184,27 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0b1a2e; colo
 <script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.9.0/proj4.js"></script>
 <script src="https://unpkg.com/proj4leaflet@1.0.2/src/proj4leaflet.js"></script>
 <script>
-// --- Color scale: blue → cyan → yellow → red for 0–20 km/day ---
+// ── Color scales ──────────────────────────────────────────────────────────────
 const SPEED_STOPS = [
-  [0,    [10, 40, 150]],
-  [0.15, [20, 100, 210]],
-  [0.30, [20, 180, 200]],
-  [0.45, [40, 210, 120]],
-  [0.60, [160, 230, 50]],
-  [0.75, [240, 200, 30]],
-  [0.90, [240, 100, 20]],
-  [1.0,  [200, 30, 30]],
+  [0,    [68,  1,   84]],
+  [0.15, [72,  40,  120]],
+  [0.30, [62,  83,  160]],
+  [0.45, [49,  123, 160]],
+  [0.60, [38,  168, 152]],
+  [0.75, [110, 206, 88]],
+  [0.90, [180, 222, 44]],
+  [1.0,  [253, 231, 37]],
 ];
-// Bearing: cyclic HSL-like hue wheel 0°–360°
 const BEARING_STOPS = [
-  [0,     [200, 40, 40]],   // N = red
-  [0.125, [220, 140, 30]],  // NE = orange
-  [0.25,  [220, 220, 40]],  // E = yellow
-  [0.375, [60, 200, 60]],   // SE = green
-  [0.5,   [30, 180, 180]],  // S = cyan
-  [0.625, [40, 80, 210]],   // SW = blue
-  [0.75,  [130, 40, 200]],  // W = purple
-  [0.875, [200, 40, 120]],  // NW = magenta
-  [1.0,   [200, 40, 40]],   // N = red (wrap)
+  [0,     [200, 40,  40]],
+  [0.125, [220, 140, 30]],
+  [0.25,  [220, 220, 40]],
+  [0.375, [60,  200, 60]],
+  [0.5,   [30,  180, 180]],
+  [0.625, [40,  80,  210]],
+  [0.75,  [130, 40,  200]],
+  [0.875, [200, 40,  120]],
+  [1.0,   [200, 40,  40]],
 ];
 const MAX_SPD = 20;
 
@@ -176,7 +225,6 @@ function getColorMode() { return document.getElementById('colorBy').value; }
 function getColor(vec) {
   const spd = vec[4] / 100;
   if (getColorMode() === 'bearing') {
-    // Compute bearing from start→end in lat/lon
     const dx = vec[2] - vec[0], dy = vec[3] - vec[1];
     const bear = ((90 - Math.atan2(dy, dx) * 180 / Math.PI) % 360 + 360) % 360;
     return interpolateStops(BEARING_STOPS, bear / 360);
@@ -184,7 +232,7 @@ function getColor(vec) {
   return interpolateStops(SPEED_STOPS, spd / MAX_SPD);
 }
 
-// Legend
+// ── Legend ────────────────────────────────────────────────────────────────────
 const legendTitle = document.querySelector('.legend-title');
 const legendLabels = document.querySelector('.legend-labels');
 const lctx = document.getElementById('legendBar').getContext('2d');
@@ -211,22 +259,24 @@ function drawLegend() {
 }
 drawLegend();
 
-// --- Map ---
+// ── Map ───────────────────────────────────────────────────────────────────────
 proj4.defs('EPSG:3413', '+proj=stere +lat_0=90 +lat_ts=70 +lon_0=-45 +k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs');
 const crs = new L.Proj.CRS('EPSG:3413',
   '+proj=stere +lat_0=90 +lat_ts=70 +lon_0=-45 +k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs',
-  { resolutions: [32000, 16000, 8000, 4000, 2000, 1000], origin: [-4194304, 4194304] }
+  { resolutions: [8000, 4000, 2000, 1000, 500, 250], origin: [-4194304, 4194304] }
 );
-const map = L.map('map', { crs, center: [80, -45], zoom: 1, minZoom: 0, maxZoom: 5 });
+const map = L.map('map', { crs, center: [90, 0], zoom: 0, minZoom: 0, maxZoom: 5, zoomControl: false });
+L.control.zoom({ position: 'topright' }).addTo(map);
 
-// --- Reference layers ---
+// ── Reference layers ──────────────────────────────────────────────────────────
 let landLayer, coastLayer, gratLayer;
+let refLayersLoaded = false;
 
 async function loadReferenceLayers() {
   const [landRes, coastRes, gratRes] = await Promise.all([
     fetch('data/land.geojson').then(r => r.json()),
-    fetch('data/coastline.geojson').then(r => r.json()),
-    fetch('data/graticule.geojson').then(r => r.json()),
+    fetch('data/10m_coastline_50N.geojson').then(r => r.json()),
+    fetch('data/graticule_50N.geojson').then(r => r.json()),
   ]);
   landLayer = L.geoJSON(landRes, {
     style: { fillColor: '#e8ecf0', fillOpacity: 0.7, stroke: false }, interactive: false
@@ -245,30 +295,26 @@ async function loadReferenceLayers() {
     else { pt = [coords[0][1],coords[0][0]]; text = p.value===0?'0°':p.value>0?`${p.value}°E`:`${-p.value}°W`; }
     L.marker(pt, { icon: L.divIcon({ className:'grat-label', html:text, iconSize:[44,14], iconAnchor:[22,7] }), interactive:false }).addTo(map);
   });
+  refLayersLoaded = true;
 }
 
-// --- Arrow rendering ---
+// ── Arrow rendering ───────────────────────────────────────────────────────────
 let allVectors = [];
 let arrowLayer = null;
 
-// Create an SVG arrow marker for a given bearing (degrees) and color
 function drawArrows(vectors, scale, opacity) {
   if (arrowLayer) map.removeLayer(arrowLayer);
   arrowLayer = L.layerGroup();
 
   vectors.forEach(v => {
     const [lon1, lat1, lon2, lat2, spdx100, oc] = v;
-    const spd = spdx100 / 100;
-
     const [r,g,b] = getColor(v);
     const color = `rgb(${r},${g},${b})`;
 
-    // Shaft
     const line = L.polyline([[lat1,lon1],[lat2,lon2]], {
       color, weight: Math.max(1.5, scale), opacity, interactive: false
     });
 
-    // Arrowhead: compute in projected coords so size is consistent
     const p1 = crs.projection.project(L.latLng(lat1, lon1));
     const p2 = crs.projection.project(L.latLng(lat2, lon2));
     const pdx = p2.x - p1.x, pdy = p2.y - p1.y;
@@ -285,19 +331,16 @@ function drawArrows(vectors, scale, opacity) {
       ], { color, weight: Math.max(1.5, scale), opacity, interactive: false });
       arrowLayer.addLayer(head);
     }
-
     arrowLayer.addLayer(line);
   });
 
   arrowLayer.addTo(map);
-  // Keep reference layers on top
   if (coastLayer) coastLayer.bringToFront();
   if (gratLayer) gratLayer.bringToFront();
 }
 
 function getFilteredVectors() {
-  const hideOut = document.getElementById('hideOutliers').checked;
-  return hideOut ? allVectors.filter(v => v[5] === '00' || v[5] === '01') : allVectors;
+  return allVectors;
 }
 
 function updateDisplay() {
@@ -306,24 +349,23 @@ function updateDisplay() {
   const opacity = parseFloat(document.getElementById('opacityRange').value);
   drawArrows(filtered, scale, opacity);
 
-  // Stats
   const speeds = filtered.map(v => v[4] / 100);
-  const sum = speeds.reduce((a,b) => a+b, 0);
-  document.getElementById('statMin').textContent = Math.min(...speeds).toFixed(1);
-  document.getElementById('statMax').textContent = Math.max(...speeds).toFixed(1);
-  document.getElementById('statMean').textContent = (sum / speeds.length).toFixed(1);
-  document.getElementById('statN').textContent = filtered.length.toLocaleString();
+  if (speeds.length > 0) {
+    const sum = speeds.reduce((a,b) => a+b, 0);
+    document.getElementById('statMin').textContent = Math.min(...speeds).toFixed(1);
+    document.getElementById('statMax').textContent = Math.max(...speeds).toFixed(1);
+    document.getElementById('statMean').textContent = (sum / speeds.length).toFixed(1);
+    document.getElementById('statN').textContent = filtered.length.toLocaleString();
+  } else {
+    ['statMin','statMax','statMean','statN'].forEach(id => document.getElementById(id).textContent = '—');
+  }
 }
 
-// --- Hover ---
+// ── Hover ─────────────────────────────────────────────────────────────────────
 map.on('mousemove', function(e) {
   const { lat, lng } = e.latlng;
-  const hv = document.getElementById('hoverVal');
-  const hd = document.getElementById('hoverDetail');
-  const hc = document.getElementById('hoverCoord');
-  hc.textContent = `${lat.toFixed(2)}°N, ${lng.toFixed(2)}°E`;
+  document.getElementById('hoverCoord').textContent = `${lat.toFixed(2)}°N, ${lng.toFixed(2)}°E`;
 
-  // Find nearest vector within threshold
   const filtered = getFilteredVectors();
   let best = null, bestDist = Infinity;
   for (const v of filtered) {
@@ -331,35 +373,140 @@ map.on('mousemove', function(e) {
     if (d < bestDist) { bestDist = d; best = v; }
   }
 
-  if (best && bestDist < 4) { // ~2° threshold
+  if (best && bestDist < 4) {
     const spd = best[4] / 100;
-    hv.textContent = `${spd.toFixed(1)} km/day`;
-    // Compute bearing from U/V in projected coords
+    document.getElementById('hoverVal').textContent = `${spd.toFixed(1)} km/day`;
     const dx = best[2] - best[0], dy = best[3] - best[1];
     const bear = ((90 - Math.atan2(dy, dx) * 180 / Math.PI) % 360 + 360) % 360;
-    hd.textContent = `Bearing: ${bear.toFixed(0)}°`;
+    document.getElementById('hoverDetail').textContent = `Bearing: ${bear.toFixed(0)}°`;
   } else {
-    hv.textContent = '—';
-    hd.textContent = '';
+    document.getElementById('hoverVal').textContent = '—';
+    document.getElementById('hoverDetail').textContent = '';
   }
 });
 
-// --- Init ---
-async function init() {
-  await loadReferenceLayers();
+// ── Date navigation ───────────────────────────────────────────────────────────
+let availableDates = [];   // sorted array of "YYYYMMDD" strings
+let currentDateIdx = -1;
 
-  const resp = await fetch('data/si_velocity_20260120.json');
-  const data = await resp.json();
-  allVectors = data.vectors;
+const datePicker  = document.getElementById('datePicker');
+const btnPrev     = document.getElementById('btnPrev');
+const btnNext     = document.getElementById('btnNext');
+const dateStatus  = document.getElementById('dateStatus');
+const loadingEl   = document.getElementById('loading');
+const noDataEl    = document.getElementById('noDataOverlay');
 
-  document.getElementById('dateRange').textContent = `${data.date1} → ${data.date2}`;
-  document.getElementById('vecCount').textContent = `${data.count.toLocaleString()} total`;
+// Convert "YYYYMMDD" → "YYYY-MM-DD" for the date input
+function toInputFormat(d) { return `${d.slice(0,4)}-${d.slice(4,6)}-${d.slice(6,8)}`; }
+// Convert "YYYY-MM-DD" → "YYYYMMDD"
+function fromInputFormat(d) { return d.replace(/-/g, ''); }
 
-  updateDisplay();
-  document.getElementById('loading').classList.add('hidden');
+function updateNavButtons() {
+  btnPrev.disabled = currentDateIdx <= 0;
+  btnNext.disabled = currentDateIdx >= availableDates.length - 1;
 }
 
-document.getElementById('hideOutliers').addEventListener('change', updateDisplay);
+function setStatus(msg, isError = false) {
+  dateStatus.textContent = msg;
+  dateStatus.className = 'date-status' + (isError ? ' error' : '');
+}
+
+async function loadDate(dateStr) {
+  // dateStr is "YYYYMMDD"
+  loadingEl.classList.remove('hidden');
+  noDataEl.classList.add('hidden');
+
+  try {
+    const resp = await fetch(`data/si_velocity_${dateStr}.json`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+
+    allVectors = data.vectors;
+    document.getElementById('dateRange').textContent = `${data.date1} → ${data.date2}`;
+    document.getElementById('vecCount').textContent = `${data.count.toLocaleString()} total`;
+
+    updateDisplay();
+
+    const idx = availableDates.indexOf(dateStr);
+    const pos = idx >= 0 ? `${idx + 1} of ${availableDates.length}` : '';
+    setStatus(pos);
+
+  } catch (err) {
+    allVectors = [];
+    if (arrowLayer) { map.removeLayer(arrowLayer); arrowLayer = null; }
+    document.getElementById('dateRange').textContent = '—';
+    document.getElementById('vecCount').textContent = '—';
+    ['statMin','statMax','statMean','statN'].forEach(id => document.getElementById(id).textContent = '—');
+    noDataEl.classList.remove('hidden');
+    setStatus('No data for this date', true);
+  } finally {
+    loadingEl.classList.add('hidden');
+  }
+}
+
+function navigateToIndex(idx) {
+  if (idx < 0 || idx >= availableDates.length) return;
+  currentDateIdx = idx;
+  const dateStr = availableDates[idx];
+  datePicker.value = toInputFormat(dateStr);
+  updateNavButtons();
+  loadDate(dateStr);
+}
+
+datePicker.addEventListener('change', () => {
+  const dateStr = fromInputFormat(datePicker.value);
+  // Find exact match or nearest available date
+  const idx = availableDates.indexOf(dateStr);
+  if (idx >= 0) {
+    currentDateIdx = idx;
+    updateNavButtons();
+    loadDate(dateStr);
+  } else {
+    // Date typed manually — still try to load it (may 404)
+    currentDateIdx = -1;
+    updateNavButtons();
+    loadDate(dateStr);
+  }
+});
+
+btnPrev.addEventListener('click', () => navigateToIndex(currentDateIdx - 1));
+btnNext.addEventListener('click', () => navigateToIndex(currentDateIdx + 1));
+
+// Keyboard arrow support
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;  // don't steal from date input
+  if (e.key === 'ArrowLeft'  && !btnPrev.disabled) navigateToIndex(currentDateIdx - 1);
+  if (e.key === 'ArrowRight' && !btnNext.disabled) navigateToIndex(currentDateIdx + 1);
+});
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+async function init() {
+  // Load reference layers and available dates in parallel
+  const [_, datesData] = await Promise.allSettled([
+    loadReferenceLayers(),
+    fetch('data/available_dates.json').then(r => r.json()),
+  ]);
+
+  if (datesData.status === 'fulfilled' && Array.isArray(datesData.value) && datesData.value.length > 0) {
+    availableDates = datesData.value.slice().sort();  // ensure sorted ascending
+
+    // Set date picker bounds
+    datePicker.min = toInputFormat(availableDates[0]);
+    datePicker.max = toInputFormat(availableDates[availableDates.length - 1]);
+    datePicker.disabled = false;
+    btnPrev.disabled = false;
+    btnNext.disabled = false;
+
+    // Load the most recent date by default
+    navigateToIndex(availableDates.length - 1);
+  } else {
+    setStatus('Could not load available dates', true);
+    loadingEl.classList.add('hidden');
+    datePicker.disabled = false;  // still allow manual entry
+  }
+}
+
+
 document.getElementById('scaleRange').addEventListener('input', updateDisplay);
 document.getElementById('opacityRange').addEventListener('input', updateDisplay);
 document.getElementById('colorBy').addEventListener('change', () => { drawLegend(); updateDisplay(); });
