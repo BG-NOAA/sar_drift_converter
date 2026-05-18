@@ -235,70 +235,117 @@ def error_msg(msg):
 # Internal functions
 #===================
 
-def _init_stats(obs_read, total_days, total_scenes, processing_levels):
+def _download_sar_drift_files(config):
     """
-    Initialize a nested statistics dictionary for each processing level.
+    Download Arctic-wide SAR ice drift gfilter text files from a
+    configured web directory.
+
+    Scrapes the HTML directory listing at the URL specified in
+    `config['sar_drift_data_url']`, filters for matching gfilter
+    filenames, and downloads any files not already present in the
+    local SAR drift directory.
 
     Args:
-        processing_levels (list[str]): e.g. ['01', '02', '03']
+        config (dict): Configuration dictionary. Must include:
+                - 'sar_drift_data_url' (str): URL of the directory
+                  listing page hosting SAR drift gfilter text files.
+                - 'sar_drift_directory' (str): Local directory path
+                  where downloaded files are saved.
+
+    Workflow:
+        1. Send a GET request to `config['sar_drift_data_url']` and
+           parse the HTML directory listing using BeautifulSoup.
+        2. Filter all `<a>` href links for filenames matching the
+           gfilter pattern: `SARIceDrift_EG125_*.txt`.
+        3. Skip links beginning with `?` or `/` (navigation and
+           parent directory entries).
+        4. For each matched file, skip download if the file already
+           exists in `config['sar_drift_directory']`.
+        5. Download new files via streaming GET requests in 1 MB
+           chunks, logging each download URL.
+        6. Log and return early if no matching files are found.
 
     Returns:
-        dict: Keyed by level string. Each value is a dict of
-              accumulators ready for in-place mutation during the run.
+        None
+
+    Raises:
+        requests.HTTPError: If the directory listing request or any
+            individual file download returns a non-2xx status code,
+            via `raise_for_status()`.
+        requests.RequestException: If a network error occurs during
+            any GET request.
+
+    Notes:
+        - SSL verification is disabled for all requests via
+          `verify=False`. InsecureRequestWarning is suppressed via
+          `urllib3.disable_warnings()`.
+        - Files already present in `config['sar_drift_directory']`
+          are skipped silently, making repeated calls safe for
+          incremental updates.
+        - `base_url` is normalized to end with `/` before constructing
+          absolute download links via `urljoin`, preventing the final
+          path component from being dropped.
+        - Download progress is displayed via a `tqdm` progress bar.
     """
-    stats = {}
-    stats['obs_read'] = obs_read
-    stats['total_days'] = total_days
-    stats['total_scenes'] = total_scenes
-    for level in processing_levels:
-        stats[level] = {
-            # filtering (filter_input_data)
-            'obs_dropped_bearing_speed':  0,
-            'obs_dropped_maxcorr_row':    0,
-            'scenes_rejected_maxcorr':    0,
-            'scenes_rejected_threshold':  0,
-            'scenes_accepted':            0,
-            'scenes_using_75km':          0,
-
-            # per-day accumulators
-            'day': {
-                'scenes_per_day':  0,
-                'vectors_per_day': 0,
-                'speed': {
-                    'mean':    0.0,
-                    'median':  0.0,
-                    'std_dev': 0.0,
-                    'min':     0.0,
-                    'max':     0.0
-                },
-                'outliers': {
-                    'distance':     0,
-                    'bearing':      0,
-                    'mahalanobis':  0,
-                    'dist_bear':    0,
-                    'md_dist':      0,
-                    'md_bear':      0,
-                    'md_dist_bear': 0
-                }
-            }
-        }
-    return stats
-
-
-def _summarize_stats(stats):
-    import numpy as np
     
-    final_stats = {}
-    final_stats['obs_read'] = stats['obs_read']
-    final_stats['total_days'] = stats['total_days']
-    final_stats['total_scenes'] = stats['total_scenes']
+    import logging
+    from tqdm import tqdm
+    import os
+    import requests
+    from bs4 import BeautifulSoup
+    from urllib.parse import urljoin
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     
-    # for level, level_stats in stats.items():
-    #     final_stats['level'] =  level
-    #     final_stats['scenes_per_day_mean'] = np.mean(level_stats['day']['scenes_per_day'])
-    #     final_stats['speed_mean'] = np.mean(level_stats['day']['speed']['mean'])
-            
-    return final_stats
+    # log activity
+    logger = logging.getLogger('sar_drift_converter')
+
+    
+    # download SAR drift data files
+    base_url = config['sar_drift_data_url'].rstrip('/') + '/'
+    
+    # Get the HTML page content
+    response = requests.get(base_url, verify=False)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, 'html.parser')
+    
+    # Extract all <a> tag hrefs
+    links = []
+    for a in soup.find_all('a', href=True):
+        if not a['href'].startswith('?') and not a['href'].startswith('/'):
+            links.append(a['href'])
+    
+    
+    # Filter for Arctic-wide gfilter.txt files
+    download_links = []
+    for link in links:
+        if link.startswith('SARIceDrift_EG125_') and \
+           link.endswith('T2359_gfilter1.txt') and \
+           'T0000_' in link:
+               download_links.append(urljoin(base_url, link))
+    
+    
+    # Download each file                
+    if len(download_links) == 0:
+        logger.info("No new gfilter files found to download")
+        return
+    
+    download_folder = config['sar_drift_directory']        
+    tqdm_desc = "Downloading SAR drift gfilter files"
+    for file_url in tqdm(download_links, desc=tqdm_desc, unit='file'):
+        filename = os.path.basename(file_url)
+        local_path = os.path.join(download_folder, filename)
+        
+        if not os.path.exists(local_path):  # Skip if already downloaded
+            try:
+                with requests.get(file_url, stream=True, verify=False) as r:
+                    r.raise_for_status()
+                    with open(local_path, 'wb') as f:
+                        for chunk in r.iter_content(chunk_size=1048576):
+                            f.write(chunk)
+                logger.info(f"Downloaded {filename}")
+            except requests.exceptions.HTTPError as e:
+                logger.warning(f"Skipping {filename} — {e}")
 
 
 def _read_gfilter_file(args):
@@ -373,6 +420,18 @@ def _read_gfilter_file(args):
         raise
     
 
+def _get_sensors_seconds(row):
+    file1_parts = row['File1'].split('_')
+    sensor1 = file1_parts[0]
+    seconds1 = file1_parts[8]
+
+    file2_parts = row['File2'].split('_')
+    sensor2 = file2_parts[0]
+    seconds2 = file2_parts[8]
+
+    return f'{sensor1}_{seconds1}_{sensor2}_{seconds2}'
+
+
 def _check_existing_files(scene_output_stub, config):
     """
     Check which expected daily output files already exist for a given day.
@@ -432,8 +491,9 @@ def _check_existing_files(scene_output_stub, config):
     
     import os
 
+    # overwirte indicates always create the file even if existing
     if config['overwrite']:
-        if config['level'] in ['00', '03']:
+        if config['level'] == '00':
             return {
                 'nc_scenes': False,
                 'nc_daily':  False,
@@ -454,7 +514,13 @@ def _check_existing_files(scene_output_stub, config):
                 'gpkg':      False,
                 'json':      True
             }
-
+        elif config['level'] == '03':
+            return {
+                'nc_scenes': True,
+                'nc_daily':  False,
+                'gpkg':      False,
+                'json':      False
+            }
 
 
     start = scene_output_stub['start_date'].strftime('%Y%m%d')
@@ -462,19 +528,37 @@ def _check_existing_files(scene_output_stub, config):
     epsg  = str(config['epsg'])
     lvl   = f"Processing Level - {config['level']} (PL{config['level']})"
     yr    = start[:4]
-    base  = (
-        f"SIVelocity_SAR_{start}_{end}_daily_12km_NH_{config['epsg']}_"
-        f"PL{config['level']}_v{config['version']}"
-    )
     nc_dir   = os.path.join(config['file_server'], epsg, lvl, yr, 'nc')
     gpkg_dir = os.path.join(config['file_server'], epsg, lvl, yr, 'gpkg')
     data_dir = os.path.join(config['file_server'], epsg, lvl, 'data')
 
 
+    # check NetCDF scenes
+    nc_scenes_exists = True
+    if config['level'] in ['00', '01', '02']:
+        nc_scenes_exists = os.path.exists(os.path.join(
+            nc_dir,
+            f"SIVelocity_SAR_{start}_{end}_scenes_12km_NH_{config['epsg']}"
+            f"_PL{config['level']}_v{config['version']}.nc"
+        ))
+        
+    # check NetCDF daily
+    nc_daily_exists = True
+    if config['level'] in ['00', '01', '02', '03']:
+        nc_daily_exists = os.path.exists(os.path.join(
+            nc_dir,
+            f"SIVelocity_SAR_{start}_{end}_daily_12km_NH_{config['epsg']}"
+            f"_PL{config['level']}_v{config['version']}.nc"
+        ))
+
     # check GeoPackage
     gpkg_exists = True
     if config['level'] in ['00', '02', '03']:
-        gpkg_exists = os.path.exists(os.path.join(gpkg_dir, f"{base}.gpkg"))
+        gpkg_exists = os.path.exists(os.path.join(
+            gpkg_dir,
+            f"SIVelocity_SAR_{start}_{end}_daily_12km_NH_{config['epsg']}"
+            f"_PL{config['level']}_v{config['version']}.gpkg"
+        ))
         
     # check JSON        
     json_exists = True
@@ -485,14 +569,10 @@ def _check_existing_files(scene_output_stub, config):
 
     
     result = {
-        'nc_scenes': os.path.exists(os.path.join(
-            nc_dir,
-            f"SIVelocity_SAR_{start}_{end}_scenes_12km_NH_{config['epsg']}"
-            f"_PL{config['level']}_v{config['version']}.nc"
-        )),
-        'nc_daily': os.path.exists(os.path.join(nc_dir, f"{base}.nc")),
-        'gpkg':     gpkg_exists,
-        'json':     json_exists
+        'nc_scenes': nc_scenes_exists,
+        'nc_daily': nc_daily_exists,
+        'gpkg': gpkg_exists,
+        'json': json_exists
     }
     return result
 
@@ -607,7 +687,9 @@ def _set_metadata(config):
             f'Command: {myCmd1}\nError Code: {rc}'
         )
         
-    return xr.open_dataset(ncgen_ofile_nc, decode_times=False)
+    with xr.open_dataset(ncgen_ofile_nc, decode_times=False) as ds:
+        # .load() pulls data into memory so the file can close
+        return ds.load()
 
 
 def _apply_projection(df_raw, epsg, config):
@@ -975,16 +1057,395 @@ def _add_json_templates(data_dir, config):
     import os
     import shutil
 
-    template_names = [
-        'land.geojson', '10m_coastline_50N.geojson', 'graticule_50N.geojson'
-    ]
-
-    for template_name in template_names:
+    for template_name in config['geojson_templates']:
         src_path = os.path.join(config['meta_dir'], template_name)
         dest_path = os.path.join(data_dir, template_name)
         if not os.path.exists(dest_path):
             shutil.copy(src_path, dest_path)
     
+
+def _download_uw_iabp_buoy_data(config):
+    """
+    Download and compile IABP buoy observation data from the
+    University of Washington.
+
+    This method fetches daily buoy data hosted by the UW IABP program
+    for a user-specified date range. It handles downloading individual
+    buoy `.txt` files, combining them into a unified dataset, validating
+    against the requested date range, and merging with buoy metadata such
+    as owner, type, and location.
+
+    Args:
+        initializer (object): Object containing user‑specified
+        configuration, including:
+            - `start_date` (str): Start date in YYYYMMDD format.
+            - `end_date` (str or None): End date in YYYYMMDD format,
+               or None to use current date.
+            - `overwrite` (bool): Whether to force download even if a
+               matching local file exists.
+            - Methods:
+                - `set_start_date(str)`
+                - `set_end_date(str)`
+                - `set_data_source(str)`
+                - `set_use_pickle(bool)`
+
+    Returns:
+        pandas.DataFrame: A cleaned and merged DataFrame of buoy data
+        with the following:
+            - Daily observations (Year, DOY, Lat, Lon, BP, Ts, Ta, etc.)
+            - High-level metadata (Buoy Type, Owner, Logistics, etc.)
+            - Aligned with the ERDDAP buoy data format
+
+    Raises:
+        SystemExit: If date formats are invalid, start date precedes data
+        availability, or if start_date > end_date.
+
+    Workflow Overview:
+        1. Validate input dates: Ensure proper formatting and
+           logical range.
+        2. Check for existing CSV:
+            - If found and not overwritten, load it after validating
+              its date range.
+        3. Fetch buoy metadata table from UW IABP site and identify
+           active buoys.
+        4. Download `.txt` files for each buoy, prioritizing
+           recent/active ones.
+        5. Combine all `.txt` files into a master observation table.
+        6. Clean and filter data by the date range and valid coordinates.
+        7. Merge metadata with daily observations.
+        8. Align columns to match ERDDAP standard and save the file.
+
+    Notes:
+        - Downloads text files for each buoy to
+          `self.config['buoy_data_dir']`.
+        - Saves merged output as a CSV named:
+          `<basename>_<start_date>_<end_date>.csv`
+        - Updates the `initializer` object with revised start/end dates
+          and pickle usage flags.
+        - Prints progress and status messages using `tqdm` and `print`.
+        - Data is only available from 2010 onward.
+        - Data with invalid coordinates or physically impossible values
+          (e.g., negative pressure) are filtered out.
+        - Reuses downloaded `.txt` files unless active or missing.
+    """
+    
+    import requests
+    import os
+    import glob
+    import pandas as pd
+    from tqdm import tqdm
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
+    import logging
+    
+    
+    logger = logging.getLogger('sar_drift_converter')
+    
+    # Use previous file found for date range
+    complete_buoy_data_file_basename = (
+        os.path.splitext(config['uw_iabp_buoy_filename'])[0]
+    )
+    
+    start_date_str  = config['start_date'].strftime('%Y-%m-%d')
+    end_date_str  = config['end_date'].strftime('%Y-%m-%d')
+    
+    complete_buoy_data_file = (
+        f'{complete_buoy_data_file_basename}_{start_date_str}_{end_date_str}.csv'
+    )
+    
+    if os.path.exists(complete_buoy_data_file) and not config['overwrite']:
+        logger.info(
+            "Loading previously downloaded data file | "
+            f"{complete_buoy_data_file}"
+          )
+        df = pd.read_csv(
+            complete_buoy_data_file,
+            delimiter=',',
+            header=0,
+            low_memory=False
+        )
+        
+        # check start and end dates match  the corresponding dates
+        # in stored data file before continuing
+        df['time (UTC)'] = pd.to_datetime(df['time (UTC)'])
+        min_date = df['time (UTC)'].dt.date.min()
+        max_date = df['time (UTC)'].dt.date.max()
+        if min_date < config['start_date']:
+            error_msg(
+                f"The start date in the stored file {min_date} does not "
+                "match the SAR drift data start date"
+                f"{config['start_date']}. The buoy data needs to be "
+                "downloaded. Either set `overwrite`=true in config file or "
+                f" delete {complete_buoy_data_file}"
+            )
+
+        if max_date > config['end_date']:
+            error_msg(
+                f"The end date in the stored file {max_date} does not "
+                "match the SAR drift data end date"
+                f"{config['end_date']}. The buoy data needs to be "
+                "downloaded. Either set `overwrite`=true in config file or "
+                f" delete {complete_buoy_data_file}"
+            )
+        
+        return df
+    
+    
+    # get high-level buoy attributes
+    url = config['uw_iabp_buoy_tables']
+    js_text = requests.get(url, verify=False).text
+    data_entries = js_text.split('\n')
+    
+    cols = [
+        'BuoyID', 'WMO', 'Start Year', 'Buoy Type', 'Owner', 'Logistics', 
+        'Latest Report', 'Latest Latitude', 'Latest Longitude',
+        'Latest BP', 'Latest Ts', 'Latest Ta'
+    ]
+    buoy_data = []
+    for entry in data_entries:
+        if entry.startswith('['):
+            # convert entry into a list
+            entry = entry.replace('"', '').replace('[', '').replace(']','')
+            entry_list = entry.split(',')                                  
+            buoy_data.append(entry_list[0:12]) # only take 12 columns
+    df_buoy_table = pd.DataFrame(columns=cols, data=buoy_data)
+    
+    # fix `Latest Report` column set NaN to 2012-12-31 00:00:00
+    df_buoy_table['Latest Report'] = pd.to_datetime(
+        df_buoy_table['Latest Report'], errors='coerce'
+    )
+    default_date = pd.Timestamp("2012-12-31 00:00:00")
+    df_buoy_table['Latest Report'] = (
+        df_buoy_table['Latest Report'].fillna(default_date)
+    )
+
+
+    df_buoy_table['report_date'] = (
+        df_buoy_table['Latest Report'].dt.strftime('%Y-%m-%d')
+    )
+        
+    
+    # Filter buoys whose latest report falls within the configured date range    
+    date_range_mask = (
+        (df_buoy_table['report_date'].notna()) &
+        (df_buoy_table['report_date'] >= start_date_str) &
+        (df_buoy_table['report_date'] <= end_date_str)
+    )
+    in_range_buoy_list = df_buoy_table.loc[date_range_mask, 'BuoyID'].unique()
+    
+    
+    # download each buoy file
+    logger.info(
+        f"Downloading UW IABP buoy data | {config['start_date']} "
+        f"to {config['end_date']} | Total buoys {len(in_range_buoy_list)}"
+    )
+    for buoy_id in tqdm(
+            in_range_buoy_list,
+            desc='Downloading buoy data',
+            unit='buoy file'
+        ):
+        logger.info(f"Downloading buoy {buoy_id}")
+        buoy_file = os.path.join(config['buoy_dir'], f"{buoy_id}.txt")
+        url = f"{config['uw_iabp_buoy_url']}?bid={buoy_id}"
+        buoy_text = requests.get(url, verify=False).text
+        with open(buoy_file, 'w', encoding='utf-8') as txt:
+            txt.write(buoy_text)
+
+            
+    # create new complete buoy data CSV file
+    downloaded_buoy_list = []
+    for buoy_path in tqdm(glob.glob(os.path.join(
+            config['buoy_dir'], '*.txt')),
+            desc='Building complete buoy data file',
+            unit='buoy'
+        ):
+        if 'copy' in buoy_path:
+            # corrupted downloaded files with have `copy` in file name
+            continue
+        
+        with open(buoy_path, 'r', encoding='UTF-8') as txt:
+            for idx, line in enumerate(txt):
+                line = line.strip()
+                if line and idx > 0: # skip heading
+                    downloaded_buoy_list.append(line.split(','))
+
+
+    # create data frame of all downloaded buoys
+    df = pd.DataFrame(downloaded_buoy_list)
+    df = df.iloc[:, [0, 1, 4, 6, 7]].copy()
+    df.columns = ['BuoyID', 'Year', 'DOY', 'Lat', 'Lon']
+    df.to_csv('buoys_list', index=False)
+    df['Year'] = df['Year'].astype(int)
+    df['DOY']  = df['DOY'].astype(float)
+    base_year = pd.to_datetime(df['Year'].astype(str), format='%Y')
+    full_datetime = base_year + pd.to_timedelta(df['DOY'] - 1, unit='D')
+    df['time (UTC)'] = full_datetime
+    df['date'] = df['time (UTC)'].dt.strftime('%Y-%m-%d')
+    df.drop(['Year', 'DOY'], axis=1, inplace=True)
+    
+    
+    # reduce observations to match start and end dates
+    date_filter = (
+        (df['date'] >= start_date_str) &
+        (df['date'] <= end_date_str)
+    )
+    df = df[date_filter]
+    
+    
+    # rename geographic coordinate columns
+    df.rename(columns={
+        'BuoyID': 'buoy_id',
+        'Lon': 'lon',
+        'Lat': 'lat'
+    }, inplace=True)
+    df['lat'] = df['lat'].astype(float)
+    df['lon'] = df['lon'].astype(float)
+
+    
+    return df
+
+
+def _load_buoy_data(config):
+    import pandas as pd
+    import logging
+    from tqdm import tqdm
+    
+    print('Opening buoy data file...')
+    
+    logger = logging.getLogger('sar_drift_converter')
+    
+    df = _download_uw_iabp_buoy_data(config)
+    df['time (UTC)'] = pd.to_datetime(
+        df['time (UTC)'], format='%Y-%m-%dT%H:%M:%SZ'
+    )
+    
+    logger.info(f'Loaded buoy data | {df.shape[0]} rows')
+        
+    # Filter out buoys below 50°N — outside Arctic/sub-Arctic
+    # region of interest
+    df_filter = (df['lat'] >= 50.0)
+    df = df[df_filter].copy()
+    
+    
+    # If -180 appears for lon and -90 appears for lat,
+    # it is a false reading. Also filter out invalid coordiantes!           
+    df_filter = (
+        (df['lat'] != -90.0) &
+        (df['lon'] != -180.0) &
+        (df['lat'].between(-90.0, 90.0)) &
+        (df['lon'].between(-180.0, 360.0))
+    )            
+    df = df[df_filter].copy()
+
+   
+    # Take the first observation of each day per buoy regardless of hour,
+    # since hour==0 is unreliable — some buoys report multiple times in the
+    # first hour and some days have no midnight observation at all
+    df = (
+        df.groupby(['buoy_id', 'date'], as_index=False)
+          .first()
+          .sort_values(['buoy_id', 'time (UTC)'])
+    )
+    
+    buoys_skipped = []
+    drift_results = []
+    
+    buoy_groups = list(df.groupby('buoy_id'))
+    for buoy_id, df_buoy in tqdm(
+            buoy_groups, desc='Processing buoys', unit='buoy'
+        ):
+    
+        # Cannot track buoys without zero-hour observations
+        if df_buoy.shape[0] == 0:
+            buoys_skipped.append(f'{buoy_id}: no zero-hour observations')
+            continue
+
+        
+        # Skip buoy if there is just one observation
+        # (no drift interval possible)
+        first_obs = df_buoy['date'].iloc[0]
+        last_obs  = df_buoy['date'].iloc[-1]
+        if first_obs == last_obs:
+            buoys_skipped.append(f'{buoy_id}: only one observation')
+            continue
+        
+                
+        """
+        For each buoy, create two aligned slices of the midnight-only rows:
+          starts = every row except the last
+          ends   = every row except the first
+        When paired by position, each start row lines up with the very next
+        midnight observation for that buoy, forming one drift interval per row.
+        `groupby` ensures the last row of one buoy never bleeds into the
+        next buoy.
+        """
+        starts = df_buoy.iloc[:-1].reset_index(drop=True)
+        ends   = df_buoy.iloc[1:].reset_index(drop=True)
+    
+        drift_df = pd.DataFrame({
+            'buoy_id':     starts['buoy_id'],
+            'date':        starts['date'],
+            'latitude_1':  starts['lat'],
+            'longitude_1': starts['lon'],
+            'latitude_2':  ends['lat'],
+            'longitude_2': ends['lon'],
+            'duration':    (
+                ends['time (UTC)'] - starts['time (UTC)']
+            ).dt.total_seconds()
+        })
+    
+        
+        drift = pd.DataFrame(_calculate_drift_daily(
+            lat1=drift_df['latitude_1'].values,
+            lon1=drift_df['longitude_1'].values,
+            lat2=drift_df['latitude_2'].values,
+            lon2=drift_df['longitude_2'].values,
+            duration=drift_df['duration'].values,
+            epsg=config['epsg']
+        ))
+        drift.insert(0, 'buoy_id', drift_df['buoy_id'].values)
+        drift.insert(1, 'date', drift_df['date'].values)
+        drift.insert(2, 'latitude_1', drift_df['latitude_1'].values)
+        drift.insert(3, 'longitude_1', drift_df['longitude_1'].values)
+        drift.insert(4, 'latitude_2', drift_df['latitude_2'].values)
+        drift.insert(5, 'longitude_2', drift_df['longitude_2'].values)
+    
+        # as with SAR drift filter, remove buoys where drift > 25 km/day
+        speed_filter = (drift['speed_kmdy'] <= 25)
+        drift = drift[speed_filter].copy()
+        
+        drift_results.append(drift)
+    
+    # Combine all buoys into a single DataFrame
+    drift_all = pd.concat(drift_results, ignore_index=True)
+    
+    
+    # log skipped buoys
+    if buoys_skipped:
+        logger.info(f'Skipped {len(buoys_skipped)} buoy(s) |')
+        for msg in buoys_skipped:
+            logger.info(f'Buoy skipped | {msg}')
+
+            
+    return drift_all
+    
+    
+def _get_layer_name(scene_id):
+    # unique layer name is:
+    # [sensor_1]_[hour_1]_[minute_1]_[second_1]_
+    # [sensor_2]_[hour_2]_[minute_2]_[secomd_2]
+    scene_id_parts = scene_id.split('_')
+    layer_name = (
+        f'drift_vectors_{scene_id_parts[0]}_'
+        f'{scene_id_parts[5]}_{scene_id_parts[6]}_'
+        f'{scene_id_parts[7]}_{scene_id_parts[13]}_'
+        f'{scene_id_parts[18]}_{scene_id_parts[19]}_'
+        f'{scene_id_parts[20]}'
+    )
+
+    return layer_name
+
 
 #=============
 # Calculations
@@ -1135,6 +1596,7 @@ def read_sar_drift_data_file(input_file, config):
           files have been combined.
     """
 
+    import numpy as np
     import pandas as pd
     from datetime import datetime, timedelta
 
@@ -1166,6 +1628,11 @@ def read_sar_drift_data_file(input_file, config):
     df['sensor2']  = df['File2'].str.partition('_')[0]
     df['scene_id'] = df['File1'] + '_' + df['File2']
 
+
+    # longitudes appear mixed - standardize -180 to 180
+    df['Lon1'] = np.where(df['Lon1'] > 180, df['Lon1'] - 360, df['Lon1'])
+    df['Lon2'] = np.where(df['Lon2'] > 180, df['Lon2'] - 360, df['Lon2'])
+
     # rename geographic coordinate columns
     df.rename(columns={
         'Lat1': 'latitude_1',
@@ -1191,14 +1658,14 @@ def outlier_search(df, config, base_name, radius_km,
                    chi_square_level, passes):
     """
     Detect and classify outlier drift vectors within each SAR scene.
-
+ 
     For each scene (grouped by `File1`/`File2`), computes per-vector outlier
     flags using two independent methods: z-score on speed and bearing, and
     Mahalanobis distance on displacement components. Results are combined into
     a two-digit `outlier_category` code encoding outlier type and statistical
     confidence. Detection is run iteratively, excluding already-flagged vectors
     from the neighbor pool on each subsequent pass.
-
+ 
     Args:
         df (pandas.DataFrame): Input drift observations. Expected columns:
                 - 'File1', 'File2' (str): Scene pair identifiers used for
@@ -1242,7 +1709,7 @@ def outlier_search(df, config, base_name, radius_km,
                       rebuilds the neighbor pool using only current inliers
                       (`outlier_category` in `['00', '01']`). Iteration stops
                       early if the inlier count stabilizes between passes.
-
+ 
     Returns:
         pandas.DataFrame: Copy of `df` with the following columns added:
                 - 'outlier_category' (str): Two-digit code encoding outlier
@@ -1272,16 +1739,16 @@ def outlier_search(df, config, base_name, radius_km,
                 - 'md_outlier_pass' (int): Pass index (1-based) on which the
                   vector was first flagged by Mahalanobis distance; −1 if
                   never flagged.
-
+ 
     Notes:
         **Level '01' short-circuit:** If `config['level']` is '01', the
         function assigns `outlier_category = '-9'` to all rows and returns
         immediately without performing any detection.
-
+ 
         **outlier_category encoding:** The two-digit string combines a tens
         digit for outlier type and a units digit for statistical confidence
         (0 = below neighbor threshold, 1 = at or above threshold):
-
+ 
         | Code | Outlier Type                              |
         |------|-------------------------------------------|
         | `00` | None (under neighbor threshold)           |
@@ -1300,31 +1767,41 @@ def outlier_search(df, config, base_name, radius_km,
         | `61` | Mahalanobis distance and bearing (conf.)  |
         | `70` | Mahalanobis distance, distance and bearing|
         | `71` | Mahalanobis distance, distance and bearing (conf.) |
-
+ 
         **Confidence digit:** For categories involving Mahalanobis distance
         (30–71), confidence uses `md_neighbors`; for all others it uses
         `min_neighbors`.
-
+ 
         **Mahalanobis estimation:** Uses `LedoitWolf` covariance on
         standardized displacement components, which is more stable than
         `MinCovDet` for small or ill-conditioned neighbor samples. Vectors
         with fewer than `max(2p+1, md_neighbors)` neighbors or a rank-
         deficient neighbor matrix receive `mahal_sq = NaN` and are not
         flagged.
-
+ 
         **Bearing z-score:** Computed using circular statistics —
         `arctan2(sin(Δ), cos(Δ))` normalizes the angular difference before
         dividing by circular standard deviation, correctly handling wrap-
         around near 0°/360°.
-
+ 
         **Iterative passes:** On each pass, the neighbor pool is restricted
         to current inliers only, preventing flagged vectors from inflating
         local statistics. Iteration stops early if the inlier count does not
         change between passes.
+ 
+        **Performance:** Per-vector results are accumulated in plain Python
+        lists during the inner loop and assigned to `out_df` in a single
+        bulk `loc` operation per column per scene. This avoids the
+        repeated copy-on-write overhead of row-by-row `df.at[...]` calls,
+        which compounds significantly across large scenes and many days.
+        The `tree.query` call for Mahalanobis neighbors is also separated
+        from the `query_ball_point` result to prevent the kNN index array
+        from overwriting the radius-based neighbor list mid-loop.
     """
     
     import numpy as np
     import logging
+    import pandas as pd
     from scipy.spatial import cKDTree
     from sklearn.covariance import LedoitWolf
     from scipy.stats import chi2
@@ -1334,7 +1811,7 @@ def outlier_search(df, config, base_name, radius_km,
         df['outlier_category'] = '-9'
         return df
     
-
+ 
     out_df = df.reset_index(drop=True).copy()
     
     radius_m = radius_km * 1000
@@ -1363,7 +1840,7 @@ def outlier_search(df, config, base_name, radius_km,
         sort=False
     ).ngroup() + 1
    
-
+ 
     # iterate passes through data to identify outliers and recheck
     # recommended to leave just two passes so data don't get too homogenized
     for pass_idx in range(passes):
@@ -1371,7 +1848,7 @@ def outlier_search(df, config, base_name, radius_km,
         # instantiate pool data frame
         # keep any inlier whether confident or not
         pool_df = out_df[out_df['outlier_category'].isin(['00', '01'])].copy() 
-
+ 
         
         # base category set to all zeros
         base_cat = np.zeros(len(out_df), dtype=np.int8)
@@ -1387,13 +1864,28 @@ def outlier_search(df, config, base_name, radius_km,
                 continue
             
             tree = cKDTree(xy)
-            all_neighbors = tree.query_ball_point(xy, r=radius_m)
+            ball_neighbors = tree.query_ball_point(xy, r=radius_m)
             Xall = scene_df[
                 ['sea_ice_x_displacement', 'sea_ice_y_displacement']
             ].to_numpy()
-
-            
-            for local_idx, local_neighbors in enumerate(all_neighbors):
+ 
+            # pre-compute kNN indices once per scene (avoids overwriting
+            # ball_neighbors mid-loop in the original row-by-row approach)
+            k_md = min(md_neighbors + 1, len(scene_df))
+            _, knn_indices = tree.query(xy, k=k_md)
+ 
+            # accumulate per-row results in lists
+            sd_neighbor_indices_list = []
+            sd_neighbor_count_list = []
+            distance_z_score_list = []
+            bearing_z_score_list = []
+            md_neighbor_indices_list = []
+            md_neighbor_count_list = []
+            mahal_sq_list = []
+            thr_sq_list = []
+            mahal_outlier_flag_list = []
+ 
+            for local_idx, local_neighbors in enumerate(ball_neighbors):
                 
                 # drop self
                 neigh_idxs = [
@@ -1403,10 +1895,19 @@ def outlier_search(df, config, base_name, radius_km,
                 target_out_idx = scene_df.index[local_idx]
                 
                 if len(neigh_idxs) == 0:
+                    sd_neighbor_indices_list.append([])
+                    sd_neighbor_count_list.append(0)
+                    distance_z_score_list.append(np.nan)
+                    bearing_z_score_list.append(np.nan)
+                    md_neighbor_indices_list.append([])
+                    md_neighbor_count_list.append(0)
+                    mahal_sq_list.append(np.nan)
+                    thr_sq_list.append(np.nan)
+                    mahal_outlier_flag_list.append(False)
                     continue
                 
                 neigh_rows = scene_df.iloc[neigh_idxs]
-
+ 
                 neigh_dist = neigh_rows['sea_ice_speed'].to_numpy()
                 neigh_bear = (
                     neigh_rows['direction_of_sea_ice_displacement'].to_numpy()
@@ -1431,7 +1932,7 @@ def outlier_search(df, config, base_name, radius_km,
                     dist_z_score = np.nan
                 else:   
                     dist_z_score = (np.abs(cell_dist - dist_mean)/dist_std)
-                # dist_z_scores.append(dist_z_score)
+ 
                 # normalize the radians because mean = 359° and cell = 1°
                 # subtraction gives 358°, but the real smallest difference
                 # is 2°. Use delta as a measurement of standard deviation
@@ -1443,7 +1944,7 @@ def outlier_search(df, config, base_name, radius_km,
                     bear_z_score = np.nan
                 else:
                     bear_z_score = np.abs(delta_bear) / bear_std
-
+ 
                 
                 # store neighbors as out_df indices
                 neigh_out_idx = [
@@ -1452,39 +1953,32 @@ def outlier_search(df, config, base_name, radius_km,
                 neigh_out_idx = [
                     i for i in neigh_out_idx if i != target_out_idx
                 ]
-    
+ 
+                sd_neighbor_indices_list.append(neigh_out_idx)
+                sd_neighbor_count_list.append(len(neigh_out_idx))
+                distance_z_score_list.append(np.round(dist_z_score, 3))
+                bearing_z_score_list.append(np.round(bear_z_score, 3))
                 
-                out_df.at[target_out_idx, "sd_neighbor_indices"] = (
-                    neigh_out_idx
-                )
-                out_df.at[target_out_idx, "sd_neighbor_count"] = (
-                    len(neigh_out_idx)
-                )
-                out_df.at[target_out_idx, "distance_z_score"] = (
-                    np.round(dist_z_score, 3)
-                )
-                out_df.at[target_out_idx, "bearing_z_score"] = (
-                    np.round(bear_z_score, 3)
-                )
-                
-
+ 
                 # Mahalanobis distance
-                k_md = min(md_neighbors+1, len(scene_df))
-                distances, all_neighbors = tree.query(xy, k=k_md)
-                neigh_idxs = all_neighbors[local_idx].tolist()
-                # drop self
-                neigh_idxs  = [j for j in neigh_idxs if j != local_idx] 
+                # use pre-computed knn_indices to avoid overwriting ball
+                # neighbor results (all_neighbors) mid-loop
+                md_neigh_idxs = [
+                    j for j in knn_indices[local_idx].tolist()
+                    if j != local_idx
+                ]
                 
             
                 # Mahalanobis on neighbors
                 x = Xall[local_idx, :] # target vector
-                Xn = Xall[neigh_idxs, :] # neighbor matrix
+                Xn = Xall[md_neigh_idxs, :] # neighbor matrix
                 
                 # Need enough neighbors to estimate covariance robustly
                 p = Xn.shape[1] # degrees of freedom
-                if len(neigh_idxs) < max(2 * p + 1, md_neighbors) or \
+                if len(md_neigh_idxs) < max(2 * p + 1, md_neighbors) or \
                     k_md < md_neighbors + 1:
                     mahal_sq = np.nan
+                    thr_sq   = np.nan
                 else:
                     # standardize data
                     mu = Xn.mean(axis=0)
@@ -1495,41 +1989,55 @@ def outlier_search(df, config, base_name, radius_km,
                     
                     if np.linalg.matrix_rank(Xn_z) < p:
                         mahal_sq = np.nan
+                        thr_sq   = np.nan
                     else:
                         # standard covariance measurement
                         # mcd = MinCovDet().fit(Xn_z)
                         # squared distance
                         # mahal_sq = mcd.mahalanobis([x_z])[0]
-                        # better for small  samples or the covariance
+                        # better for small samples or the covariance
                         # is ill-conditioned.
-                        lw = LedoitWolf().fit(Xn_z) 
-                        mahal_sq = lw.mahalanobis([x_z])[0] # squared distance
-                    
-                    
-                alpha = chi_square_level # 99 strict threshold
-                thr_sq = chi2.ppf(alpha, df=p)  # squared-distance threshold
+                        lw = LedoitWolf().fit(Xn_z)
+                        # squared distance
+                        mahal_sq = lw.mahalanobis([x_z])[0]
+                        # 99 strict threshold
+                        alpha  = chi_square_level 
+                        # squared-distance threshold
+                        thr_sq = chi2.ppf(alpha, df=p) 
                 
                 # store neighbors as out_df indices
-                neigh_out_idx = [
-                    int(scene_df.index[j]) for j in neigh_idxs
+                md_neigh_out_idx = [
+                    int(scene_df.index[j]) for j in md_neigh_idxs
                 ]
-                neigh_out_idx = [
-                    i for i in neigh_out_idx if i != target_out_idx
+                md_neigh_out_idx = [
+                    i for i in md_neigh_out_idx if i != target_out_idx
                 ]
-                
-                
-                out_df.at[target_out_idx, "md_neighbor_indices"] = (
-                    neigh_out_idx
+ 
+                md_neighbor_indices_list.append(md_neigh_out_idx)
+                md_neighbor_count_list.append(len(md_neigh_out_idx))
+                mahal_sq_list.append(mahal_sq)
+                thr_sq_list.append(thr_sq)
+                mahal_outlier_flag_list.append(
+                    False if np.isnan(mahal_sq)
+                    else bool(mahal_sq > thr_sq)
                 )
-                out_df.at[target_out_idx, "md_neighbor_count"] = (
-                    len(neigh_out_idx)
-                )
-                out_df.at[target_out_idx, 'mahal_sq'] = mahal_sq
-                out_df.at[target_out_idx, 'thr_sq'] = thr_sq
-                out_df.at[target_out_idx, 'mahal_outlier_flag'] = (
-                    (mahal_sq > thr_sq)
-                )
-
+ 
+            # bulk-assign all per-row results to data frame
+            idx = scene_df.index
+            out_df.loc[idx, "sd_neighbor_indices"] = pd.array(
+                sd_neighbor_indices_list, dtype=object
+            )
+            out_df.loc[idx, "sd_neighbor_count"] = sd_neighbor_count_list
+            out_df.loc[idx, "distance_z_score"] = distance_z_score_list
+            out_df.loc[idx, "bearing_z_score"] = bearing_z_score_list
+            out_df.loc[idx, "md_neighbor_indices"] = pd.array(
+                md_neighbor_indices_list, dtype=object
+            )
+            out_df.loc[idx, "md_neighbor_count"] = md_neighbor_count_list
+            out_df.loc[idx, "mahal_sq"] = mahal_sq_list
+            out_df.loc[idx, "thr_sq"] = thr_sq_list
+            out_df.loc[idx, "mahal_outlier_flag"] = mahal_outlier_flag_list
+ 
             
             # outlier boolean flags
             distance_filter = out_df['distance_z_score'] > z_score_level
@@ -1622,214 +2130,194 @@ def outlier_search(df, config, base_name, radius_km,
     return out_df
 
 
-def create_netcdf(df, base_name, config, template_ds, scene_i_j):
+def create_netcdf(df, nc_path, config, template_ds, multi_layered=False):
     """
     Create a gridded NetCDF sea-ice drift product from point/vector
-    observations.
- 
-    This function maps input drift vectors (lon/lat locations with speed and
-    displacement components) onto a polar stereographic grid, populates a
-    NetCDF dataset using attributes from a metadata/template dataset, crops
-    the output to the spatial extent of valid observations (with padding),
-    and writes the result to disk with compression.
- 
+    observations. Supports both single-scene and multi-scene (daily)
+    output in one unified function.
+
+    Maps input drift vectors onto the NSIDC 12.5 km polar stereographic
+    grid, populates a NetCDF dataset using attributes from a CDL metadata
+    template, crops the output to the spatial extent of all valid
+    observations with padding, and writes the result to disk with
+    compression.
+
+    For single-scene output (`multi_layered=False`), the DataFrame is
+    treated as one scene and written as a single time layer. For daily
+    output (`multi_layered=True`), the DataFrame is grouped by `scene_id`
+    and each group is written as a separate time layer on the shared grid.
+    In both cases the output is cropped to the bounding box of all finite
+    `sea_ice_speed` values across the full DataFrame.
+
     Args:
-        df (pandas.DataFrame): Input table of drift observations.
-            Expected columns (as produced by `read_sar_drift_data_file`):
-                - 'date_start' (datetime-like): Start timestamp for the vector.
-                - 'date_end' (datetime-like): End timestamp for the vector.
-                - 'duration' (float): Observation duration in seconds.
-                - 'longitude_1' (float): Starting longitude (degrees,
-                  EPSG:4326); used to locate each vector on the NSIDC 12.5 km
-                  polar stereographic grid regardless of the projected CRS
-                  used for displacement computation.
-                - 'latitude_1' (float): Starting latitude (degrees, EPSG:4326).
-                - 'sea_ice_speed' (float): Sea-ice speed (m s⁻¹); derived
-                  from the projected CRS specified by `config['epsg']`
-                  upstream.
-                - 'sea_ice_x_displacement' (float): X displacement (m);
-                  projected in `config['epsg']` CRS.
-                - 'sea_ice_y_displacement' (float): Y displacement (m);
-                  projected in `config['epsg']` CRS.
-                - 'direction_of_sea_ice_displacement' (float): Bearing
-                  (degrees); geodesic, independent of projected CRS.
-                - 'outlier_category' (str): Two-digit outlier classification
-                  code (e.g. '00', '01', '11'). For level '03', only rows
-                  with values '00' or '01' are retained and the value is
-                  recoded to −1 before writing.
-                - 'Maxcorr1', 'Maxcorr2' (float): Cross-correlation scores
-                  (used for `measurement_error` flag in levels '00'/'01').
-                - '_use_75km' (bool): Whether the 75 km file was used
-                  (controls speed threshold for `speed_error` flag).
-        base_name (str): Base filename (without extension) used to name
-                         the output NetCDF file
-                         `<config['nc_dir']>/<base_name>.nc`.
+        df (pandas.DataFrame): Input drift observations. For scene output,
+            contains rows for one scene pair. For daily output, contains
+            rows for all scene pairs in the day. Expected columns:
+                - 'scene_id' (str): Scene pair identifier; used as
+                  `layer_id` coordinate. For multi-layered output, rows
+                  are grouped by this column.
+                - 'date_start' (datetime-like): Start timestamp.
+                - 'date_end' (datetime-like): End timestamp.
+                - 'longitude_1', 'latitude_1' (float): Start position
+                  (EPSG:4326); used to locate grid cells.
+                - 'sea_ice_speed' (float): Drift speed (m s⁻¹).
+                - 'sea_ice_x_displacement' (float): X displacement (m).
+                - 'sea_ice_y_displacement' (float): Y displacement (m).
+                - 'direction_of_sea_ice_displacement' (float): Forward
+                  azimuth (degrees).
+                - 'outlier_category' (str): Two-digit outlier code. For
+                  level '03', only rows with values '00' or '01' are
+                  retained and recoded to -1 before writing.
+                - 'Maxcorr1', 'Maxcorr2' (float): Cross-correlation
+                  scores; used for `measurement_error` flag in levels
+                  '00'/'01'.
+                - '_use_75km' (bool): Whether the 75 km file was used;
+                  controls speed threshold for `speed_error` flag. For
+                  multi-layered output this is evaluated per scene group
+                  since different scenes may differ.
+        base_name (str): Base filename (without extension). Output is
+            written to `<config['nc_dir']>/<base_name>.nc`.
         config (dict): Configuration dictionary. Must include:
-                - 'nc_dir' (str): Output directory where the NetCDF file
-                                  is written.
-                - 'level'  (str): Processing level ('00'–'03'); controls
-                                  inlier filtering, error flag computation,
-                                  and fill value assignment.
-                - 'epsg' (int): EPSG code of the projected CRS used upstream
-                                for displacement and speed computation.
-                                Does not affect the output grid, which is
-                                always the NSIDC 12.5 km polar stereographic
-                                grid (EPSG:3413).
-        template_ds (xarray.Dataset): Template dataset providing the target
-                                      grid coordinate arrays and dimensions.
-        scene_i_j (dict): Mutable dictionary updated in-place with the list
-                          of (i, j) grid index pairs for this scene, keyed
-                          by `base_name`.
- 
+                - 'nc_dir' (str): Output directory.
+                - 'level' (str): Processing level ('00'–'03'); controls
+                  inlier filtering, error flag computation, and fill
+                  value assignment.
+                - 'epsg' (int): EPSG code used upstream for displacement
+                  computation. Does not affect output grid, which is
+                  always the NSIDC 12.5 km polar stereographic grid.
+        template_ds (xarray.Dataset): Template dataset providing the
+            target grid coordinate arrays and dimensions.
+        multi_layered (bool): If False (default), writes a single time
+            layer for the scene. If True, groups `df` by `scene_id` and
+            writes one time layer per group for daily output.
+
     Returns:
-        str: Path to the written NetCDF file
-             (`<config['nc_dir']>/<base_name>.nc`). Returns `None` early
-             if level is '03' and no rows survive the inlier filter.
- 
-    Workflow:
-        1. Parse `date_start` and `date_end` to pandas datetimes.
-        2. For level '03': retain only rows where `outlier_category` is '00'
-           or '01' (inliers), recode `outlier_category` to −1, and return
-           early if no rows survive.
-        3. Derive the scene reference time and time bounds from `duration`,
-           `date_start`, and `date_end`.
-        4. Compute error flags (`bearing_error`, `speed_error`,
-           `measurement_error`) for levels '00'/'01'; set to −9 otherwise.
-        5. Convert starting positions (`longitude_1`, `latitude_1`) to NSIDC
-           12.5 km polar stereographic grid indices (i, j) using
-           `_polar_lonlat_to_ij`. Grid placement always uses EPSG:4326
-           geographic coordinates and is independent of `config['epsg']`.
-        6. Load CDL-derived variable and global attributes from
-           `_set_metadata(config)`.
-        7. Build an `xarray.Dataset` on the full template grid, initialised
-           with NaN / −9 fill values.
-        8. Populate the time slice at index 0 with per-observation values for
-           all science and flag variables.
-        9. Crop the dataset to the bounding box of finite `sea_ice_speed`
-           values, with a 4-cell padding on each side.
-       10. Write to NetCDF with zlib compression (level 4) and explicit
-           `_FillValue` / dtype encoding per variable.
- 
+        str: Path to the written NetCDF file. Returns None early if
+            level is '03' and no rows survive the inlier filter.
+
     Notes:
         - The output grid is always the NSIDC 12.5 km polar stereographic
-          grid (EPSG:3413), regardless of the `config['epsg']` value used
-          for upstream displacement computation.
-        - The `time` coordinate is set to the minimum `date_start` value
-          across all observations, stored as seconds since 2000-01-01
-          (Julian seconds, matching the source file convention).
-        - `time_bnds` spans [min(date_start), max(date_end)] for the scene.
-        - Global attributes `date_created`, `time_coverage_start`, and
-          `time_coverage_end` are updated after dataset construction.
-        - Duplicate (i, j) assignments are detected and logged; the last
-          observation written wins for that grid cell.
-        - All int16 flag variables use −9 as their `_FillValue`. For level
-          '03', `outlier_category` carries −1 for all written observations,
-          indicating the outlier algorithm has been applied and the vector
-          passed as an inlier.
+          grid, regardless of `config['epsg']`.
+        - `time` coordinate uses minimum `date_start` in Julian seconds
+          (seconds since 2000-01-01).
+        - `time_bnds` spans [min(date_start), max(date_end)] per time
+          layer.
+        - `layer_id` is set to `scene_id` for each time layer.
+        - The bounding box crop uses all finite `sea_ice_speed` values
+          across the full grid, regardless of whether output is single-
+          scene or multi-scene. A 4-cell pad is applied on each side.
+        - Duplicate (i, j) assignments within a time layer are detected
+          and logged; the last observation written wins.
+        - All int16 flag variables use -9 as `_FillValue`.
+        - For level '03', `outlier_category` is recoded to -1 for all
+          written observations.
+        - For `multi_layered=True`, `speed_error` threshold is evaluated
+          per scene group using that group's `_use_75km` value, since
+          scenes within a day may differ.
     """
- 
-    import os
+
     import numpy as np
     import pandas as pd
     from datetime import datetime
     import xarray as xr
     import logging
 
-    
-    # log activity
     logger = logging.getLogger('sar_drift_converter')
- 
-    # standardize date/time stamps
+
+
+    # standardize timestamps
     df_copy = df.copy()
     df_copy['date_start'] = pd.to_datetime(df_copy['date_start'])
     df_copy['date_end'] = pd.to_datetime(df_copy['date_end'])
-    
-    
-    # For level 03, retain only inlier vectors (outlier_category 00 or 01),
-    # then recode to -1 to signal that outlier filtering has been applied.
+
+
+    # for level 03, retain only inlier vectors and recode outlier_category
     if config['level'] == '03':
         outlier_filter = df_copy['outlier_category'].isin(['00', '01'])
         df_copy = df_copy[outlier_filter].copy()
-        
         df_copy['outlier_category'] = -1
         if df_copy.shape[0] == 0:
-            # it might be possible the data frame was labelled
-            # as all outliers.
             logger.info('All outliers found. No data to process.')
             return None
-    
-    layer_id_str = df_copy['scene_id'].iloc[0]
- 
-    # use minimum date_start as scene reference time (Julian seconds)
-    # reconstruct Time1_JS from date_start relative to 2000-01-01
-    epoch = pd.Timestamp('2000-01-01')
-    time_sec = float(
-        (df_copy['date_start'].min() - epoch).total_seconds()
-    )
-    time_array = np.array([time_sec], dtype='float64')
- 
-    # time bounds: [min date_start, max date_end] in Julian seconds
-    time_bounds = np.array([
-        [time_sec,
-         float((df_copy['date_end'].max() - epoch).total_seconds())]
-    ], dtype='float64')
- 
-    min_time = df_copy['date_start'].min()
-    max_time = df_copy['date_end'].max()
- 
-    # compute error flags for levels 00/01; set fill value otherwise
+
+
+    # compute error flags per row for levels 00/01
     if config['level'] in ['00', '01']:
-        # bearing check: 0 if valid, 1 if invalid
-        df_filter = (
-            (df_copy['direction_of_sea_ice_displacement'] != 0) &
-            (df_copy['sea_ice_speed'] > 0)
-        )
-        df_copy['bearing_error'] = (~df_filter).astype(int)
- 
-        # speed check: 0 if valid, 1 if invalid
-        speed_thresh = 35.0 if df_copy['_use_75km'].iloc[0] else 25.0
-        df_filter = (df_copy['sea_ice_speed'] < speed_thresh)
-        df_copy['speed_error'] = (~df_filter).astype(int)
- 
-        # Maxcorr2 > Maxcorr1 check: 0 if valid, 1 if invalid
-        df_filter = (df_copy['Maxcorr1'] > df_copy['Maxcorr2'])
-        df_copy['measurement_error'] = df_filter.astype(int)
+        df_copy['bearing_error'] = (
+            (df_copy['direction_of_sea_ice_displacement'] == 0) &
+            (df_copy['sea_ice_speed'] == 0)
+        ).astype(int)
+
+        # speed threshold varies per scene — apply per scene_id group
+        for scene_id, grp in df_copy.groupby('scene_id'):
+            speed_thresh = 35.0 if grp['_use_75km'].iloc[0] else 25.0
+            speed_error = (~(grp['sea_ice_speed'] < speed_thresh)).astype(int)
+            df_copy.loc[grp.index, 'speed_error'] = speed_error
+
+        df_copy['measurement_error'] = (
+            df_copy['Maxcorr1'] > df_copy['Maxcorr2']
+        ).astype(int)
+        
     else:
-        df_copy['bearing_error'] = -9
-        df_copy['speed_error'] = -9
-        df_copy['measurement_error'] = -9
- 
-    # use starting position (longitude_1, latitude_1) to locate grid cells
+        # for levels 2 and 3, the bad vectors have already been removed
+        df_copy['bearing_error'] = 0
+        df_copy['speed_error'] = 0
+        df_copy['measurement_error'] = 0
+
+
+    # map all observations to (i, j) grid indices
     lons = df_copy["longitude_1"].to_numpy(dtype=float)
     lats = df_copy["latitude_1"].to_numpy(dtype=float)
- 
-    # get the i,j coordinates based on lon/lat
-    i, j = _polar_lonlat_to_ij(
-        lons,
-        lats,
-        grid_size=12.5,
-        hemisphere="north"
+    lons_normalized = np.where(lons < 0, lons + 360, lons)
+    i_all, j_all = _polar_lonlat_to_ij(
+        lons_normalized, lats, grid_size=12.5, hemisphere="north"
     )
-    # force numpy integer arrays
-    i = np.asarray(i, dtype=np.int64)
-    j = np.asarray(j, dtype=np.int64)
- 
-    i_list = [int(val) for val in i]
-    j_list = [int(val) for val in j]
- 
- 
-    # template data set settings
+    i_all = np.asarray(i_all, dtype=np.int64)
+    j_all = np.asarray(j_all, dtype=np.int64)
+    df_copy = df_copy.reset_index(drop=True)
+    df_copy['grid_i'] = i_all
+    df_copy['grid_j'] = j_all
+
+
+    # determine scene groups and time layer count
+    epoch = pd.Timestamp('2000-01-01')
     x_coords = template_ds['x'].values
     y_coords = template_ds['y'].values
-    grid_shape = (1, template_ds.sizes['y'], template_ds.sizes['x'])
- 
- 
+
+    if multi_layered:
+        scene_groups = [
+            (sid, grp.reset_index(drop=True))
+            for sid, grp in df_copy.groupby('scene_id', sort=True)
+        ]
+    else:
+        scene_groups = [(df_copy['scene_id'].iloc[0], df_copy)]
+
+    n_time = len(scene_groups)
+    grid_shape = (n_time, template_ds.sizes['y'], template_ds.sizes['x'])
+
+    # build time arrays across all scene groups
+    time_array = np.zeros(n_time, dtype='float64')
+    time_bounds = np.zeros((n_time, 2), dtype='float64')
+    layer_id_list = []
+
+    for t_idx, (scene_id, grp) in enumerate(scene_groups):
+        t_sec = float((grp['date_start'].min() - epoch).total_seconds())
+        t_end = float((grp['date_end'].max() - epoch).total_seconds())
+        time_array[t_idx] = t_sec
+        time_bounds[t_idx, 0] = t_sec
+        time_bounds[t_idx, 1] = t_end
+        layer_id_list.append(_get_layer_name(scene_id))
+
+    min_time = df_copy['date_start'].min()
+    max_time = df_copy['date_end'].max()
+
+
+    # create NetCDF file
+    netcdf_grid = None
     try:
-        # set NetCDF standard attributes from CDL template
+        # load CDL metadata attributes
         meta_ds = _set_metadata(config)
 
-     
-        # keep attrs from the CDL skeleton
         global_attrs = meta_ds.attrs.copy()
         sea_ice_speed_attrs = meta_ds["sea_ice_speed"].attrs.copy()
         sea_ice_x_attrs = meta_ds["sea_ice_x_displacement"].attrs.copy()
@@ -1847,11 +2335,11 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
         time_attrs = meta_ds["time"].attrs.copy()
         layer_id_attrs = meta_ds["layer_id"].attrs.copy()
         time_attrs['coordinates'] = 'layer_id'
-            
+
         meta_ds.close()
         del meta_ds
-     
-        # create dataset from CDL
+
+        # build empty grid
         netcdf_grid = xr.Dataset(
             data_vars={
                 "sea_ice_speed": (
@@ -1905,20 +2393,15 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
                 )
             },
             coords={
-                "time": ("time", time_array, time_attrs),
-                "layer_id": (
-                    "time",
-                    np.array([layer_id_str]),
-                    layer_id_attrs
-                ),
-                "nv": [0, 1],
-                "x": ("x", x_coords, x_attrs),
-                "y": ("y", y_coords, y_attrs)
+                "time":     ("time", time_array, time_attrs),
+                "layer_id": ("time", np.array(layer_id_list), layer_id_attrs),
+                "nv":       [0, 1],
+                "x":        ("x", x_coords, x_attrs),
+                "y":        ("y", y_coords, y_attrs)
             },
             attrs=global_attrs
         )
-     
-        # update global date/time coverage attributes
+
         netcdf_grid.attrs['date_created'] = (
             datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
         )
@@ -1928,80 +2411,62 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
         netcdf_grid.attrs['time_coverage_end'] = (
             max_time.strftime('%Y-%m-%dT%H:%M:%SZ')
         )
-     
-     
-        # populate grid with per-observation values
-        idx_list = []
-        seen_key = set()
-        for row_n, row in enumerate(df_copy.itertuples(index=False)):
-            ix = int(i[row_n])   # x index
-            iy = int(j[row_n])   # y index
-            index_key = (ix, iy)
-            idx_list.append(index_key)
-     
-            if index_key in seen_key:
-                logger.info(f'Duplicate entry found for {ix}, {iy}')
-     
-            seen_key.add(index_key)
-     
-            netcdf_grid["sea_ice_speed"].values[0, iy, ix] = (
-                np.float32(row.sea_ice_speed)
-            )
-            netcdf_grid["sea_ice_x_displacement"].values[0, iy, ix] = (
-                np.float32(row.sea_ice_x_displacement)
-            )
-            netcdf_grid["sea_ice_y_displacement"].values[0, iy, ix] = (
-                np.float32(row.sea_ice_y_displacement)
-            )
-            netcdf_grid["direction_of_sea_ice_displacement"].values[
-                0, iy, ix
-            ] = np.float32(row.direction_of_sea_ice_displacement)
-            netcdf_grid["outlier_category"].values[
-                0, iy, ix
-            ] = np.int16(row.outlier_category)
-            netcdf_grid["bearing_error"].values[
-                0, iy, ix
-            ] = np.int16(row.bearing_error)
-            netcdf_grid["speed_error"].values[
-                0, iy, ix
-            ] = np.int16(row.speed_error)
-            netcdf_grid["measurement_error"].values[
-                0, iy, ix
-            ] = np.int16(row.measurement_error)
-     
-     
-        # update scene_i_j
-        scene_i_j[base_name] = list(zip(i_list, j_list))
-     
-        # crop to populated values
-        data_mask = np.isfinite(netcdf_grid["sea_ice_speed"].values[0])
+
+        # populate grid (one time layer per scene group)
+        for t_idx, (scene_id, grp) in enumerate(scene_groups):
+            # seen_key = set()
+            for row in grp.itertuples(index=False):
+                ix = int(row.grid_i)
+                iy = int(row.grid_j)
+                # index_key = (ix, iy)
+                # if index_key in seen_key:
+                #     logger.info(
+                #         f'{scene_id} | Duplicate entry at ({ix}, {iy})'
+                #     )
+                # seen_key.add(index_key)
+
+                netcdf_grid["sea_ice_speed"].values[
+                    t_idx, iy, ix] = np.float32(row.sea_ice_speed)
+                netcdf_grid["sea_ice_x_displacement"].values[
+                    t_idx, iy, ix] = np.float32(row.sea_ice_x_displacement)
+                netcdf_grid["sea_ice_y_displacement"].values[
+                    t_idx, iy, ix] = np.float32(row.sea_ice_y_displacement)
+                netcdf_grid["direction_of_sea_ice_displacement"].values[
+                    t_idx, iy, ix] = np.float32(
+                        row.direction_of_sea_ice_displacement)
+                netcdf_grid["outlier_category"].values[
+                    t_idx, iy, ix] = np.int16(row.outlier_category)
+                netcdf_grid["bearing_error"].values[
+                    t_idx, iy, ix] = np.int16(row.bearing_error)
+                netcdf_grid["speed_error"].values[
+                    t_idx, iy, ix] = np.int16(row.speed_error)
+                netcdf_grid["measurement_error"].values[
+                    t_idx, iy, ix] = np.int16(row.measurement_error)
+
+
+        # crop to bounding box of all finite speed values across all layers
+        data_mask = np.any(
+            np.isfinite(netcdf_grid["sea_ice_speed"].values), axis=0
+        )
         if np.any(data_mask):
             filled_y, filled_x = np.where(data_mask)
-     
-            y_start = int(filled_y.min())
-            y_end = int(filled_y.max())
-            x_start = int(filled_x.min())
-            x_end = int(filled_x.max())
-     
-            # pad grid cells in case vectors extend outside of viewing area
             pad_cells = 4
-            y_start = max(0, y_start - pad_cells)
-            y_end = min(netcdf_grid.sizes["y"] - 1, y_end + pad_cells)
-            x_start = max(0, x_start - pad_cells)
-            x_end = min(netcdf_grid.sizes["x"] - 1, x_end + pad_cells)
-     
+            y_start = max(0, int(filled_y.min()) - pad_cells)
+            y_end   = min(
+                netcdf_grid.sizes["y"] - 1, int(filled_y.max()) + pad_cells
+            )
+            x_start = max(0, int(filled_x.min()) - pad_cells)
+            x_end   = min(
+                netcdf_grid.sizes["x"] - 1, int(filled_x.max()) + pad_cells
+            )
             netcdf_grid = netcdf_grid.isel(
                 y=slice(y_start, y_end + 1),
                 x=slice(x_start, x_end + 1)
             )
-     
-     
-        # save to NetCDF with zlib compression level 4
-        output_file_path = os.path.join(
-            config['nc_dir'], f"{base_name}.nc"
-        )
+
+        # save to NetCDF
         netcdf_grid.to_netcdf(
-            output_file_path, mode='w',
+            nc_path, mode='w',
             encoding={
                 'sea_ice_speed': {
                     'zlib': True, 'complevel': 4, 'dtype': 'float32'
@@ -2031,21 +2496,18 @@ def create_netcdf(df, base_name, config, template_ds, scene_i_j):
                     'zlib': True, 'complevel': 4, 'dtype': 'int16',
                     '_FillValue': np.int16(-9)
                 },
-                'time_bnds': {'dtype': 'float64'},
+                'time_bnds':   {'dtype': 'float64'},
                 'spatial_ref': {'dtype': 'int32'}
             }
         )
-     
 
-        logger.info(f'Created NetCDF {output_file_path}')
- 
+    
+        logger.info(f'Created NetCDF {nc_path}')
+
     finally:
-        # ensure dataset is closed even if an error occurs
-        netcdf_grid.close()
-        del netcdf_grid
-        
-        
-    return  os.path.join(config["nc_dir"], f'{base_name}.nc')
+        if netcdf_grid is not None:
+            netcdf_grid.close()
+            del netcdf_grid
 
 
 def create_shape_package(df, gpkg_path, config):
@@ -2150,6 +2612,7 @@ def create_shape_package(df, gpkg_path, config):
     """
 
     import os
+    import numpy as np
     import logging
     import geopandas as gpd
     from shapely.geometry import LineString
@@ -2170,21 +2633,30 @@ def create_shape_package(df, gpkg_path, config):
         'date_start', 'date_end', 'duration',
         'sea_ice_x_displacement', 'sea_ice_y_displacement',
         'u', 'v','sea_ice_speed', 'sea_ice_speed_kmdy',
-        'direction_of_sea_ice_displacement', 'distance', 'distance_geod'
-    ]
-    
-    if config['level'] in ['00', '02', '03']:
-        needed_cols.append('outlier_category')
-        
+        'direction_of_sea_ice_displacement', 'distance', 'distance_geod',
+        'outlier_category'
+    ]        
     df_local=df_local[needed_cols]
+    
     
     
     if config['level'] in ['00', '02']:
         # write one layer per scene
+        unique_test = {}
         scene_idx = 0
         for scene_id, df_scene in df_local.groupby('scene_id'):
             df_scene = df_scene.copy()
-            layer_name = f'drift_vectors_{scene_id}'
+            
+            layer_name = _get_layer_name(scene_id)
+    
+            if layer_name not in unique_test:
+                unique_test[layer_name] = ''
+            else:
+                df_scene.to_csv('duplicate_scene_ids', index=True)
+                logger.warning(
+                    'Duplicate scene id found. |'
+                    f'Scene ID: {scene_id} Layer Name: {layer_name}'
+                )
             
             df_scene['geometry_line'] = df_scene.apply(
                 lambda row: LineString(
@@ -2211,8 +2683,11 @@ def create_shape_package(df, gpkg_path, config):
             _embed_qml_style(gpkg_path, layer_name, config)
             
     else:
-        # For level 03, retain only inlier vectors (outlier_category 00 or 01),
-        # then recode to -1 to signal that outlier filtering has been applied.
+        # taking latest observation for duplicate cells
+        
+        # For level 03, retain only inlier vectors
+        # (outlier_category 00 or 01), then recode to -1 to signal that
+        # outlier filtering has been applied.
         outlier_filter = df_local['outlier_category'].isin(['00', '01'])
         df_local = df_local[outlier_filter].copy()
         df_local['outlier_category'] = -1
@@ -2220,17 +2695,30 @@ def create_shape_package(df, gpkg_path, config):
             # it might be possible the data frame was labelled
             # as all outliers.
             return None
-        else:
-            dupes = df_local.duplicated(
-                subset=['longitude_1', 'latitude_1'],
-                keep='last'
+    
+        # two vectors can have slightly different lon/lat but map to
+        # the same 12.5 km grid cell — keep last occurrence, consistent
+        # with NetCDF and HTML/JSON output deduplication strategy
+        lons = df_local['longitude_1'].to_numpy()
+        lats = df_local['latitude_1'].to_numpy()
+        lons_normalized = np.where(lons < 0, lons + 360, lons)
+        i, j = _polar_lonlat_to_ij(
+            lons_normalized,
+            lats,
+            grid_size=12.5,
+            hemisphere='north'
+        )
+        df_local['_grid_i'] = i
+        df_local['_grid_j'] = j
+        dupes = df_local.duplicated(
+            subset=['_grid_i', '_grid_j'], keep='last'
+        )
+        if dupes.any():
+            logger.info(
+                f"Level 03 GeoPackage: dropping {dupes.sum()} duplicate "
+                "grid cell vector(s) — keeping last occurrence"
             )
-            if dupes.any():
-                logger.warning(
-                    f"Level 03 GeoPackage: dropping {dupes.sum()} duplicate "
-                    "starting lon/lat vector(s) — keeping last occurrence"
-                )
-            df_local = df_local[~dupes]            
+        df_local = df_local[~dupes].drop(columns=['_grid_i', '_grid_j'])
     
         df_local['geometry_line'] = df_local.apply(
             lambda row: LineString(
@@ -2241,33 +2729,25 @@ def create_shape_package(df, gpkg_path, config):
             ),
             axis=1
         )
-        
-        
-        # Create GeoDataFrame for lines (lines only)
-        gdf_line = gpd.GeoDataFrame(
-            df_local, geometry='geometry_line'
-        )
-        # Add a column to distinguish geometry type    
-        gdf_line['geometry_type'] = 'line'  
-        
-       
-        # Save as a single GeoPackage file (supports mixed geometries)    
+    
+        gdf_line = gpd.GeoDataFrame(df_local, geometry='geometry_line')
+        gdf_line['geometry_type'] = 'line'
+    
         gdf_line = gdf_line.rename(
             columns={'geometry_line': 'geometry'}
         ).set_geometry('geometry')
         gdf_line = gdf_line.set_crs(f'EPSG:{config["epsg"]}')
         gdf_line.to_file(gpkg_path, layer='drift_vectors', driver='GPKG')
-        
     
         # embed .qml outlier layer style
         _embed_qml_style(gpkg_path, 'drift_vectors', config)
-    
+        
     # log activity
     logger.info(f'Created GeoPackage {gpkg_path}')
            
     
-def create_vector_html_and_json(df, html_path, data_dir, json_path,
-                                available_dates_path, config):
+def create_vector_html_and_json(df, html_path, data_dir, si_json_path,
+                                buoy_json_path, available_dates_path, config):
     """
     Serialize drift vector observations to a compact JSON file and write
     an accompanying interactive HTML viewer.
@@ -2339,6 +2819,7 @@ def create_vector_html_and_json(df, html_path, data_dir, json_path,
 
     import os
     import shutil
+    import numpy as np
     import json
     import logging
 
@@ -2353,57 +2834,102 @@ def create_vector_html_and_json(df, html_path, data_dir, json_path,
 
 
     df_local = df.copy()
+    
+    # For HTML output, retain only inlier vectors (outlier_category 00 or 01),
+    outlier_filter = df_local['outlier_category'].isin(['00', '01'])
+    df_local = df_local[outlier_filter].copy()
 
-    # For level 03, retain only inlier vectors (outlier_category 00 or 01),
-    # then recode to -1 to signal that outlier filtering has been applied.
-    if config['level'] == '03':
-        outlier_filter = df_local['outlier_category'].isin(['00', '01'])
-        df_local = df_local[outlier_filter].copy()
-        df_local['outlier_category'] = '-1'
-        if df_local.shape[0] == 0:
-            # it might be possible the data frame was labelled
-            # as all outliers. Highly unlikely, but it needs to be
-            # handled
-            return
-        else:
-            dupes = df_local.duplicated(
-                subset=['longitude_1', 'latitude_1'],
-                keep='last'
-            )
-            if dupes.any():
-                logger.warning(
-                    f"Level 03 HTML: dropping {dupes.sum()} duplicate "
-                    "starting lon/lat vector(s) — keeping last occurrence"
-                )
-            df_local = df_local[~dupes]
-            
-            
+    if df_local.shape[0] == 0:
+        # it might be possible the data frame was labelled as all outliers
+        # unlikely, but it needs to be handled
+        return
+    
+    
+    # sort by end date so the duplicate gaurantees to take the last index
+    # that has the latest time stamp
+    df_local = df_local.sort_values('date_end', ascending=True)
+    
+    # two vectors can have slightly different lon/lat but map to
+    # the same 12.5 km grid cell. if so, keep the latest (i, j) grid cell
+    lons = df_local['longitude_1'].to_numpy()
+    lats = df_local['latitude_1'].to_numpy()
+    lons_normalized = np.where(lons < 0, lons + 360, lons)
+    i, j = _polar_lonlat_to_ij(
+        lons_normalized,
+        lats,
+        grid_size=12.5,
+        hemisphere='north'
+    )
+    df_local['_grid_i'] = i
+    df_local['_grid_j'] = j
+
+    dupes = df_local.duplicated(
+        subset=['_grid_i', '_grid_j'],
+        keep='last'
+    )
+    if dupes.any():
+        df_local = df_local[~dupes]
+        logger.warning(
+            f'Level 03 HTML: dropping {dupes.sum()} duplicate '
+             'starting lon/lat vector(s) — keeping last occurrence of '
+            f'{df_local.shape[0]} vector(s).'
+        )
+        
+    
     date1 = df_local['date_start'].min().strftime('%Y-%m-%d')
     date2 = df_local['date_end'].max().strftime('%Y-%m-%d')
-
+    
     vectors = [
         [
-            round(float(row.longitude_1), 3),
-            round(float(row.latitude_1), 3),
-            round(float(row.longitude_2), 3),
-            round(float(row.latitude_2), 3),
-            int(round(row.sea_ice_speed_kmdy * 100)),
-            row.outlier_category
+            round(float(row.longitude_1), config['coordinate_precision']),
+            round(float(row.latitude_1), config['coordinate_precision']),
+            round(float(row.longitude_2), config['coordinate_precision']),
+            round(float(row.latitude_2), config['coordinate_precision']),
+            round(float(row.sea_ice_speed_kmdy), config['speed_precision'])
         ]
         for row in df_local.itertuples(index=False)
     ]
 
     payload = {
-        'date1':   date1,
-        'date2':   date2,
-        'count':   len(vectors),
+        'date1': date1,
+        'date2': date2,
+        'count': len(vectors),
         'vectors': vectors
     }
 
-    with open(json_path, 'w', encoding='utf-8') as f:
+    with open(si_json_path, 'w', encoding='utf-8') as f:
         json.dump(payload, f, separators=(',', ':'))                
 
-    logger.info(f'Created JSON {json_path}')
+    logger.info(f'Created JSON {si_json_path}')
+    
+    
+    # Add buoy_json
+    df_buoy_drift = config['buoy_drift']
+    date_filter = (df_buoy_drift['date'].astype(str) == date1)
+    buoy_daily_drift = df_buoy_drift[date_filter].reset_index(drop=True).copy()
+
+    vectors = [
+        [
+            round(float(row.longitude_1), config['coordinate_precision']),
+            round(float(row.latitude_1), config['coordinate_precision']),
+            round(float(row.longitude_2), config['coordinate_precision']),
+            round(float(row.latitude_2), config['coordinate_precision']),
+            round(float(row.speed_kmdy), config['speed_precision'])
+        ]
+        for row in buoy_daily_drift.itertuples(index=False)
+    ]
+
+    payload = {
+        'date1': date1,
+        'date2': date2,
+        'count': len(vectors),
+        'vectors': vectors
+    }
+    
+    with open(buoy_json_path, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, separators=(',', ':'))                
+
+    logger.info(f'Created JSON {buoy_json_path}')
     
     
     # update available dates
@@ -2419,402 +2945,3 @@ def create_vector_html_and_json(df, html_path, data_dir, json_path,
             json.dump(available_dates, f, separators=(',', ':'))
 
     
-def combine_daily_netcdf_files(config, nc_files, template_ds,
-                               daily_start_date, daily_end_date,
-                               daily_nc_path, multi_layered=True,
-                               overwrite=False):
-    """
-    Combine multiple sliced SAR drift NetCDF files into one full daily mosaic
-    on the template grid.
-
-    Reads each per-scene NetCDF file produced by `create_netcdf`, merges all
-    variables onto a shared daily grid, and writes the result to a single
-    output NetCDF file. Supports both multi-layered output (one time layer
-    per scene) and single-layer output (scenes mosaicked into one time slice).
-    Projection metadata is sourced entirely from the CDL template specified
-    in `config`.
-
-    Args:
-        config (dict): Configuration dictionary. Must include:
-            - 'netcdf_cdl_file' (str): Path to the CDL template file whose
-              `spatial_ref` variable defines the output projection. Set this
-              to the CDL file matching the target EPSG (e.g.
-              `sar_drift_output_3413.cdl` or `sar_drift_output_6931.cdl`).
-            - 'level' (str): Processing level; used to determine whether to
-              write a cell-update log (`'00'` only).
-            - 'output_dir' (str): Directory where `cell_update_log.csv` is
-              written when `config['level'] == '00'` and overlapping cells
-              are detected.
-        nc_files (list[str]): Paths to per-scene sliced NetCDF files to
-            merge, as produced by `create_netcdf`.
-        template_ds (xarray.Dataset): Template dataset providing the target
-            grid coordinate arrays (`x`, `y`) and grid dimensions. Must
-            share the same projection and coordinate spacing as the input
-            scene files.
-        daily_start_date (pandas.Timestamp): Start date of the daily mosaic;
-            used to set `time_coverage_start` global attribute.
-        daily_end_date (pandas.Timestamp): End date of the daily mosaic;
-            used to set `time_coverage_end` global attribute.
-        daily_nc_path (str): Full path for the output daily NetCDF file.
-        multi_layered (bool): If `True` (default), each scene is written as
-            a separate time layer. If `False`, all scenes are mosaicked into
-            a single time slice using a last-write-wins strategy controlled
-            by `overwrite`.
-        overwrite (bool): Controls single-layer conflict resolution when
-            `multi_layered=False`. If `False` (default), the first valid
-            (non-NaN) value written to a cell is kept. If `True`, later
-            scenes overwrite earlier ones based on scene timestamp.
-
-    Returns:
-        None. The output file is written to `daily_nc_path`. When
-        `multi_layered=False` and `config['level'] == '00'`, a
-        `cell_update_log.csv` is also written to `config['output_dir']`
-        recording any cells where an earlier value was overwritten.
-
-    Notes:
-        - Output projection is fully determined by the CDL template referenced
-          in `config['netcdf_cdl_file']`. No EPSG is hardcoded in this
-          function; switching projection requires only pointing `config` at
-          the appropriate CDL file.
-        - Scene files are sorted by their `time` coordinate value before
-          merging, ensuring consistent ordering regardless of input list order.
-        - For single-layer mode, `latest_time_grid` tracks the timestamp of
-          the last write per cell to enforce the `overwrite` policy.
-        - `time_bnds` spans `[min(scene_start), max(scene_end)]` across all
-          merged scenes for single-layer output, and per-scene bounds for
-          multi-layered output.
-        - All int16 flag variables (`outlier_category`, `bearing_error`,
-          `speed_error`, `measurement_error`) use −9 as their `_FillValue`.
-        - The dataset is always closed in the `finally` block even if an
-          error occurs during merging or writing.
-    """
-
-    import os
-    import numpy as np
-    import pandas as pd
-    import xarray as xr
-    from datetime import datetime
-
-    # template grid settings
-    x_coords = template_ds["x"].values
-    y_coords = template_ds["y"].values
-
-    # time defaults for output daily file
-    min_time = pd.Timestamp(daily_start_date)
-    max_time = pd.Timestamp(daily_end_date)
-
-    if multi_layered:
-        n_time = len(nc_files)
-    else:
-        n_time = 1
-
-    # finalize grid shape
-    grid_shape = (n_time, template_ds.sizes["y"], template_ds.sizes["x"])
-
-    # track last_write time per cell (single-layer only)
-    latest_time_grid = np.full(
-        (template_ds.sizes["y"], template_ds.sizes["x"]),
-        -np.inf,
-        dtype=np.float64
-    )
-
-    # variables to merge spatially
-    var_names = [
-        "sea_ice_speed",
-        "sea_ice_x_displacement",
-        "sea_ice_y_displacement",
-        "direction_of_sea_ice_displacement",
-        "outlier_category",
-        "bearing_error",
-        "speed_error",
-        "measurement_error"
-    ]
-
-    daily_grid = None
-    time_list = []
-    update_log = []
-    layer_id_list = []
-
-    try:
-        # build output dataset from CDL metadata
-        meta_ds = _set_metadata(config)
-
-        global_attrs = meta_ds.attrs.copy()
-        sea_ice_speed_attrs = meta_ds["sea_ice_speed"].attrs.copy()
-        sea_ice_x_attrs = meta_ds["sea_ice_x_displacement"].attrs.copy()
-        sea_ice_y_attrs = meta_ds["sea_ice_y_displacement"].attrs.copy()
-        direction_attrs = (
-            meta_ds["direction_of_sea_ice_displacement"].attrs.copy()
-        )
-        outlier_attrs = meta_ds["outlier_category"].attrs.copy()
-        bearing_error_attrs = meta_ds["bearing_error"].attrs.copy()
-        speed_error_attrs = meta_ds["speed_error"].attrs.copy()
-        measurement_error_attrs = meta_ds["measurement_error"].attrs.copy()
-        spatial_ref_attrs = meta_ds["spatial_ref"].attrs.copy()
-        x_attrs = meta_ds["x"].attrs.copy()
-        y_attrs = meta_ds["y"].attrs.copy()
-        time_attrs = meta_ds["time"].attrs.copy()
-        layer_id_attrs = meta_ds["layer_id"].attrs.copy()
-        time_attrs['coordinates'] = 'layer_id'
-
-        meta_ds.close()
-        del meta_ds
-
-        # placeholder time and bounds — updated after merge loop
-        time_array = np.zeros(n_time, dtype='float64')
-        time_bounds = np.zeros((n_time, 2), dtype='float64')
-
-        daily_grid = xr.Dataset(
-            data_vars={
-                "sea_ice_speed": (
-                    ("time", "y", "x"),
-                    np.full(grid_shape, np.nan, dtype=np.float32),
-                    sea_ice_speed_attrs,
-                ),
-                "sea_ice_x_displacement": (
-                    ("time", "y", "x"),
-                    np.full(grid_shape, np.nan, dtype=np.float32),
-                    sea_ice_x_attrs,
-                ),
-                "sea_ice_y_displacement": (
-                    ("time", "y", "x"),
-                    np.full(grid_shape, np.nan, dtype=np.float32),
-                    sea_ice_y_attrs,
-                ),
-                "direction_of_sea_ice_displacement": (
-                    ("time", "y", "x"),
-                    np.full(grid_shape, np.nan, dtype=np.float32),
-                    direction_attrs,
-                ),
-                "outlier_category": (
-                    ("time", "y", "x"),
-                    np.full(grid_shape, -9, dtype=np.int16),
-                    outlier_attrs,
-                ),
-                "bearing_error": (
-                    ("time", "y", "x"),
-                    np.full(grid_shape, -9, dtype=np.int16),
-                    bearing_error_attrs,
-                ),
-                "speed_error": (
-                    ("time", "y", "x"),
-                    np.full(grid_shape, -9, dtype=np.int16),
-                    speed_error_attrs,
-                ),
-                "measurement_error": (
-                    ("time", "y", "x"),
-                    np.full(grid_shape, -9, dtype=np.int16),
-                    measurement_error_attrs,
-                ),
-                "spatial_ref": (
-                    (),
-                    np.int32(0),
-                    spatial_ref_attrs,
-                ),
-                "time_bnds": (
-                    ("time", "nv"),
-                    time_bounds,
-                ),
-            },
-            coords={
-                "time": ("time", time_array, time_attrs),
-                "nv": [0, 1],
-                "x": ("x", x_coords, x_attrs),
-                "y": ("y", y_coords, y_attrs),
-            },
-            attrs=global_attrs,
-        )
-
-        # update global attrs
-        daily_grid.attrs["date_created"] = (
-            datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-        )
-        daily_grid.attrs["time_coverage_start"] = (
-            min_time.strftime("%Y-%m-%dT%H:%M:%SZ")
-        )
-        daily_grid.attrs["time_coverage_end"] = (
-            max_time.strftime("%Y-%m-%dT23:59:59Z")
-        )
-        daily_grid.attrs["title"] = (
-            "Daily Northern Hemisphere SAR sea-ice velocity mosaic"
-        )
-
-        # sort scene files by time
-        file_times = []
-        for nc_file in nc_files:
-            with xr.open_dataset(
-                nc_file, decode_times=False, mask_and_scale=False
-            ) as scene_ds:
-                file_times.append(
-                    (float(scene_ds['time'].values[0]), nc_file)
-                )
-        file_times.sort(key=lambda x: x[0])
-
-
-        # merge each scene into the daily grid
-        for nc_idx, (scene_time, nc_file) in enumerate(file_times):
-            with xr.open_dataset(
-                nc_file, decode_times=False, mask_and_scale=False
-            ) as scene_ds:
-
-                scene_x = scene_ds['x'].values
-                scene_y = scene_ds['y'].values
-                t_idx = nc_idx if multi_layered else 0
-
-                # read scene time bounds from its time_bnds variable
-                scene_bnds = scene_ds['time_bnds'].values  # shape (1, 2)
-                scene_start = float(scene_bnds[0, 0])
-                scene_end = float(scene_bnds[0, 1])
-
-                if multi_layered:
-                    # each scene gets its own time layer
-                    time_list.append(float(scene_ds['time'].values[0]))
-                    time_bounds[t_idx, 0] = scene_start
-                    time_bounds[t_idx, 1] = scene_end
-                    if 'layer_id' in scene_ds.coords or \
-                            'layer_id' in scene_ds:
-                        layer_id_list.append(
-                            str(scene_ds['layer_id'].values[0])
-                        )
-                    else:
-                        layer_id_list.append('')
-                else:
-                    # single layer: keep earliest start, latest end
-                    if time_bounds[0, 0] == 0 or \
-                    scene_start < time_bounds[0, 0]:
-                        time_bounds[0, 0] = scene_start
-                    if scene_end > time_bounds[0, 1]:
-                        time_bounds[0, 1] = scene_end
-
-                # get x/y placement indices on template grid
-                x_start = int(np.where(x_coords == scene_x[0])[0][0])
-                x_end   = int(np.where(x_coords == scene_x[-1])[0][0])
-                y_start = int(np.where(y_coords == scene_y[0])[0][0])
-                y_end   = int(np.where(y_coords == scene_y[-1])[0][0])
-
-                x_0, x_1 = min(x_start, x_end), max(x_start, x_end)
-                y_0, y_1 = min(y_start, y_end), max(y_start, y_end)
-
-                if multi_layered:
-                    for var_name in var_names:
-                        scene_vals = scene_ds[var_name].isel(time=0).values
-                        daily_grid[var_name].values[
-                            t_idx, y_0:y_1+1, x_0:x_1+1
-                        ] = scene_vals
-                else:
-                    ref_vals = scene_ds[var_names[0]].isel(time=0).values
-                    last_t = latest_time_grid[y_0:y_1+1, x_0:x_1+1]
-                    valid = np.isfinite(ref_vals)
-                    newer = scene_time > last_t
-                    write_mask = valid & newer
-
-                    if write_mask.any():
-                        local_rows, local_cols = np.where(write_mask)
-                        for lr, lc in zip(local_rows, local_cols):
-                            old_ts = last_t[lr, lc]
-                            update_log.append({
-                                "i":             y_0 + lr,
-                                "j":             x_0 + lc,
-                                "old_timestamp": old_ts,
-                                "new_timestamp": scene_time,
-                                "nc_file":       nc_file,
-                                "overwrite":     old_ts != -np.inf
-                            })
-
-                        for var_name in var_names:
-                            scene_vals = scene_ds[var_name].isel(time=0).values
-                            target = daily_grid[var_name].values[
-                                0, y_0:y_1+1, x_0:x_1+1
-                            ]
-                            target[write_mask] = scene_vals[write_mask]
-                            daily_grid[var_name].values[
-                                0, y_0:y_1+1, x_0:x_1+1
-                            ] = target
-
-                        latest_time_grid[
-                            y_0:y_1+1, x_0:x_1+1
-                        ][write_mask] = scene_time
-
-
-        # Update time coordinate and bounds after merge
-        if multi_layered:
-            final_time_array = np.array(time_list, dtype='float64')
-        else:
-            # use scene start (first bound) as the time coordinate
-            final_time_array = np.array([time_bounds[0, 0]], dtype='float64')
-
-        daily_grid = daily_grid.assign_coords(
-            time=('time', final_time_array, daily_grid['time'].attrs)
-        )
-        # write populated time_bounds into the dataset
-        daily_grid['time_bnds'].values[:] = time_bounds
-
-        # assign layer_id coordinate (multi-layered only)
-        if multi_layered and layer_id_list:
-            daily_grid = daily_grid.assign_coords(
-                layer_id=('time', np.array(layer_id_list), layer_id_attrs)
-            )
-
-        # pop _FillValue from int16 variable attrs before writing
-        for var in [
-                'outlier_category', 'bearing_error',
-                'speed_error', 'measurement_error'
-            ]:
-            daily_grid[var].attrs.pop('_FillValue', None)
-            daily_grid[var].encoding['_FillValue'] = np.int16(-9)
-            daily_grid[var].encoding['dtype'] = np.int16
-
-
-        # Save to NetCDF
-        daily_grid.to_netcdf(
-            daily_nc_path,
-            mode="w",
-            encoding={
-                "sea_ice_speed": {
-                    "zlib": True, "complevel": 4, "dtype": "float32"
-                },
-                "sea_ice_x_displacement": {
-                    "zlib": True, "complevel": 4, "dtype": "float32"
-                },
-                "sea_ice_y_displacement": {
-                    "zlib": True, "complevel": 4, "dtype": "float32"
-                },
-                "direction_of_sea_ice_displacement": {
-                    "zlib": True, "complevel": 4, "dtype": "float32"
-                },
-                "outlier_category": {
-                    "zlib": True, "complevel": 4, "dtype": "int16",
-                    "_FillValue": np.int16(-9)
-                },
-                "bearing_error": {
-                    "zlib": True, "complevel": 4, "dtype": "int16",
-                    "_FillValue": np.int16(-9)
-                },
-                "speed_error": {
-                    "zlib": True, "complevel": 4, "dtype": "int16",
-                    "_FillValue": np.int16(-9)
-                },
-                "measurement_error": {
-                    "zlib": True, "complevel": 4, "dtype": "int16",
-                    "_FillValue": np.int16(-9)
-                },
-                "time_bnds": {"dtype": "float64"},
-                "spatial_ref": {"dtype": "int32"},
-            }
-        )
-
-        if update_log and config['level'] == '00':
-            update_df = pd.DataFrame(update_log)
-            df_filter = update_df['overwrite']
-            update_df = update_df[df_filter].drop(columns='overwrite')
-            update_df = update_df.sort_values(['i', 'j'])
-            log_path = os.path.join(
-                config['output_dir'], 'cell_update_log.csv'
-            )
-            update_df.to_csv(log_path, index=False)
-
-    finally:
-        if daily_grid is not None:
-            daily_grid.close()
-            del daily_grid
-

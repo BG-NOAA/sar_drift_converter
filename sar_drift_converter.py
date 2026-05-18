@@ -114,8 +114,12 @@ def read_json_config():
                                            for batch processing.
         - "sar_drift_filename"    (str):   Path to a single SAR drift
                                            delimited text file.
-        - "sar_geotiff_filename"  (str):   Path to the SAR backscatter
-                                           GeoTIFF image.
+        - "uw_iabp_buoy_filename" (str):   Path to downloaded buoy data.
+        - "sar_drift_data_url"    (str):   URL that hosts SAR drift gfilter
+                                           txt files.
+        - "uw_iabp_buoy_url"      (str):   URL that hosts UQ IABP buoy data
+        - "uw_iabp_buoy_tables"   (str):   .JS file posted online with active
+                                           buoys.
         - "netcdf_cdl_file"       (str):   Path to the base CDL file used for
                                            NetCDF metadata. The EPSG-specific
                                            variant is resolved at runtime by
@@ -124,7 +128,9 @@ def read_json_config():
                                            which scenes will be built.
         - "html_vector_template"  (str):   Path to HTML file that has the code
                                            to display vectors as interactive
-                                           quivers with outliers                                            
+                                           quivers with outliers
+        - "geojson_templates"     (list):  All of the geojson files that get
+                                           loaded by HTML interactive map
         - "outlier_qml_file"      (str):   Path to QML file that applies
                                            outlier category styles to
                                            GeoPackages when opened in QGIS.
@@ -133,8 +139,10 @@ def read_json_config():
                                            graduated vector styles to
                                            GeoPackages when opened in QGIS.
                                            Used for all levels other than '02'.
+        - "buoy_dir"              (str):   Directory containing dowloaded buoy
+                                           data.
         - "meta_dir"              (str):   Directory for template files needed
-                                           during processing.                             
+                                           during processing.
         - "output_dir"            (str):   Parent directory for all processing
                                            output. Per-level subdirectories
                                            are created beneath this path by
@@ -238,10 +246,11 @@ def read_json_config():
     config_keys_no_comments = set(config.keys()) - comment_keys
 
     required_json_keys = {
-        "sar_drift_directory", "sar_drift_filename",
-        "netcdf_cdl_file", "netcdf_template_file",
-        "html_vector_template", "outlier_qml_file", "graduated_qml_file",
-        "output_dir", "log_dir", "meta_dir", "file_server",
+        "sar_drift_directory", "sar_drift_filename", "uw_iabp_buoy_filename",
+        "sar_drift_data_url", "uw_iabp_buoy_url", "uw_iabp_buoy_tables",
+        "netcdf_cdl_file", "netcdf_template_file", "html_vector_template",
+        "geojson_templates", "outlier_qml_file", "graduated_qml_file",
+        "output_dir", "log_dir", "buoy_dir", "meta_dir", "file_server",
         "clear_output_dir", "batch_process", "overwrite", "delimiter",
         "verbose", "version"
     }
@@ -282,11 +291,13 @@ def read_json_config():
     path_checks = [
         ('sar_drift_directory', 'sar_drift_directory', batch_process),
         ('sar_drift_filename', 'sar_drift_file', not batch_process),
+        ("uw_iabp_buoy_filename", "uw_iabp_buoy_filename", False),
         ('netcdf_cdl_file', 'netcdf_cdl_file', False),
         ('netcdf_template_file',  'netcdf_template_file', True),
         ('html_vector_template', 'html_vector_template', True),
         ('outlier_qml_file', 'outlier_qml_file', True),
         ('graduated_qml_file', 'graduated_qml_file', True),
+        ('buoy_dir', 'buoy_dir', True),
         ('meta_dir', 'meta_dir', True),
         ('output_dir', 'output_dir', True),
         ('log_dir', 'log_dir', True),
@@ -305,6 +316,10 @@ def read_json_config():
     # Build final config — output_dir is set by create_level_output()
     config = {
         **resolved_paths,
+        'geojson_templates':       config['geojson_templates'],
+        'sar_drift_data_url':      config['sar_drift_data_url'],
+        'uw_iabp_buoy_url':        config['uw_iabp_buoy_url'],
+        'uw_iabp_buoy_tables':     config['uw_iabp_buoy_tables'],
         'clear_output_dir':        config['clear_output_dir'],
         'batch_process':           config['batch_process'],
         'overwrite':               config['overwrite'],
@@ -329,11 +344,17 @@ def read_json_config():
         labels = {
             'sar_drift_directory':           'sar drift directory',
             'sar_drift_file':                'sar drift file',
+            'uw_iabp_buoy_filename':         'UW IABP buoy filename',
+            'sar_drift_data_url':            'SAR drift data URL',
+            'uw_iabp_buoy_url':              'UW IABP buoy data URL',
+            'uw_iabp_buoy_tables':           'UW IABP buoy tables',
             'netcdf_cdl_file':               'NetCDF CDL file',
             'netcdf_template_file':          'NetCDF template file',
             'html_vector_template':          'HTML vector template file',
+            'geojson_templates':             'GeoJSON template files',
             'outlier_qml_file':              'outlier qml file',
             'graduated_qml_file':            'graduated qml file',
+            'buoy_dir':                      'buoy data directory',
             'meta_dir':                      'metadata directory',
             'output_dir':                    'output directory',
             'log_dir':                       'log directory',
@@ -476,7 +497,8 @@ def combine_into_dataframe(files, config):
         results = list(tqdm(
             executor.map(util._read_gfilter_file, args),
             total=len(args),
-            desc='Reading gfilter files...'
+            desc='Reading gfilter files...',
+            unit='file'
         ))
 
     all_dfs = [r for r in results if r is not None]
@@ -584,6 +606,7 @@ def filter_input_data(df_all, config):
     # log activity
     logger = logging.getLogger('sar_drift_converter')
     
+    
     if config['level'] in ['02', '03']:
         accepted = []
         scenes = list(df_all.groupby(['File1', 'File2']))
@@ -593,7 +616,8 @@ def filter_input_data(df_all, config):
                 scenes, desc='Filtering scenes...',
                 total=total_scenes,
                 miniters=chunks,
-                mininterval=0
+                mininterval=0,
+                unit='scene'
             ):
             scene_id = f"{file1}_{file2}"
             use_75km = df_scene['_use_75km'].iloc[0]
@@ -601,8 +625,10 @@ def filter_input_data(df_all, config):
     
             # remove invalid bearings and speeds
             df_scene = df_scene[
-                (df_scene['direction_of_sea_ice_displacement'] != 0) &
-                (df_scene['sea_ice_speed'] > 0)
+                ~(
+                    (df_scene['direction_of_sea_ice_displacement'] == 0) &
+                    (df_scene['sea_ice_speed'] == 0)
+                )
             ]
             if initial_row_size != df_scene.shape[0]:
                 logger.info(
@@ -610,7 +636,7 @@ def filter_input_data(df_all, config):
                     f"{df_scene.shape[0]} (dropped "
                     f"{initial_row_size - df_scene.shape[0]})"
                 )
-    
+                
             # remove invalid speeds
             speed_thresh = 35.0 if use_75km else 25.0
             row_count_before = df_scene.shape[0]
@@ -796,21 +822,35 @@ def create_scene_output(day, df_day, config, template_ds, exists):
 
     logger = logging.getLogger('sar_drift_converter')
 
-    scene_i_j = {}
     scene_frames = []
-    nc_files = []
+    unique_keys = set()
 
     daily_start_date = pd.to_datetime(df_day['date_start'].min())
     daily_end_date   = pd.to_datetime(df_day['date_end'].max())
 
     scene_count = 0
     for scene_id, df_scene in df_day.groupby('scene_id'):
-        scene_count += 1
 
+        # skip scene that is not unique though pair name is unique
+        unique_pair_key = df_scene['_unique_pair_key'].iloc[0]
+        if unique_pair_key in unique_keys:
+            logger.info(
+                f"Ignoring Scene {scene_id} | "
+                f"duplicate unique scene key {unique_pair_key} | "
+                f"date_range={day}"
+            )
+            continue            
+        
+        # mark this key as seen
+        unique_keys.add(unique_pair_key)  
+
+        scene_count += 1
+        
         logger.info(
             f"Scene {scene_id} | "
             f"rows={len(df_scene)} | "
-            f"date_range={day}"
+            f"date_range={day} | "
+            f"unique pair key={unique_pair_key}"
         )
 
         if config['level'] == '00':
@@ -833,18 +873,6 @@ def create_scene_output(day, df_day, config, template_ds, exists):
         )
         scene_frames.append(df_scene)
 
-        # only write NetCDF if it doesn't already exist
-        if not exists['nc_scenes'] or not exists['nc_daily']:
-            nc_path = util.create_netcdf(
-                df=df_scene,
-                base_name=scene_id,
-                config=config,
-                template_ds=template_ds,
-                scene_i_j=scene_i_j
-            )
-            if nc_path:
-                nc_files.append(nc_path)
-
     
     if scene_frames:
         df_scenes = pd.concat(scene_frames, ignore_index=True)
@@ -856,12 +884,11 @@ def create_scene_output(day, df_day, config, template_ds, exists):
         'scenes':     scene_count,
         'df_scenes':  df_scenes,
         'start_date': daily_start_date,
-        'end_date':   daily_end_date,
-        'nc_files':   nc_files,
+        'end_date':   daily_end_date
     }
             
     
-def create_daily_output(df_day, scene_output, config, template_ds, exists):
+def create_daily_output(scene_output, config, template_ds, exists):
     """
     Combine all per-scene output files for a single day into daily products
     and write them to the file server directory.
@@ -876,9 +903,6 @@ def create_daily_output(df_day, scene_output, config, template_ds, exists):
     rows with processing codes.
 
     Args:
-        df_day (pandas.DataFrame): All drift observations for the current day,
-            as grouped upstream by `date_range`. Written to a raw formatted
-            CSV unconditionally.
         scene_output (dict): Return value from `create_scene_output` for this
             day. Expected keys:
                 - 'start_date' (pandas.Timestamp): Minimum `date_start`
@@ -957,7 +981,6 @@ def create_daily_output(df_day, scene_output, config, template_ds, exists):
 
     import util
     import os
-    import shutil
     import logging
 
     logger = logging.getLogger('sar_drift_converter')
@@ -971,7 +994,9 @@ def create_daily_output(df_day, scene_output, config, template_ds, exists):
 
     # multiple-layered netcdf
     if not exists['nc_scenes']:
-        output_dir = os.path.join(config['file_server'], epsg, lvl, yr, 'nc')
+        output_dir = os.path.join(
+            config['file_server'], epsg, lvl, yr, 'nc'
+        )
         os.makedirs(output_dir, exist_ok=True)
         scenes_nc_path = os.path.join(
             output_dir,
@@ -979,31 +1004,34 @@ def create_daily_output(df_day, scene_output, config, template_ds, exists):
             f"_scenes_12km_NH_{config['epsg']}_PL{config['level']}"
             f"_v{config['version']}.nc"
         )
-        util.combine_daily_netcdf_files(
+        util.create_netcdf(
+            df=scene_output['df_scenes'],
+            nc_path=scenes_nc_path,
             config=config,
-            nc_files=scene_output['nc_files'],
             template_ds=template_ds,
-            daily_start_date=scene_output['start_date'],
-            daily_end_date=scene_output['end_date'],
-            daily_nc_path=scenes_nc_path
+            multi_layered=True
         )
 
+    # for daily files, wqe do not need to include _VV_ in pair name
+    
 
     # single-layer netcdf
     if not exists['nc_daily']:
+        output_dir = os.path.join(
+            config['file_server'], epsg, lvl, yr, 'nc'
+        )
+        os.makedirs(output_dir, exist_ok=True)
         daily_nc_path = os.path.join(
             output_dir,
             f"SIVelocity_SAR_{daily_start_date_str}_{daily_end_date_str}"
             f"_daily_12km_NH_{config['epsg']}_PL{config['level']}"
             f"_v{config['version']}.nc"
         )
-        util.combine_daily_netcdf_files(
+        util.create_netcdf(
+            df=scene_output['df_scenes'],
+            nc_path=daily_nc_path,
             config=config,
-            nc_files=scene_output['nc_files'],
             template_ds=template_ds,
-            daily_start_date=scene_output['start_date'],
-            daily_end_date=scene_output['end_date'],
-            daily_nc_path=daily_nc_path,
             multi_layered=False
         )
 
@@ -1034,11 +1062,14 @@ def create_daily_output(df_day, scene_output, config, template_ds, exists):
 
         html_path = os.path.join(
             output_dir,
-            config['html_vector_template']
+            os.path.basename(config['html_vector_template'])
         )
                 
-        json_path = os.path.join(
+        si_json_path = os.path.join(
             data_dir, f"si_velocity_{daily_start_date_str}.json"
+        )
+        buoy_json_path = os.path.join(
+            data_dir, f"buoy_velocity_{daily_start_date_str}.json"
         )
         available_dates_path = os.path.join(
             data_dir, 'available_dates.json'
@@ -1048,26 +1079,11 @@ def create_daily_output(df_day, scene_output, config, template_ds, exists):
             df=scene_output['df_scenes'],
             html_path=html_path,
             data_dir=data_dir,
-            json_path=json_path,
+            si_json_path=si_json_path,
+            buoy_json_path=buoy_json_path,
             available_dates_path=available_dates_path,
             config=config
         )
-
-
-    if config['level'] == '00':
-        # formatted CSVs
-        output_path = os.path.join(
-            config['formatted_data_dir'],
-            f"{daily_start_date_str}_{daily_end_date_str}_raw.csv"
-        )
-        df_day.to_csv(output_path, index=False)
-    
-        output_path = os.path.join(
-            config['formatted_data_dir'],
-            f"{daily_start_date_str}_{daily_end_date_str}_"
-            "processing_codes.csv"
-        )
-        scene_output['df_scenes'].to_csv(output_path, index=False)
 
 
     logger.info(
@@ -1076,7 +1092,7 @@ def create_daily_output(df_day, scene_output, config, template_ds, exists):
     )
 
 
-def create_level_output(df_all, level, epsg, config):
+def create_level_output(df_all, config):
     """
     Main execution workflow for converting SAR drift text files into
     GeoPackage, NetCDF, and Plotly HTML outputs.
@@ -1139,27 +1155,23 @@ def create_level_output(df_all, level, epsg, config):
     import os
     import shutil
     from datetime import datetime
-    from glob import glob
     from tqdm import tqdm
     import logging
     import pandas as pd
     import xarray as xr
+    import gc
 
     
     run_start = datetime.utcnow()
 
 
     # epsg validation
-    if epsg not in [3413, 6931]:
+    if config['epsg'] not in [3413, 6931]:
         util.error_msg('`epsg` must be `3413` or `6931`')
-    else:
-        config['epsg'] = epsg
         
     # level validation
-    if level not in ['00', '01', '02', '03']:
+    if config['level'] not in ['00', '01', '02', '03']:
         util.error_msg('`level` must be one of: `00`, `01`, `02`, `03`')
-    else:
-        config['level'] = level
     
 
 
@@ -1194,6 +1206,13 @@ def create_level_output(df_all, level, epsg, config):
     
     # apply row-level filters per File1/File2 scene group
     df_all = filter_input_data(df_all, config)
+    
+    
+    # define unique pair key
+    # each scene will be unique to sensor names and Julian start/stop seconds
+    df_all['_unique_pair_key'] = (
+        df_all.apply(util._get_sensors_seconds, axis=1)
+    )
 
     
     # create date range groups for daily/scene output
@@ -1202,37 +1221,11 @@ def create_level_output(df_all, level, epsg, config):
         pd.to_datetime(df_all['date_start']).dt.strftime('%Y%m%d')
     )
     
-    
-    ####################################################
-    # NEEDED TO DEBUG BUT NOT NECESSARY TO LOG ANYMORE #
-    ####################################################
-    # # log rows that span more than one calendar day
-    # multi_day = (
-    #     pd.to_datetime(df_all['date_end']).dt.strftime('%Y%m%d') !=
-    #     df_all['date_range']
-    # )
-    # if multi_day.any():
-    #     multi_count = multi_day.sum()
-    #     logger.info(
-    #         f"{multi_count} observations span more than one calendar day"
-    #     )
-    #     # log per scene
-    #     for scene_id, grp in df_all[multi_day].groupby('scene_id'):
-    #         max_span = (
-    #             pd.to_datetime(grp['date_end']).max() -
-    #             pd.to_datetime(grp['date_start']).min()
-    #         )
-    #         if max_span > pd.Timedelta(days=1):
-    #             logger.info(
-    #                 f"Multi-day scene: {scene_id} | "
-    #                 f"rows={grp.shape[0]} | max_span={max_span}"
-    #             )
-    
    
     # create output: group by day, then by scene within each day
     start_days = {}
     for day, df_day in tqdm(
-            df_all.groupby('date_range'), "Processing days..."
+            df_all.groupby('date_range'), "Processing days...", unit='day'
         ):        
         
         logger.info(f"Processing day: {day}")
@@ -1243,15 +1236,14 @@ def create_level_output(df_all, level, epsg, config):
         }
 
         exists = util._check_existing_files(stub, config)
-        
-        
 
-        # if all(exists.values()):
-        #     logger.info(
-        #         f"Skipping {stub['start_date'].strftime('%Y%m%d')}. "
-        #         f"All level {config['level']} outputs already exist"
-        #     )
-        #     continue
+
+        if all(exists.values()):
+            logger.info(
+                f"Skipping {stub['start_date'].strftime('%Y%m%d')}. "
+                f"All level {config['level']} outputs already exist"
+            )
+            continue
 
         # create scene output with outliers if applicable
         scene_output = create_scene_output(
@@ -1269,10 +1261,38 @@ def create_level_output(df_all, level, epsg, config):
             print(f"Duplicate {key}")
             exit()
 
-            
+                
         # combine all created daily files into one
-        create_daily_output(df_day, scene_output, config, template_ds, exists)            
-    
+        create_daily_output(scene_output, config, template_ds, exists)
+        
+
+        gc.collect()
+        
+        
+        # write out raw daily data
+        if config['level'] == '00':
+            daily_start_date_str = (
+                scene_output['start_date'].strftime("%Y%m%d")
+            )
+            daily_end_date_str = (
+                scene_output['end_date'].strftime("%Y%m%d")
+            )
+            
+            # formatted CSVs
+            output_path = os.path.join(
+                config['formatted_data_dir'],
+                f"{daily_start_date_str}_{daily_end_date_str}_raw.csv"
+            )
+            df_day.to_csv(output_path, index=False)
+            
+            
+            output_path = os.path.join(
+                config['formatted_data_dir'],
+                f"{daily_start_date_str}_{daily_end_date_str}_"
+                "processing_codes.csv"
+            )
+            scene_output['df_scenes'].to_csv(output_path, index=False)
+
 
     # final log entry
     run_end = datetime.utcnow() 
@@ -1347,6 +1367,7 @@ def process_level_output(test=False):
     import util
     import os
     from datetime import datetime
+    import numpy as np
     import zipfile
     from glob import glob
     
@@ -1370,6 +1391,10 @@ def process_level_output(test=False):
     )
 
 
+    # download recent files
+    util._download_sar_drift_files(config)
+    
+    
     # find files to process
     print("Gathering files to process...")
     files= []
@@ -1388,30 +1413,53 @@ def process_level_output(test=False):
     
     # read data files and load them into a data frame
     df_raw = combine_into_dataframe(files, config)
+    
+    # in case supplied data files duplicate individual scene files
+    df_raw.drop_duplicates(inplace=True)
+    
+    # drop any rows where polarization is not HH in the scene
+    pol1 = df_raw['File1'].str.extract(r'_([^_]+)_C$')[0]
+    pol2 = df_raw['File2'].str.extract(r'_([^_]+)_C$')[0]
+    
+    hh_mask = (pol1 == 'HH') & (pol2 == 'HH')
+    dropped = (~hh_mask).sum()
+    logger.info(
+        f"Dropped {dropped} observations where HH not in both polarizations"
+    )
+    df_raw = df_raw[hh_mask].reset_index(drop=True)
+    
 
-    espg_list = [3413, 6931]
+    epsg_list = [3413, 6931]
     if test:
         processing_levels = ['00']
     else:
         processing_levels = ['01', '02', '03']
+        processing_levels = ['03']
     
     obs_read=df_raw.shape[0]
     total_days=df_raw['date_start'].dt.date.nunique()
-    total_scenes=len(df_raw[['File1', 'File2']].drop_duplicates())
+    total_scenes=len(np.unique(df_raw[['File1', 'File2']]))
     logger.info(
         f'Input data totals | total observations: {obs_read}; '
         f'total days: {total_days}; total scenes: {total_scenes}'
     )
     
+    
     df_by_epsg = {}
-    for epsg in espg_list:
+    for epsg in epsg_list:
         df_by_epsg[epsg] = util._apply_projection(df_raw, epsg, config)
     
     for level in processing_levels:
-        for epsg in espg_list:
+        for epsg in epsg_list:
             config['level'] = level
             config['epsg'] = epsg
-            create_level_output(df_by_epsg[epsg], level, epsg, config)
+            if level in ['00', '03']:
+                config['start_date'] = df_raw['date_start'].dt.date.min()
+                config['end_date'] = df_raw['date_start'].dt.date.max()
+                config['buoy_drift'] = util._load_buoy_data(config)
+            else:
+                config['buoy_drift'] = None
+            create_level_output(df_by_epsg[epsg], config)
 
 
     # final log entry

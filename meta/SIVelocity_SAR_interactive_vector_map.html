@@ -114,11 +114,14 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0b1a2e; colo
       </div>
     </div>
 
-	<!-- OUTLIER CHECKBOX -->
-    <div>
-      <h2>Filter</h2>
-
-    </div>
+	<!-- BUOY CHECKBOX -->
+	<div>
+	  <h2>Filter</h2>
+	  <div class="cb-row">
+		<input type="checkbox" id="showBuoys" checked>
+		<label for="showBuoys">Show Buoy Drift</label>
+	  </div>
+	</div>
 
 	<!-- VIEW SELECTOR -->
     <div>
@@ -223,7 +226,7 @@ function interpolateStops(stops, t) {
 function getColorMode() { return document.getElementById('colorBy').value; }
 
 function getColor(vec) {
-  const spd = vec[4] / 100;
+  const spd = vec[4];
   if (getColorMode() === 'bearing') {
     const dx = vec[2] - vec[0], dy = vec[3] - vec[1];
     const bear = ((90 - Math.atan2(dy, dx) * 180 / Math.PI) % 360 + 360) % 360;
@@ -300,7 +303,9 @@ async function loadReferenceLayers() {
 
 // ── Arrow rendering ───────────────────────────────────────────────────────────
 let allVectors = [];
+let allBuoyVectors = [];
 let arrowLayer = null;
+let buoyLayer = null;
 
 function drawArrows(vectors, scale, opacity) {
   if (arrowLayer) map.removeLayer(arrowLayer);
@@ -348,24 +353,68 @@ function updateDisplay() {
   const scale = parseFloat(document.getElementById('scaleRange').value);
   const opacity = parseFloat(document.getElementById('opacityRange').value);
   drawArrows(filtered, scale, opacity);
+  
+  if (document.getElementById('showBuoys').checked && allBuoyVectors.length > 0) {
+    drawBuoys(allBuoyVectors, scale, opacity);
+  } else {
+    if (buoyLayer) { map.removeLayer(buoyLayer); buoyLayer = null; }
+  }
 
-  const speeds = filtered.map(v => v[4] / 100);
+  const speeds = filtered.map(v => v[4]);
   if (speeds.length > 0) {
     const sum = speeds.reduce((a,b) => a+b, 0);
-    document.getElementById('statMin').textContent = Math.min(...speeds).toFixed(1);
-    document.getElementById('statMax').textContent = Math.max(...speeds).toFixed(1);
-    document.getElementById('statMean').textContent = (sum / speeds.length).toFixed(1);
+    document.getElementById('statMin').textContent = Math.min(...speeds).toFixed(3);
+    document.getElementById('statMax').textContent = Math.max(...speeds).toFixed(3);
+    document.getElementById('statMean').textContent = (sum / speeds.length).toFixed(3);
     document.getElementById('statN').textContent = filtered.length.toLocaleString();
   } else {
     ['statMin','statMax','statMean','statN'].forEach(id => document.getElementById(id).textContent = '—');
   }
 }
 
+// ── Buoy Layer ───────────────────────────────────────────────────────────────────
+function drawBuoys(vectors, scale, opacity) {
+  if (buoyLayer) map.removeLayer(buoyLayer);
+  buoyLayer = L.layerGroup();
+
+  vectors.forEach(v => {
+    const [lon1, lat1, lon2, lat2, spdx100] = v;
+    const color = '#ff6b35';  // distinct orange for buoys
+
+    const line = L.polyline([[lat1, lon1], [lat2, lon2]], {
+      color, weight: Math.max(1.5, scale), opacity
+    });
+
+    const p1 = crs.projection.project(L.latLng(lat1, lon1));
+    const p2 = crs.projection.project(L.latLng(lat2, lon2));
+    const pdx = p2.x - p1.x, pdy = p2.y - p1.y;
+    const len = Math.sqrt(pdx * pdx + pdy * pdy);
+    if (len > 0) {
+      const headLen = Math.min(len * 0.35, 15000 * scale);
+      const angle = Math.atan2(pdy, pdx);
+      const a1 = angle + Math.PI * 0.8;
+      const a2 = angle - Math.PI * 0.8;
+      const tip1 = crs.projection.unproject(L.point(p2.x + headLen * Math.cos(a1), p2.y + headLen * Math.sin(a1)));
+      const tip2 = crs.projection.unproject(L.point(p2.x + headLen * Math.cos(a2), p2.y + headLen * Math.sin(a2)));
+      const head = L.polyline([
+        [tip1.lat, tip1.lng], [lat2, lon2], [tip2.lat, tip2.lng]
+      ], { color, weight: Math.max(1.5, scale), opacity });
+      buoyLayer.addLayer(head);
+    }
+    buoyLayer.addLayer(line);
+  });
+
+  buoyLayer.addTo(map);
+  if (coastLayer) coastLayer.bringToFront();
+  if (gratLayer) gratLayer.bringToFront();
+}
+
 // ── Hover ─────────────────────────────────────────────────────────────────────
 map.on('mousemove', function(e) {
   const { lat, lng } = e.latlng;
-  document.getElementById('hoverCoord').textContent = `${lat.toFixed(2)}°N, ${lng.toFixed(2)}°E`;
+  document.getElementById('hoverCoord').textContent = `${lat.toFixed(3)}°N, ${lng.toFixed(3)}°E`;
 
+  // search SAR vectors
   const filtered = getFilteredVectors();
   let best = null, bestDist = Infinity;
   for (const v of filtered) {
@@ -373,8 +422,23 @@ map.on('mousemove', function(e) {
     if (d < bestDist) { bestDist = d; best = v; }
   }
 
-  if (best && bestDist < 4) {
-    const spd = best[4] / 100;
+  // search buoy vectors
+  let bestBuoy = null, bestBuoyDist = Infinity;
+  if (document.getElementById('showBuoys').checked) {
+    for (const v of allBuoyVectors) {
+      const d = (v[1] - lat)**2 + (v[0] - lng)**2;
+      if (d < bestBuoyDist) { bestBuoyDist = d; bestBuoy = v; }
+    }
+  }
+
+  // show whichever is closer
+  if (bestBuoy && bestBuoyDist < 4 && bestBuoyDist <= bestDist) {
+    const spd = bestBuoy[4];
+    const bear = bestBuoy[5];
+    document.getElementById('hoverVal').textContent = `${spd.toFixed(1)} km/day`;
+    document.getElementById('hoverDetail').textContent = `Bearing: ${bear.toFixed(0)}° · Buoy`;
+  } else if (best && bestDist < 4) {
+    const spd = best[4];
     document.getElementById('hoverVal').textContent = `${spd.toFixed(1)} km/day`;
     const dx = best[2] - best[0], dy = best[3] - best[1];
     const bear = ((90 - Math.atan2(dy, dx) * 180 / Math.PI) % 360 + 360) % 360;
@@ -425,6 +489,19 @@ async function loadDate(dateStr) {
     document.getElementById('dateRange').textContent = `${data.date1} → ${data.date2}`;
     document.getElementById('vecCount').textContent = `${data.count.toLocaleString()} total`;
 
+	// Load buoy vectors for the same date
+	try {
+	  const buoyResp = await fetch(`data/buoy_velocity_${dateStr}.json`);
+	  if (buoyResp.ok) {
+		const buoyData = await buoyResp.json();
+		allBuoyVectors = buoyData.vectors ?? [];
+	  } else {
+		allBuoyVectors = [];
+	  }
+	} catch {
+	  allBuoyVectors = [];
+	}
+	
     updateDisplay();
 
     const idx = availableDates.indexOf(dateStr);
@@ -479,6 +556,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'ArrowRight' && !btnNext.disabled) navigateToIndex(currentDateIdx + 1);
 });
 
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
   // Load reference layers and available dates in parallel
@@ -510,6 +588,7 @@ async function init() {
 document.getElementById('scaleRange').addEventListener('input', updateDisplay);
 document.getElementById('opacityRange').addEventListener('input', updateDisplay);
 document.getElementById('colorBy').addEventListener('change', () => { drawLegend(); updateDisplay(); });
+document.getElementById('showBuoys').addEventListener('change', updateDisplay);
 
 init();
 </script>

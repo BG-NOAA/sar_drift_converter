@@ -21,6 +21,7 @@ __pycache__
 **/*.log
 
 # Ignored folders
+buoys
 input
 input_test
 layer_to_gpkg
