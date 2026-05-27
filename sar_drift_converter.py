@@ -128,7 +128,12 @@ def read_json_config():
                                            which scenes will be built.
         - "html_vector_template"  (str):   Path to HTML file that has the code
                                            to display vectors as interactive
-                                           quivers with outliers
+                                           quivers with outliers.
+        - "html_index_template"   (str):   Template index.html file for
+                                           directory listing page.
+        - "webpage_folders"       (list):  All of the supporting utilities for
+                                           the index.html file to properly
+                                           display.
         - "geojson_templates"     (list):  All of the geojson files that get
                                            loaded by HTML interactive map
         - "outlier_qml_file"      (str):   Path to QML file that applies
@@ -160,6 +165,8 @@ def read_json_config():
                                            contents from previous runs.
         - "overwrite"             (bool):  Overwrite files already created on
                                            the file server.
+        - "reprocess_days"        (int):   Number of days to overwrite
+                                           previously created data files.
         - "batch_process"         (bool):  If True, process all files in
                                            `sar_drift_directory`; if False,
                                            process single `sar_drift_filename`.
@@ -249,9 +256,10 @@ def read_json_config():
         "sar_drift_directory", "sar_drift_filename", "uw_iabp_buoy_filename",
         "sar_drift_data_url", "uw_iabp_buoy_url", "uw_iabp_buoy_tables",
         "netcdf_cdl_file", "netcdf_template_file", "html_vector_template",
-        "geojson_templates", "outlier_qml_file", "graduated_qml_file",
-        "output_dir", "log_dir", "buoy_dir", "meta_dir", "file_server",
-        "clear_output_dir", "batch_process", "overwrite", "delimiter",
+        "html_index_template", "webpage_folders", "geojson_templates",
+        "outlier_qml_file", "graduated_qml_file",  "output_dir", "log_dir",
+        "buoy_dir", "meta_dir", "file_server", "clear_output_dir",
+        "batch_process", "overwrite", "reprocess_days", "delimiter",
         "verbose", "version"
     }
 
@@ -272,6 +280,7 @@ def read_json_config():
         ("batch_process",            bool,  None, None),
         ("clear_output_dir",         bool,  None, None),
         ("overwrite"       ,         bool,  None, None),
+        ("reprocess_days",           int,  None, None),
         ("verbose",                  bool,  None, None)
     ]
 
@@ -289,26 +298,27 @@ def read_json_config():
     # path resolution and existence checks
     batch_process = config['batch_process']
     path_checks = [
-        ('sar_drift_directory', 'sar_drift_directory', batch_process),
-        ('sar_drift_filename', 'sar_drift_file', not batch_process),
-        ("uw_iabp_buoy_filename", "uw_iabp_buoy_filename", False),
-        ('netcdf_cdl_file', 'netcdf_cdl_file', False),
-        ('netcdf_template_file',  'netcdf_template_file', True),
-        ('html_vector_template', 'html_vector_template', True),
-        ('outlier_qml_file', 'outlier_qml_file', True),
-        ('graduated_qml_file', 'graduated_qml_file', True),
-        ('buoy_dir', 'buoy_dir', True),
-        ('meta_dir', 'meta_dir', True),
-        ('output_dir', 'output_dir', True),
-        ('log_dir', 'log_dir', True),
-        ('file_server', 'file_server', True)
+        ('sar_drift_directory', None, batch_process),
+        (
+            'sar_drift_filename',
+            config['sar_drift_directory'],
+            not batch_process
+        ),
+        ('netcdf_template_file',  config['meta_dir'], True),
+        ('html_vector_template', config['meta_dir'], True),
+        ('html_index_template', config['meta_dir'], True),
+        ('outlier_qml_file', config['meta_dir'], True),
+        ('graduated_qml_file', config['meta_dir'], True),
+        
     ]
     resolved_paths = {}
-    for json_key, config_key, must_exist in path_checks:
-        path = os.path.normpath(config[json_key])
+    for key_name, dir_prefix, must_exist in path_checks:
+        path = os.path.normpath(config[key_name])
+        if dir_prefix:
+            path = os.path.join(dir_prefix, path)
         if must_exist and not os.path.exists(path):
-            util.error_msg(f"Cannot find `{config_key}`: `{path}`")
-        resolved_paths[config_key] = path
+            util.error_msg(f"Cannot find `{key_name}`: `{path}`")
+        resolved_paths[key_name] = path
 
     # Delimiter decode (\t etc.)
     delimiter = config['delimiter'].encode().decode('unicode_escape')
@@ -316,6 +326,14 @@ def read_json_config():
     # Build final config — output_dir is set by create_level_output()
     config = {
         **resolved_paths,
+        'netcdf_cdl_file':         config['netcdf_cdl_file'],
+        'uw_iabp_buoy_filename':   config['uw_iabp_buoy_filename'],
+        'buoy_dir':                config['buoy_dir'],
+        'meta_dir':                config['meta_dir'],
+        'output_dir':              config['output_dir'],
+        'log_dir':                 config['log_dir'],
+        'file_server':             config['file_server'],
+        'webpage_folders':         config['webpage_folders'],
         'geojson_templates':       config['geojson_templates'],
         'sar_drift_data_url':      config['sar_drift_data_url'],
         'uw_iabp_buoy_url':        config['uw_iabp_buoy_url'],
@@ -323,6 +341,7 @@ def read_json_config():
         'clear_output_dir':        config['clear_output_dir'],
         'batch_process':           config['batch_process'],
         'overwrite':               config['overwrite'],
+        'reprocess_days':          config['reprocess_days'],
         'delimiter':               delimiter,
         'ignore_vector_threshold': IGNORE_VECTOR_THRESHOLD,
         'z_score_level':           Z_SCORE_LEVEL,
@@ -343,7 +362,7 @@ def read_json_config():
     if config['verbose']:
         labels = {
             'sar_drift_directory':           'sar drift directory',
-            'sar_drift_file':                'sar drift file',
+            'sar_drift_filename':            'sar drift file name',
             'uw_iabp_buoy_filename':         'UW IABP buoy filename',
             'sar_drift_data_url':            'SAR drift data URL',
             'uw_iabp_buoy_url':              'UW IABP buoy data URL',
@@ -351,6 +370,8 @@ def read_json_config():
             'netcdf_cdl_file':               'NetCDF CDL file',
             'netcdf_template_file':          'NetCDF template file',
             'html_vector_template':          'HTML vector template file',
+            'html_index_template':           'index.html template',
+            'webpage_folders':               'Supporting index.html files',
             'geojson_templates':             'GeoJSON template files',
             'outlier_qml_file':              'outlier qml file',
             'graduated_qml_file':            'graduated qml file',
@@ -362,6 +383,7 @@ def read_json_config():
             'clear_output_dir':              'clear output directory',
             'batch_process':                 'batch process',
             'overwrite':                     'overwrite',
+            'reprocess_days':                'reprocess days',
             'delimiter':                     'delimiter',
             'ignore_vector_threshold':       'ignore vector threshold',
             'z_score_level':                 'z-score level',
@@ -383,336 +405,6 @@ def read_json_config():
 
     return config
     
-    
-def combine_into_dataframe(files, config):
-    """
-    Read a list of SAR drift gfilter files into a single combined raw
-    DataFrame using parallel file reads across multiple CPU cores.
- 
-    Iterates over the provided file paths, skipping any 75 km files
-    encountered directly (they are resolved automatically from their paired
-    50 km entry). For each 50 km file, checks whether a corresponding 75 km
-    file exists and, if so, reads the 75 km file in its place. File reads
-    are parallelized using ProcessPoolExecutor to reduce wall-clock time on
-    multi-core machines. All per-file DataFrames are concatenated into a
-    single raw DataFrame with datetime columns parsed once after combining.
- 
-    The returned DataFrame contains only EPSG-independent columns. Projection-
-    dependent columns (X1, Y1, X2, Y2, displacement, velocity, speed,
-    bearing) are NOT added here. Call `util._apply_projection(df_raw, epsg,
-    config)` separately for each target EPSG after this function returns.
-    This design allows the expensive parallel file I/O to run exactly once
-    regardless of how many EPSG projections are required.
- 
-    Args:
-        files (list[str]): Paths to candidate gfilter input files, typically
-            glob-matched from `config['sar_drift_directory']`. Files with
-            `_0075000m_` in their path are silently skipped; they are only
-            read when resolved from a paired 50 km entry.
-        config (dict): Configuration dictionary. Must include:
-                - `delimiter` (str): Field delimiter passed to
-                  `util.read_sar_drift_data_file`.
-                - `max_workers` (int, optional): Maximum number of worker
-                  processes for parallel file reads. Defaults to
-                  min(32, os.cpu_count()) if not set.
- 
-    Returns:
-        pandas.DataFrame: Combined raw DataFrame of all successfully read
-            drift observations. Contains only EPSG-independent columns as
-            produced by `util.read_sar_drift_data_file`:
-                - `File1`, `File2` (str): Scene pair filenames.
-                - `Maxcorr1`, `Maxcorr2` (float): Cross-correlation scores.
-                - `latitude_1`, `longitude_1` (float): Start position
-                  (EPSG:4326, degrees).
-                - `latitude_2`, `longitude_2` (float): End position
-                  (EPSG:4326, degrees).
-                - `date_start` (pandas.Timestamp): Parsed start datetime.
-                - `date_end` (pandas.Timestamp): Parsed end datetime.
-                - `duration` (float): Observation duration in seconds.
-                - `sensor1`, `sensor2` (str): Satellite identifiers.
-                - `scene_id` (str): `File1`_`File2`.
-                - `_use_75km` (bool): True if the 75 km file was read in
-                  place of the 50 km file for this observation's scene.
-                - `_source_file` (str): Basename of the file actually read.
- 
-    Raises:
-        Exception: Re-raises any exception encountered during file reading
-            via the worker function `_read_gfilter_file`, causing the
-            executor to terminate and propagating the error to the caller.
-            Processing halts immediately on the first file read failure.
- 
-    Notes:
-        - 75 km files are identified by the substring `_0075000m_` in the
-          file path. Any such file appearing directly in `files` is skipped
-          and counted as a candidate but not read, as it will be resolved
-          from its paired 50 km entry.
-        - The 75 km counterpart of a 50 km file is derived by replacing
-          `_0050000m_` with `_0075000m_` in the normalized path. If the
-          resulting path is unchanged or the 75 km path does not exist on
-          disk, the original 50 km path is read instead.
-        - File extensions containing an underscore suffix (e.g. .txt_0)
-          are normalized by truncating at the first underscore before the
-          75 km path substitution is attempted.
-        - Header row position is detected automatically per file by
-          `_detect_skip_rows` inside `util.read_sar_drift_data_file`. No
-          configuration key is required for this.
-        - Date columns are parsed to pandas Timestamps once after all files
-          are concatenated, rather than per-file, for efficiency.
-        - Worker count defaults to min(32, os.cpu_count()) and can be
-          overridden via config['max_workers'].
-        - On Windows the ProcessPoolExecutor uses the `spawn` start method.
-          The entry point must be protected by `if __name__ == "__main__":`
-          to prevent recursive worker spawning.
-    """
-
-    import util
-    import os
-    import logging
-    import pandas as pd
-    from tqdm import tqdm
-    from concurrent.futures import ProcessPoolExecutor
-
-    logger = logging.getLogger('sar_drift_converter')
-
-    candidate_files = [f for f in files if '_0075000m_' not in f]
-    max_workers = min(32, os.cpu_count())
-
-    logger.info(
-        f"Reading {len(candidate_files)} gfilter files "
-        f"using {max_workers} workers"
-    )
-    files_75km = len(files) - len(candidate_files)
-    logger.info(
-        f"{files_75km} 75km files identified for substitution "
-        f"(will replace paired 50km files where available) | "
-        f"Difference of candidate files and files read for processing"
-    )
-
-    args = [(f, config) for f in candidate_files]
-    all_dfs = []
-    failed = 0
-
-
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        results = list(tqdm(
-            executor.map(util._read_gfilter_file, args),
-            total=len(args),
-            desc='Reading gfilter files...',
-            unit='file'
-        ))
-
-    all_dfs = [r for r in results if r is not None]
-    failed = len(results) - len(all_dfs)
-
-    if failed:
-        logger.warning(f"{failed} file(s) failed to read and were skipped")
-        
-
-    print('Combining all files into one Data Frame...')
-    df_all = pd.concat(all_dfs, ignore_index=True)
-
-    df_all['date_start'] = pd.to_datetime(
-        df_all['date_start'], format='%Y-%m-%d %H:%M:%S'
-    )
-    df_all['date_end'] = pd.to_datetime(
-        df_all['date_end'], format='%Y-%m-%d %H:%M:%S'
-    )
-
-    logger.info(
-        f"Combined: {df_all.shape[0]} rows from {len(all_dfs)} files "
-        f"({failed} failed)"
-    )
-
-    return df_all
-    
-
-def filter_input_data(df_all, config):
-    """
-    Apply scene-level and row-level quality filters to the combined drift
-    DataFrame.
-    
-    Filtering behavior is controlled by `config['level']`. For levels '02'
-    and '03', each File1/File2 scene pair is evaluated independently with a
-    sequence of per-row drops and scene-level rejection checks. Scenes that
-    fail a rejection check are discarded entirely; rows that fail a per-row
-    check are dropped from their scene. For all other levels the DataFrame is
-    returned unchanged, except level '00' which additionally saves the
-    unfiltered combined CSV to disk.
-    
-    Args:
-        df_all (pandas.DataFrame): Combined drift observations from all input
-            files, as produced by `combine_into_dataframe`. Expected columns:
-                - 'File1', 'File2' (str): Scene pair identifiers; used to
-                  group observations into scenes.
-                - 'direction_of_sea_ice_displacement' (float): Forward azimuth
-                  (degrees); rows with a value of 0 are dropped.
-                - 'sea_ice_speed' (float): Drift speed (m s⁻¹); rows with a
-                  value of 0 or above the speed threshold are dropped.
-                - 'Maxcorr1', 'Maxcorr2' (float): Cross-correlation scores;
-                  used for the scene-level 60% check and per-row validity
-                  drop.
-                - '_use_75km' (bool): Whether the 75 km file was used for
-                  this scene; controls the speed anomaly threshold (35.0 m s⁻¹
-                  for 75 km files, 25.0 m s⁻¹ for 50 km files).
-                - 'date_start', 'date_end' (str): Observation timestamps;
-                  re-parsed to pandas datetimes after filtering.
-        config (dict): Configuration dictionary. Must include:
-                - 'level' (str): Processing level; filtering is only applied
-                                 for levels '02' and '03'. Level '00' triggers
-                                 an unfiltered CSV save. Levels '01' and above
-                                 '03' return `df_all` unchanged.
-                - 'ignore_vector_threshold' (int): Minimum number of rows a
-                  scene must retain after all per-row drops to be accepted.
-                - 'filtered_data_dir' (str): Output directory for the
-                  unfiltered combined CSV (level '00' only).
-    
-    Returns:
-        pandas.DataFrame: Filtered DataFrame containing only accepted scenes
-            and valid rows, with 'date_start' and 'date_end' re-parsed as
-            pandas Timestamps. For levels other than '02' and '03', the
-            original DataFrame is returned unchanged.
-    
-    Notes:
-        **Per-row drops (levels '02' and '03', applied in order):**
-    
-        1. Remove rows where `direction_of_sea_ice_displacement == 0` or
-           `sea_ice_speed == 0` (zero bearing or zero speed).
-        2. Remove rows where `sea_ice_speed >= 25.0 m s⁻¹` (50 km files) or
-           `>= 35.0 m s⁻¹` (75 km files).
-        3. Remove rows where `Maxcorr2 <= Maxcorr1`.
-    
-        **Scene-level rejection (levels '02' and '03', entire scene
-        discarded if):**
-    
-        1. Fewer than 60% of rows have `Maxcorr2 > Maxcorr1`, evaluated
-           after the bearing/speed validity drop but before the per-row
-           Maxcorr drop.
-        2. Remaining row count falls below `ignore_vector_threshold` after
-           all per-row drops.
-    
-        - Each filter step is logged individually, reporting rows dropped and
-          the scene identifier. Rejected scenes are logged at WARNING level;
-          accepted scenes and per-row drops at INFO level.
-        - The 60% Maxcorr check precedes the per-row Maxcorr drop
-          intentionally: a scene where the majority of vectors have poor
-          correlation is rejected outright rather than thinned.
-    """
-    
-    import os
-    import logging
-    import pandas as pd
-    from tqdm import tqdm
-
-    # log activity
-    logger = logging.getLogger('sar_drift_converter')
-    
-    
-    if config['level'] in ['02', '03']:
-        accepted = []
-        scenes = list(df_all.groupby(['File1', 'File2']))
-        total_scenes = len(scenes)
-        chunks = max(1, total_scenes // 20)
-        for (file1, file2), df_scene in tqdm(
-                scenes, desc='Filtering scenes...',
-                total=total_scenes,
-                miniters=chunks,
-                mininterval=0,
-                unit='scene'
-            ):
-            scene_id = f"{file1}_{file2}"
-            use_75km = df_scene['_use_75km'].iloc[0]
-            initial_row_size = df_scene.shape[0]
-    
-            # remove invalid bearings and speeds
-            df_scene = df_scene[
-                ~(
-                    (df_scene['direction_of_sea_ice_displacement'] == 0) &
-                    (df_scene['sea_ice_speed'] == 0)
-                )
-            ]
-            if initial_row_size != df_scene.shape[0]:
-                logger.info(
-                    f"{scene_id} | after bearing/speed validity: "
-                    f"{df_scene.shape[0]} (dropped "
-                    f"{initial_row_size - df_scene.shape[0]})"
-                )
-                
-            # remove invalid speeds
-            speed_thresh = 35.0 if use_75km else 25.0
-            row_count_before = df_scene.shape[0]
-            df_scene = df_scene[df_scene['sea_ice_speed'] < speed_thresh]
-            if row_count_before != df_scene.shape[0]:
-                logger.info(
-                    f"{scene_id} | after speed filter "
-                    f"(sea_ice_speed >= {speed_thresh}): {df_scene.shape[0]} "
-                    f"(dropped {row_count_before - df_scene.shape[0]})"
-                )
-    
-            # reject scene if < 60% have MaxCorr2 > MaxCorr1
-            pct_correct = (
-                df_scene['Maxcorr2'] > df_scene['Maxcorr1']
-            ).mean() * 100
-            if pct_correct < 60:
-                logger.warning(
-                    f"Reject scene: {scene_id} | "
-                    f"pct_correct={pct_correct:.1f}% (<60%)"
-                )
-                continue
-    
-            # remove rows where MaxCorr2 <= MaxCorr1
-            row_count_before = df_scene.shape[0]
-            df_scene = df_scene[df_scene['Maxcorr2'] > df_scene['Maxcorr1']]
-            if row_count_before != df_scene.shape[0]:
-                logger.info(
-                    f"{scene_id} | after Maxcorr2 > Maxcorr1: "
-                    f"{df_scene.shape[0]} (dropped "
-                    f"{row_count_before - df_scene.shape[0]})"
-                )
-    
-            # reject scene if too few observations
-            if df_scene.shape[0] < config['ignore_vector_threshold']:
-                logger.warning(
-                    f"Reject scene: {scene_id} | "
-                    f"only {df_scene.shape[0]} observations "
-                    f"(threshold={config['ignore_vector_threshold']})"
-                )
-                continue
-    
-            logger.info(
-                f"Accepted scene: {scene_id} | final rows={df_scene.shape[0]}"
-            )
-            accepted.append(df_scene)
-            
-    
-        print('Updating Data Frame with filtered data...')
-        df_all = pd.concat(accepted, ignore_index=True)
-        df_all['date_start'] = pd.to_datetime(
-            df_all['date_start'],
-            format='%Y-%m-%d %H:%M:%S'
-        )
-        df_all['date_end'] = pd.to_datetime(
-            df_all['date_end'],
-            format='%Y-%m-%d %H:%M:%S'
-        )
-        logger.info(
-            f"After filtering: {df_all.shape[0]} rows across "
-            f"{len(accepted)} scenes"
-        )
-    
-
-    
-    # save filtered combined CSV
-    if config['level'] == "00":
-        print('Saving combined Data Frame...')
-        df_all.to_csv(
-            os.path.join(
-                config['filtered_data_dir'],'filtered_combined.csv'
-            ),
-            index=False
-        )    
-    
-    return df_all
-
     
 def create_scene_output(day, df_day, config, template_ds, exists):
     """
@@ -1012,8 +704,6 @@ def create_daily_output(scene_output, config, template_ds, exists):
             multi_layered=True
         )
 
-    # for daily files, wqe do not need to include _VV_ in pair name
-    
 
     # single-layer netcdf
     if not exists['nc_daily']:
@@ -1205,14 +895,16 @@ def create_level_output(df_all, config):
 
     
     # apply row-level filters per File1/File2 scene group
-    df_all = filter_input_data(df_all, config)
+    df_all = util.filter_input_data(df_all, config)
     
     
     # define unique pair key
-    # each scene will be unique to sensor names and Julian start/stop seconds
+    f1 = df_all['File1'].str.split('_')
+    f2 = df_all['File2'].str.split('_')
     df_all['_unique_pair_key'] = (
-        df_all.apply(util._get_sensors_seconds, axis=1)
+        f1.str[0] + '_' + f1.str[8] + '_' + f2.str[0] + '_' + f2.str[8]
     )
+    del f1, f2
 
     
     # create date range groups for daily/scene output
@@ -1406,13 +1098,13 @@ def process_level_output(test=False):
     else:
         files = [config['sar_drift_filename']]
         
-
+    
     logger.info(f"Input directory: {config['sar_drift_directory']}")
     logger.info(f"Found {len(files)} candidate files")
     
     
     # read data files and load them into a data frame
-    df_raw = combine_into_dataframe(files, config)
+    df_raw = util.combine_into_dataframe(files, config)
     
     # in case supplied data files duplicate individual scene files
     df_raw.drop_duplicates(inplace=True)
@@ -1433,7 +1125,7 @@ def process_level_output(test=False):
     if test:
         processing_levels = ['00']
     else:
-        processing_levels = ['01', '02', '03']
+        # processing_levels = ['01', '02', '03']
         processing_levels = ['03']
     
     obs_read=df_raw.shape[0]
@@ -1457,11 +1149,16 @@ def process_level_output(test=False):
                 config['start_date'] = df_raw['date_start'].dt.date.min()
                 config['end_date'] = df_raw['date_start'].dt.date.max()
                 config['buoy_drift'] = util._load_buoy_data(config)
+                util._update_interactive_html_files(config, epsg)
             else:
                 config['buoy_drift'] = None
             create_level_output(df_by_epsg[epsg], config)
 
 
+    # update remote data repository
+    # util._copy_to_gdrive(config)
+    
+    
     # final log entry
     run_end = datetime.utcnow() 
     elapsed = run_end - run_start

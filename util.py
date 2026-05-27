@@ -110,7 +110,8 @@ def _grid_params(grid_size, hemisphere):
     return delta, imax, jmax, xmin, ymin
 
 
-def _polar_lonlat_to_xy(longitude, latitude, true_scale_lat, re, e, hemisphere):
+def _polar_lonlat_to_xy(longitude, latitude, true_scale_lat,
+                        re, e, hemisphere):
     """Convert from geodetic longitude and latitude to Polar Stereographic
     (X, Y) coordinates in km.
 
@@ -336,16 +337,16 @@ def _download_sar_drift_files(config):
         filename = os.path.basename(file_url)
         local_path = os.path.join(download_folder, filename)
         
-        if not os.path.exists(local_path):  # Skip if already downloaded
-            try:
-                with requests.get(file_url, stream=True, verify=False) as r:
-                    r.raise_for_status()
-                    with open(local_path, 'wb') as f:
-                        for chunk in r.iter_content(chunk_size=1048576):
-                            f.write(chunk)
-                logger.info(f"Downloaded {filename}")
-            except requests.exceptions.HTTPError as e:
-                logger.warning(f"Skipping {filename} — {e}")
+        # Overwrite if already downloaded
+        try:
+            with requests.get(file_url, stream=True, verify=False) as r:
+                r.raise_for_status()
+                with open(local_path, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=1048576):
+                        f.write(chunk)
+            logger.info(f"Downloaded {filename}")
+        except requests.exceptions.HTTPError as e:
+            logger.warning(f"Skipping {filename}: {e}")
 
 
 def _read_gfilter_file(args):
@@ -420,18 +421,6 @@ def _read_gfilter_file(args):
         raise
     
 
-def _get_sensors_seconds(row):
-    file1_parts = row['File1'].split('_')
-    sensor1 = file1_parts[0]
-    seconds1 = file1_parts[8]
-
-    file2_parts = row['File2'].split('_')
-    sensor2 = file2_parts[0]
-    seconds2 = file2_parts[8]
-
-    return f'{sensor1}_{seconds1}_{sensor2}_{seconds2}'
-
-
 def _check_existing_files(scene_output_stub, config):
     """
     Check which expected daily output files already exist for a given day.
@@ -490,9 +479,28 @@ def _check_existing_files(scene_output_stub, config):
     """
     
     import os
-
+    import pandas as pd
+    import logging 
+    
+    overwrite = config['overwrite']
+    start_date = scene_output_stub['start_date']
+    reprocess_days = config['reprocess_days']
+    cutoff = (
+        pd.Timestamp.normalize() - pd.Timedelta(days=reprocess_days)
+    )
+    if start_date >= cutoff:
+        # always rewrite output for the number of days in `reprocess_days`
+        # this allows for corrections/updates from website
+        overwrite = True
+        logger = logging.getLogger('sar_drift_converter')
+        logger.info(
+            f'Recreating output since {start_date} is within repcoess window '
+            f'of {reprocess_days} days from run time'
+        )
+    
+    
     # overwirte indicates always create the file even if existing
-    if config['overwrite']:
+    if overwrite:
         if config['level'] == '00':
             return {
                 'nc_scenes': False,
@@ -560,14 +568,21 @@ def _check_existing_files(scene_output_stub, config):
             f"_PL{config['level']}_v{config['version']}.gpkg"
         ))
         
-    # check JSON        
-    json_exists = True
+    # check JSON (check both since buoy data are a day behind SAR drift data)
+    si_json_exists = True
     if config['level'] in ['00', '03']:
-        json_exists = os.path.exists(
+        si_json_exists = os.path.exists(
             os.path.join(data_dir, f"si_velocity_{start}.json")
         )
+    buoy_json_exists = True
+    if config['level'] in ['00', '03']:
+        buoy_json_exists = os.path.exists(
+            os.path.join(data_dir, f"buoy_velocity_{start}.json")
+        )
 
+    json_exists = si_json_exists and buoy_json_exists
     
+   
     result = {
         'nc_scenes': nc_scenes_exists,
         'nc_daily': nc_daily_exists,
@@ -653,7 +668,7 @@ def _set_metadata(config):
     import xarray as xr
     
     
-    cdl_file = config['netcdf_cdl_file']
+    cdl_file = os.path.join(config['meta_dir'], config['netcdf_cdl_file'])
     cdl_file_dir = os.path.dirname(cdl_file)
     cdl_file_basename = os.path.basename(cdl_file)
     cdl_file_stem = os.path.splitext(cdl_file_basename)[0]
@@ -699,8 +714,8 @@ def _apply_projection(df_raw, epsg, config):
     Reprojects start and end positions from EPSG:4326 to the target CRS
     specified by `epsg` using `_calculate_drift_daily`, then assigns all
     projection-dependent columns to a copy of the input DataFrame. Columns
-    that are independent of projection — timestamps, raw geographic
-    coordinates, duration, sensor identifiers, and source file metadata —
+    that are independent of projection - timestamps, raw geographic
+    coordinates, duration, sensor identifiers, and source file metadata -
     are preserved unchanged from `df_raw`.
 
     This function is intended to be called once per EPSG after
@@ -786,18 +801,18 @@ def _apply_projection(df_raw, epsg, config):
         epsg=epsg
     )
 
-    df['X1'] = drift['X1']
-    df['Y1'] = drift['Y1']
-    df['X2'] = drift['X2']
-    df['Y2'] = drift['Y2']
+    df['X1'] = np.round(drift['X1'], config['coordinate_precision'])
+    df['Y1'] = np.round(drift['Y1'], config['coordinate_precision'])
+    df['X2'] = np.round(drift['X2'], config['coordinate_precision'])
+    df['Y2'] = np.round(drift['Y2'], config['coordinate_precision'])
     df['sea_ice_x_displacement'] = np.round(
-        drift['dx'], config['speed_precision']
+        drift['dx'], config['displacement_precision']
     )
     df['sea_ice_y_displacement'] = np.round(
-        drift['dy'], config['speed_precision']
+        drift['dy'], config['displacement_precision']
     )
-    df['u'] = drift['u']
-    df['v'] = drift['v']
+    df['u'] = np.round(drift['u'], config['displacement_precision'])
+    df['v'] = np.round(drift['v'], config['displacement_precision'])
     df['sea_ice_speed'] = np.round(
         drift['speed_ms'], config['speed_precision']
     )
@@ -808,10 +823,10 @@ def _apply_projection(df_raw, epsg, config):
         drift['bearing'], config['bearing_precision']
     )
     df['distance'] = np.round(
-        drift['distance'], config['speed_precision']
+        drift['distance'], config['displacement_precision']
     )
     df['distance_geod'] = np.round(
-        drift['distance_geod'], config['speed_precision']
+        drift['distance_geod'], config['displacement_precision']
     )
 
     return df
@@ -912,7 +927,7 @@ def _calculate_drift_daily(lat1, lon1, lat2, lon2, duration, epsg):
         'u': dx / duration,
         'v': dy / duration,
         'speed_ms': distance / duration,
-        'speed_kmdy': (distance / 1000) / (duration / SECONDS_PER_DAY)
+        'speed_kmdy':  (distance / 1000) / (duration / SECONDS_PER_DAY)
     }
         
 
@@ -964,7 +979,7 @@ def _embed_qml_style(gpkg_path, layer_name, config):
         qml_path = config['outlier_qml_file']
     else:
         qml_path = config['graduated_qml_file']
-    
+
     with open(qml_path, 'r') as f:
         qml_content = f.read()
 
@@ -1150,9 +1165,12 @@ def _download_uw_iabp_buoy_data(config):
     start_date_str  = config['start_date'].strftime('%Y-%m-%d')
     end_date_str  = config['end_date'].strftime('%Y-%m-%d')
     
-    complete_buoy_data_file = (
-        f'{complete_buoy_data_file_basename}_{start_date_str}_{end_date_str}.csv'
+    complete_buoy_data_file = os.path.join(
+        config['buoy_dir'],
+        f'{complete_buoy_data_file_basename}_{start_date_str}_'
+        f'{end_date_str}.csv'
     )
+    
     
     if os.path.exists(complete_buoy_data_file) and not config['overwrite']:
         logger.info(
@@ -1275,7 +1293,6 @@ def _download_uw_iabp_buoy_data(config):
     df = pd.DataFrame(downloaded_buoy_list)
     df = df.iloc[:, [0, 1, 4, 6, 7]].copy()
     df.columns = ['BuoyID', 'Year', 'DOY', 'Lat', 'Lon']
-    df.to_csv('buoys_list', index=False)
     df['Year'] = df['Year'].astype(int)
     df['DOY']  = df['DOY'].astype(float)
     base_year = pd.to_datetime(df['Year'].astype(str), format='%Y')
@@ -1302,11 +1319,13 @@ def _download_uw_iabp_buoy_data(config):
     df['lat'] = df['lat'].astype(float)
     df['lon'] = df['lon'].astype(float)
 
+    df.to_csv(complete_buoy_data_file, index=False)
     
     return df
 
 
 def _load_buoy_data(config):
+    import numpy as np
     import pandas as pd
     import logging
     from tqdm import tqdm
@@ -1322,7 +1341,7 @@ def _load_buoy_data(config):
     
     logger.info(f'Loaded buoy data | {df.shape[0]} rows')
         
-    # Filter out buoys below 50°N — outside Arctic/sub-Arctic
+    # Filter out buoys below 50°N (outside Arctic/sub-Arctic)
     # region of interest
     df_filter = (df['lat'] >= 50.0)
     df = df[df_filter].copy()
@@ -1340,7 +1359,7 @@ def _load_buoy_data(config):
 
    
     # Take the first observation of each day per buoy regardless of hour,
-    # since hour==0 is unreliable — some buoys report multiple times in the
+    # since hour==0 is unreliable. Some buoys report multiple times in the
     # first hour and some days have no midnight observation at all
     df = (
         df.groupby(['buoy_id', 'date'], as_index=False)
@@ -1410,7 +1429,7 @@ def _load_buoy_data(config):
         drift.insert(3, 'longitude_1', drift_df['longitude_1'].values)
         drift.insert(4, 'latitude_2', drift_df['latitude_2'].values)
         drift.insert(5, 'longitude_2', drift_df['longitude_2'].values)
-    
+        
         # as with SAR drift filter, remove buoys where drift > 25 km/day
         speed_filter = (drift['speed_kmdy'] <= 25)
         drift = drift[speed_filter].copy()
@@ -1420,14 +1439,54 @@ def _load_buoy_data(config):
     # Combine all buoys into a single DataFrame
     drift_all = pd.concat(drift_results, ignore_index=True)
     
-    
+    # round values
+    drift_all['latitude_1'] = np.round(
+        drift_all['latitude_1'], config['coordinate_precision']
+    )
+    drift_all['longitude_1'] = np.round(
+        drift_all['longitude_1'], config['coordinate_precision']
+    )
+    drift_all['latitude_2']= np.round(
+        drift_all['latitude_2'], config['coordinate_precision']
+    )
+    drift_all['longitude_2'] = np.round(
+        drift_all['longitude_2'], config['coordinate_precision']
+    )
+    drift_all['X1'] = np.round(drift_all['X1'], config['coordinate_precision'])
+    drift_all['Y1'] = np.round(drift_all['Y1'], config['coordinate_precision'])
+    drift_all['X2'] = np.round(drift_all['X2'], config['coordinate_precision'])
+    drift_all['Y2'] = np.round(drift_all['Y2'], config['coordinate_precision'])
+    drift_all['dx'] = np.round(
+        drift_all['dx'], config['displacement_precision']
+    )
+    drift_all['dy'] = np.round(
+        drift_all['dy'], config['displacement_precision']
+    )
+    drift_all['distance'] = np.round(
+        drift_all['distance'], config['displacement_precision']
+    )
+    drift_all['distance_geod']  = np.round(
+        drift_all['distance_geod'], config['displacement_precision']
+    )
+    drift_all['bearing'] = np.round(
+        drift_all['bearing'], config['bearing_precision']
+    )
+    drift_all['u']= np.round(drift_all['u'], config['displacement_precision'])
+    drift_all['v']= np.round(drift_all['v'], config['displacement_precision'])
+    drift_all['speed_ms'] = np.round(
+        drift_all['speed_ms'], config['displacement_precision']
+    )
+    drift_all['speed_kmdy'] = np.round(
+        drift_all['speed_kmdy'], config['displacement_precision']
+    )
+
     # log skipped buoys
     if buoys_skipped:
         logger.info(f'Skipped {len(buoys_skipped)} buoy(s) |')
         for msg in buoys_skipped:
             logger.info(f'Buoy skipped | {msg}')
 
-            
+    
     return drift_all
     
     
@@ -1447,6 +1506,176 @@ def _get_layer_name(scene_id):
     return layer_name
 
 
+def _update_interactive_html_files(config, epsg):
+    import os
+    import shutil
+    import re
+
+    EPSG_META = {
+        3413: {
+            'label': 'EPSG:3413',
+            'desc':  'NSIDC Sea Ice Polar Stereographic North',
+        },
+        6931: {
+            'label': 'EPSG:6931',
+            'desc':  'NSIDC EASE-Grid 2.0 North',
+        },
+    }
+
+    # year range
+    start_year = config['start_date'].year
+    end_year   = config['end_date'].year
+    years      = list(range(start_year, end_year + 1))
+    years_range   = '[' + ', '.join(str(y) for y in years) + ']'
+
+    # Read template
+    index_html_template_path = config['html_index_template']
+    with open(index_html_template_path, 'r') as f:
+        html_content = f.read()
+
+
+    # update template content
+    epsg_label = EPSG_META[epsg]['label']
+    epsg_desc  = EPSG_META[epsg]['desc']
+
+    html_content = re.sub(
+        r"const EPSG_LABEL\s*=\s*'[^']*';",
+        f"const EPSG_LABEL = '{epsg_label}';",
+        html_content
+    )
+    html_content = re.sub(
+        r"const EPSG_DESC\s*=\s*'[^']*';",
+        f"const EPSG_DESC  = '{epsg_desc}';",
+        html_content
+    )
+    html_content = re.sub(
+        r"const AVAILABLE_YEARS\s*=\s*\[[^\]]*\];",
+        f"const AVAILABLE_YEARS = {years_range};",
+        html_content
+    )
+    viewer_path = (
+        f"Processing%20Level%20-%2003%20(PL03)/"
+        f"{os.path.basename(config['html_vector_template'])}"
+    )
+    html_content = re.sub(
+        r"const HTML_VIEWER_PATH\s*=\s*'[^']*';",
+        lambda _: f"const HTML_VIEWER_PATH = '{viewer_path}';",
+        html_content
+    )
+    
+    # create index.html
+    index_html_path = os.path.join(
+        config['file_server'], str(epsg), 'index.html'
+    )
+    os.makedirs(os.path.dirname(index_html_path), exist_ok=True)
+    with open(index_html_path, 'w') as f:
+        f.write(html_content)
+
+    # copy css/js support folders
+    for dir_name in config['webpage_folders']:
+        src = os.path.join(config['meta_dir'], dir_name)
+        dst = os.path.join(config['file_server'], str(epsg), dir_name)
+        if os.path.isdir(src):
+            if os.path.exists(dst):
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst)
+            
+            
+    # update buoy JSON files
+    data_dir = os.path.join(
+        config['file_server'],  str(config['epsg']),
+        'Processing Level - 03 (PL03)', 'data'
+    )
+    _update_buoys_vectors(data_dir, config)
+    
+
+def _update_buoys_vectors(data_dir, config):
+    """
+    Write per-day buoy drift JSON files for all dates in the buoy drift
+    DataFrame stored in config.
+
+    Buoy observation data from the UW IABP dataset may be delayed relative
+    to SAR drift data. This function iterates over all available buoy data
+    and writes or overwrites a per-day JSON file for each date that has at
+    least one observation. Running on the full DataFrame each time ensures
+    delayed observations are always captured regardless of when they arrive.
+
+    Args:
+        data_dir (str): Directory path where per-day buoy JSON files are
+            written. Each file is named `buoy_velocity_<YYYYMMDD>.json`.
+        config (dict): Configuration dictionary. Must include:
+                - 'buoy_drift' (pandas.DataFrame): Full buoy drift
+                  DataFrame with columns:
+                      - 'date' (str): Observation date ('YYYY-MM-DD').
+                      - 'longitude_1', 'latitude_1' (float): Start
+                        position (EPSG:4326, degrees).
+                      - 'longitude_2', 'latitude_2' (float): End
+                        position (EPSG:4326, degrees).
+                      - 'speed_kmdy' (float): Drift speed (km day⁻¹).
+                      - 'bearing' (float): Forward azimuth (degrees).
+
+    Returns:
+        None
+
+    Notes:
+        - Per-day JSON files are only written when at least one buoy
+          observation exists for that date.
+        - Each JSON payload follows the format:
+            {
+              'date1': 'YYYY-MM-DD',
+              'date2': 'YYYY-MM-DD',
+              'count': int,
+              'vectors': [[lon1, lat1, lon2, lat2, speed_kmdy, bearing], ...]
+            }
+        - The JSON is written without indentation for compact output.
+        - Existing files are overwritten unconditionally.
+        - Progress is displayed via a tqdm progress bar keyed on unique
+          dates in the DataFrame.
+    """
+    import os
+    import json
+    import logging
+    from tqdm import tqdm
+
+    logger = logging.getLogger('sar_drift_converter')
+
+    df_buoy_drift = config['buoy_drift']
+    groups = list(df_buoy_drift.groupby('date'))
+
+    for date, group in tqdm(groups, desc='Writing buoy JSON files'):
+        date_str = str(date).replace('-', '')
+
+        vectors = [
+            [
+                float(row.longitude_1),
+                float(row.latitude_1),
+                float(row.longitude_2),
+                float(row.latitude_2),
+                float(row.speed_kmdy),
+                float(row.bearing)
+            ]
+            for row in group.itertuples(index=False)
+        ]
+
+        if len(vectors) == 0:
+            continue
+
+        payload = {
+            'date1':   str(date),
+            'date2':   str(date),
+            'count':   len(vectors),
+            'vectors': vectors
+        }
+
+        json_path = os.path.join(
+            data_dir, f'buoy_velocity_{date_str}.json'
+        )
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, separators=(',', ':'))
+
+        logger.info(f'Updated buoy JSON {json_path}')
+            
+            
 #=============
 # Calculations
 #=============
@@ -1474,8 +1703,8 @@ def _circular_std(a):
     """
     Compute the circular standard deviation of an array of angles.
     
-    Uses the mean resultant length R — the magnitude of the vector sum of
-    unit vectors at each angle — to derive a dispersion measure analogous
+    Uses the mean resultant length R (the magnitude of the vector sum of
+    unit vectors at each angle) to derive a dispersion measure analogous
     to standard deviation. R = 1 indicates perfect concentration (all angles
     identical); R → 0 indicates maximum dispersion. The circular standard
     deviation is defined as sqrt(−2 · ln(R)), which approaches 0 as
@@ -1504,155 +1733,6 @@ def _circular_std(a):
     return np.sqrt(-2 * np.log(np.clip(R, 1e-12, 1.0)))
     
     
-#=========
-# Data I/O
-#=========
-
-def read_sar_drift_data_file(input_file, config):
-    """
-    Read and preprocess a SAR ice-drift text data file into a standardized
-    raw DataFrame.
-
-    Loads a SAR drift data file (CSV-like text) using parsing rules provided
-    in `config`, cleans column names, converts Julian-second timestamps to
-    human-readable datetime strings, computes observation duration, extracts
-    sensor and scene identifiers, renames geographic coordinate columns for
-    consistency with downstream output naming, and reduces the DataFrame to
-    only the columns needed for downstream processing.
-
-    Projection-dependent quantities (projected coordinates, displacement,
-    velocity, speed, bearing) are NOT computed here. They depend on a target
-    EPSG and are applied separately by `_apply_projection` after all files
-    have been read and combined. This separation allows the expensive file
-    I/O step to run exactly once regardless of how many target projections
-    are required.
-
-    Processing steps:
-        1. Detect the header row automatically via `_detect_skip_rows`,
-           which scans the first 10 lines for the row containing 'File1'
-           and 'File2'.
-        2. Read the file with `pandas.read_csv()` using the detected row
-           offset and the delimiter from `config`.
-        3. Strip whitespace from column names.
-        4. Convert Julian seconds timestamps (`Time1_JS`, `Time2_JS`) to
-           human-readable datetime strings (`date_start`, `date_end`).
-        5. Compute observation duration in seconds (`duration`).
-        6. Extract sensor identifiers from `File1`/`File2` into `sensor1`/
-           `sensor2` and construct `scene_id`.
-        7. Rename geographic coordinate columns:
-               Lat1 → latitude_1,  Lon1 → longitude_1
-               Lat2 → latitude_2,  Lon2 → longitude_2
-        8. Reduce the DataFrame to only the columns needed for downstream
-           processing.
-
-    Args:
-        input_file (str or pathlib.Path): Path to the SAR drift data file
-                                          to read.
-        config (dict): Parsing configuration. Expected keys:
-            - 'delimiter' (str): Field delimiter passed to `pd.read_csv`.
-
-    Returns:
-        pandas.DataFrame: Cleaned raw SAR drift DataFrame containing the
-            following columns:
-
-            Renamed geographic coordinates (EPSG:4326, degrees):
-                - 'latitude_1'  (float): Starting latitude  (from Lat1).
-                - 'longitude_1' (float): Starting longitude (from Lon1).
-                - 'latitude_2'  (float): Ending latitude    (from Lat2).
-                - 'longitude_2' (float): Ending longitude   (from Lon2).
-
-            Derived timestamps and duration:
-                - 'date_start' (str): Start datetime string
-                  ('%Y-%m-%d %H:%M:%S'), converted from Time1_JS.
-                - 'date_end'   (str): End datetime string
-                  ('%Y-%m-%d %H:%M:%S'), converted from Time2_JS.
-                - 'duration' (float): Observation duration in seconds
-                  (Time2_JS − Time1_JS).
-
-            Sensor and scene identifiers:
-                - 'sensor1'  (str): Satellite identifier from File1
-                                    (prefix before first underscore).
-                - 'sensor2'  (str): Satellite identifier from File2.
-                - 'scene_id' (str): File1 and File2 joined by underscore.
-
-            Scene pair identifiers and correlation scores:
-                - 'File1', 'File2' (str): Raw scene pair filenames.
-                - 'Maxcorr1', 'Maxcorr2' (float): Cross-correlation scores
-                  used for scene-level quality filtering downstream.
-
-    Notes:
-        - SAR time fields `Time1_JS` and `Time2_JS` are seconds since
-          2000-01-01 00:00:00 UTC.
-        - Header row detection is performed automatically by
-          `_detect_skip_rows`. No configuration key or argument is required
-          to control this — the function always scans the file to locate
-          the header.
-        - Projection-dependent columns (X1, Y1, X2, Y2,
-          sea_ice_x_displacement, sea_ice_y_displacement, u, v,
-          sea_ice_speed, sea_ice_speed_kmdy,
-          direction_of_sea_ice_displacement, distance, distance_geod)
-          are not present in the returned DataFrame. Call
-          `_apply_projection(df, epsg, config)` to add them after all
-          files have been combined.
-    """
-
-    import numpy as np
-    import pandas as pd
-    from datetime import datetime, timedelta
-
-    skip_rows = _detect_skip_rows(input_file)
-
-    # read the SAR drift data file
-    df = pd.read_csv(
-        input_file, delimiter=config['delimiter'],
-        header=0, engine='c', skiprows=skip_rows
-    )
-    df.columns = df.columns.str.strip()
-
-    # convert Julian seconds (epoch: 2000-01-01) to datetime strings
-    base_time = datetime(2000, 1, 1)
-    df['date_start'] = df['Time1_JS'].apply(
-        lambda x: base_time + timedelta(seconds=x)
-    )
-    df['date_start'] = df['date_start'].dt.strftime('%Y-%m-%d %H:%M:%S')
-    df['date_end'] = df['Time2_JS'].apply(
-        lambda x: base_time + timedelta(seconds=x)
-    )
-    df['date_end'] = df['date_end'].dt.strftime('%Y-%m-%d %H:%M:%S')
-
-    # observation duration in seconds
-    df['duration'] = df['Time2_JS'] - df['Time1_JS']
-
-    # sensor and scene identifiers
-    df['sensor1']  = df['File1'].str.partition('_')[0]
-    df['sensor2']  = df['File2'].str.partition('_')[0]
-    df['scene_id'] = df['File1'] + '_' + df['File2']
-
-
-    # longitudes appear mixed - standardize -180 to 180
-    df['Lon1'] = np.where(df['Lon1'] > 180, df['Lon1'] - 360, df['Lon1'])
-    df['Lon2'] = np.where(df['Lon2'] > 180, df['Lon2'] - 360, df['Lon2'])
-
-    # rename geographic coordinate columns
-    df.rename(columns={
-        'Lat1': 'latitude_1',
-        'Lon1': 'longitude_1',
-        'Lat2': 'latitude_2',
-        'Lon2': 'longitude_2'
-    }, inplace=True)
-
-    # reduce to only columns needed downstream
-    needed_cols = [
-        'File1', 'File2', 'Maxcorr1', 'Maxcorr2',
-        'longitude_1', 'latitude_1', 'longitude_2', 'latitude_2',
-        'date_start', 'date_end', 'duration',
-        'sensor1', 'sensor2', 'scene_id'
-    ]
-    df = df[needed_cols]
-
-    return df
-
-
 def outlier_search(df, config, base_name, radius_km,
                    min_neighbors, md_neighbors, z_score_level,
                    chi_square_level, passes):
@@ -1779,7 +1859,7 @@ def outlier_search(df, config, base_name, radius_km,
         deficient neighbor matrix receive `mahal_sq = NaN` and are not
         flagged.
  
-        **Bearing z-score:** Computed using circular statistics —
+        **Bearing z-score:** Computed using circular statistics -
         `arctan2(sin(Δ), cos(Δ))` normalizes the angular difference before
         dividing by circular standard deviation, correctly handling wrap-
         around near 0°/360°.
@@ -2130,6 +2210,524 @@ def outlier_search(df, config, base_name, radius_km,
     return out_df
 
 
+#=========
+# Data I/O
+#=========
+
+def read_sar_drift_data_file(input_file, config):
+    """
+    Read and preprocess a SAR ice-drift text data file into a standardized
+    raw DataFrame.
+
+    Loads a SAR drift data file (CSV-like text) using parsing rules provided
+    in `config`, cleans column names, converts Julian-second timestamps to
+    human-readable datetime strings, computes observation duration, extracts
+    sensor and scene identifiers, renames geographic coordinate columns for
+    consistency with downstream output naming, and reduces the DataFrame to
+    only the columns needed for downstream processing.
+
+    Projection-dependent quantities (projected coordinates, displacement,
+    velocity, speed, bearing) are NOT computed here. They depend on a target
+    EPSG and are applied separately by `_apply_projection` after all files
+    have been read and combined. This separation allows the expensive file
+    I/O step to run exactly once regardless of how many target projections
+    are required.
+
+    Processing steps:
+        1. Detect the header row automatically via `_detect_skip_rows`,
+           which scans the first 10 lines for the row containing 'File1'
+           and 'File2'.
+        2. Read the file with `pandas.read_csv()` using the detected row
+           offset and the delimiter from `config`.
+        3. Strip whitespace from column names.
+        4. Convert Julian seconds timestamps (`Time1_JS`, `Time2_JS`) to
+           human-readable datetime strings (`date_start`, `date_end`).
+        5. Compute observation duration in seconds (`duration`).
+        6. Extract sensor identifiers from `File1`/`File2` into `sensor1`/
+           `sensor2` and construct `scene_id`.
+        7. Rename geographic coordinate columns:
+               Lat1 → latitude_1,  Lon1 → longitude_1
+               Lat2 → latitude_2,  Lon2 → longitude_2
+        8. Reduce the DataFrame to only the columns needed for downstream
+           processing.
+
+    Args:
+        input_file (str or pathlib.Path): Path to the SAR drift data file
+                                          to read.
+        config (dict): Parsing configuration. Expected keys:
+            - 'delimiter' (str): Field delimiter passed to `pd.read_csv`.
+
+    Returns:
+        pandas.DataFrame: Cleaned raw SAR drift DataFrame containing the
+            following columns:
+
+            Renamed geographic coordinates (EPSG:4326, degrees):
+                - 'latitude_1'  (float): Starting latitude  (from Lat1).
+                - 'longitude_1' (float): Starting longitude (from Lon1).
+                - 'latitude_2'  (float): Ending latitude    (from Lat2).
+                - 'longitude_2' (float): Ending longitude   (from Lon2).
+
+            Derived timestamps and duration:
+                - 'date_start' (str): Start datetime string
+                  ('%Y-%m-%d %H:%M:%S'), converted from Time1_JS.
+                - 'date_end'   (str): End datetime string
+                  ('%Y-%m-%d %H:%M:%S'), converted from Time2_JS.
+                - 'duration' (float): Observation duration in seconds
+                  (Time2_JS − Time1_JS).
+
+            Sensor and scene identifiers:
+                - 'sensor1'  (str): Satellite identifier from File1
+                                    (prefix before first underscore).
+                - 'sensor2'  (str): Satellite identifier from File2.
+                - 'scene_id' (str): File1 and File2 joined by underscore.
+
+            Scene pair identifiers and correlation scores:
+                - 'File1', 'File2' (str): Raw scene pair filenames.
+                - 'Maxcorr1', 'Maxcorr2' (float): Cross-correlation scores
+                  used for scene-level quality filtering downstream.
+
+    Notes:
+        - SAR time fields `Time1_JS` and `Time2_JS` are seconds since
+          2000-01-01 00:00:00 UTC.
+        - Header row detection is performed automatically by
+          `_detect_skip_rows`. No configuration key or argument is required
+          to control this - the function always scans the file to locate
+          the header.
+        - Projection-dependent columns (X1, Y1, X2, Y2,
+          sea_ice_x_displacement, sea_ice_y_displacement, u, v,
+          sea_ice_speed, sea_ice_speed_kmdy,
+          direction_of_sea_ice_displacement, distance, distance_geod)
+          are not present in the returned DataFrame. Call
+          `_apply_projection(df, epsg, config)` to add them after all
+          files have been combined.
+    """
+
+    import numpy as np
+    import pandas as pd
+    from datetime import datetime, timedelta
+
+    skip_rows = _detect_skip_rows(input_file)
+
+    # read the SAR drift data file
+    df = pd.read_csv(
+        input_file, delimiter=config['delimiter'],
+        header=0, engine='c', skiprows=skip_rows
+    )
+    df.columns = df.columns.str.strip()
+
+    # convert Julian seconds (epoch: 2000-01-01) to datetime strings
+    base_time = datetime(2000, 1, 1)
+    df['date_start'] = df['Time1_JS'].apply(
+        lambda x: base_time + timedelta(seconds=x)
+    )
+    df['date_start'] = df['date_start'].dt.strftime('%Y-%m-%d %H:%M:%S')
+    df['date_end'] = df['Time2_JS'].apply(
+        lambda x: base_time + timedelta(seconds=x)
+    )
+    df['date_end'] = df['date_end'].dt.strftime('%Y-%m-%d %H:%M:%S')
+
+    # observation duration in seconds
+    df['duration'] = df['Time2_JS'] - df['Time1_JS']
+
+    # sensor and scene identifiers
+    df['sensor1']  = df['File1'].str.partition('_')[0]
+    df['sensor2']  = df['File2'].str.partition('_')[0]
+    df['scene_id'] = df['File1'] + '_' + df['File2']
+
+
+    # longitudes appear mixed - standardize -180 to 180
+    df['Lon1'] = np.where(df['Lon1'] > 180, df['Lon1'] - 360, df['Lon1'])
+    df['Lon2'] = np.where(df['Lon2'] > 180, df['Lon2'] - 360, df['Lon2'])
+    
+    df['Lon1'] = round(df['Lon1'], config['coordinate_precision'])
+    df['Lat1'] = round(df['Lat1'], config['coordinate_precision'])
+    df['Lon2'] = round(df['Lon2'], config['coordinate_precision'])
+    df['Lat2'] = round(df['Lat2'], config['coordinate_precision'])
+
+    # rename geographic coordinate columns
+    df.rename(columns={
+        'Lat1': 'latitude_1',
+        'Lon1': 'longitude_1',
+        'Lat2': 'latitude_2',
+        'Lon2': 'longitude_2'
+    }, inplace=True)
+
+    # reduce to only columns needed downstream
+    needed_cols = [
+        'File1', 'File2', 'Maxcorr1', 'Maxcorr2',
+        'longitude_1', 'latitude_1', 'longitude_2', 'latitude_2',
+        'date_start', 'date_end', 'duration',
+        'sensor1', 'sensor2', 'scene_id'
+    ]
+    df = df[needed_cols]
+
+    return df
+
+
+def combine_into_dataframe(files, config):
+    """
+    Read a list of SAR drift gfilter files into a single combined raw
+    DataFrame using parallel file reads across multiple CPU cores.
+ 
+    Iterates over the provided file paths, skipping any 75 km files
+    encountered directly (they are resolved automatically from their paired
+    50 km entry). For each 50 km file, checks whether a corresponding 75 km
+    file exists and, if so, reads the 75 km file in its place. File reads
+    are parallelized using ProcessPoolExecutor to reduce wall-clock time on
+    multi-core machines. All per-file DataFrames are concatenated into a
+    single raw DataFrame with datetime columns parsed once after combining.
+ 
+    The returned DataFrame contains only EPSG-independent columns. Projection-
+    dependent columns (X1, Y1, X2, Y2, displacement, velocity, speed,
+    bearing) are NOT added here. Call `util._apply_projection(df_raw, epsg,
+    config)` separately for each target EPSG after this function returns.
+    This design allows the expensive parallel file I/O to run exactly once
+    regardless of how many EPSG projections are required.
+ 
+    Args:
+        files (list[str]): Paths to candidate gfilter input files, typically
+            glob-matched from `config['sar_drift_directory']`. Files with
+            `_0075000m_` in their path are silently skipped; they are only
+            read when resolved from a paired 50 km entry.
+        config (dict): Configuration dictionary. Must include:
+                - `delimiter` (str): Field delimiter passed to
+                  `util.read_sar_drift_data_file`.
+                - `max_workers` (int, optional): Maximum number of worker
+                  processes for parallel file reads. Defaults to
+                  min(32, os.cpu_count()) if not set.
+ 
+    Returns:
+        pandas.DataFrame: Combined raw DataFrame of all successfully read
+            drift observations. Contains only EPSG-independent columns as
+            produced by `util.read_sar_drift_data_file`:
+                - `File1`, `File2` (str): Scene pair filenames.
+                - `Maxcorr1`, `Maxcorr2` (float): Cross-correlation scores.
+                - `latitude_1`, `longitude_1` (float): Start position
+                  (EPSG:4326, degrees).
+                - `latitude_2`, `longitude_2` (float): End position
+                  (EPSG:4326, degrees).
+                - `date_start` (pandas.Timestamp): Parsed start datetime.
+                - `date_end` (pandas.Timestamp): Parsed end datetime.
+                - `duration` (float): Observation duration in seconds.
+                - `sensor1`, `sensor2` (str): Satellite identifiers.
+                - `scene_id` (str): `File1`_`File2`.
+                - `_use_75km` (bool): True if the 75 km file was read in
+                  place of the 50 km file for this observation's scene.
+                - `_source_file` (str): Basename of the file actually read.
+ 
+    Raises:
+        Exception: Re-raises any exception encountered during file reading
+            via the worker function `_read_gfilter_file`, causing the
+            executor to terminate and propagating the error to the caller.
+            Processing halts immediately on the first file read failure.
+ 
+    Notes:
+        - 75 km files are identified by the substring `_0075000m_` in the
+          file path. Any such file appearing directly in `files` is skipped
+          and counted as a candidate but not read, as it will be resolved
+          from its paired 50 km entry.
+        - The 75 km counterpart of a 50 km file is derived by replacing
+          `_0050000m_` with `_0075000m_` in the normalized path. If the
+          resulting path is unchanged or the 75 km path does not exist on
+          disk, the original 50 km path is read instead.
+        - File extensions containing an underscore suffix (e.g. .txt_0)
+          are normalized by truncating at the first underscore before the
+          75 km path substitution is attempted.
+        - Header row position is detected automatically per file by
+          `_detect_skip_rows` inside `util.read_sar_drift_data_file`. No
+          configuration key is required for this.
+        - Date columns are parsed to pandas Timestamps once after all files
+          are concatenated, rather than per-file, for efficiency.
+        - Worker count defaults to min(32, os.cpu_count()) and can be
+          overridden via config['max_workers'].
+        - On Windows the ProcessPoolExecutor uses the `spawn` start method.
+          The entry point must be protected by `if __name__ == "__main__":`
+          to prevent recursive worker spawning.
+    """
+
+    import os
+    import sys
+    import logging
+    import pandas as pd
+    from tqdm import tqdm
+    from concurrent.futures import ProcessPoolExecutor
+
+    logger = logging.getLogger('sar_drift_converter')
+
+    candidate_files = [f for f in files if '_0075000m_' not in f]
+    max_workers = min(32, os.cpu_count())
+
+    logger.info(
+        f"Reading {len(candidate_files)} gfilter files "
+        f"using {max_workers} workers"
+    )
+    files_75km = len(files) - len(candidate_files)
+    logger.info(
+        f"{files_75km} 75km files identified for substitution "
+        f"(will replace paired 50km files where available) | "
+        f"Difference of candidate files and files read for processing"
+    )
+
+    args = [(f, config) for f in candidate_files]
+    all_dfs = []
+    failed = 0
+
+
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        results = list(tqdm(
+            executor.map(_read_gfilter_file, args),
+            total=len(args),
+            desc='Reading gfilter files...',
+            unit='file',
+            file=sys.stdout,
+            dynamic_ncols=True
+        ))
+
+    all_dfs = [r for r in results if r is not None]
+    failed = len(results) - len(all_dfs)
+
+    if failed:
+        logger.warning(f"{failed} file(s) failed to read and were skipped")
+        
+
+    print('Combining all files into one Data Frame...')
+    df_all = pd.concat(all_dfs, ignore_index=True)
+
+    df_all['date_start'] = pd.to_datetime(
+        df_all['date_start'], format='%Y-%m-%d %H:%M:%S'
+    )
+    df_all['date_end'] = pd.to_datetime(
+        df_all['date_end'], format='%Y-%m-%d %H:%M:%S'
+    )
+
+    logger.info(
+        f"Combined: {df_all.shape[0]} rows from {len(all_dfs)} files "
+        f"({failed} failed)"
+    )
+
+    return df_all
+    
+
+def filter_input_data(df_all, config):
+    """
+    Apply scene-level and row-level quality filters to the combined drift
+    DataFrame.
+    
+    Filtering behavior is controlled by `config['level']`. For levels '02'
+    and '03', each File1/File2 scene pair is evaluated independently with a
+    sequence of per-row drops and scene-level rejection checks. Scenes that
+    fail a rejection check are discarded entirely; rows that fail a per-row
+    check are dropped from their scene. For all other levels the DataFrame is
+    returned unchanged, except level '00' which additionally saves the
+    unfiltered combined CSV to disk.
+    
+    Args:
+        df_all (pandas.DataFrame): Combined drift observations from all input
+            files, as produced by `combine_into_dataframe`. Expected columns:
+                - 'File1', 'File2' (str): Scene pair identifiers; used to
+                  group observations into scenes.
+                - 'direction_of_sea_ice_displacement' (float): Forward azimuth
+                  (degrees); rows with a value of 0 are dropped.
+                - 'sea_ice_speed' (float): Drift speed (m s⁻¹); rows with a
+                  value of 0 or above the speed threshold are dropped.
+                - 'Maxcorr1', 'Maxcorr2' (float): Cross-correlation scores;
+                  used for the scene-level 60% check and per-row validity
+                  drop.
+                - '_use_75km' (bool): Whether the 75 km file was used for
+                  this scene; controls the speed anomaly threshold (35.0 m s⁻¹
+                  for 75 km files, 25.0 m s⁻¹ for 50 km files).
+                - 'date_start', 'date_end' (str): Observation timestamps;
+                  re-parsed to pandas datetimes after filtering.
+        config (dict): Configuration dictionary. Must include:
+                - 'level' (str): Processing level; filtering is only applied
+                                 for levels '02' and '03'. Level '00' triggers
+                                 an unfiltered CSV save. Levels '01' and above
+                                 '03' return `df_all` unchanged.
+                - 'ignore_vector_threshold' (int): Minimum number of rows a
+                  scene must retain after all per-row drops to be accepted.
+                - 'filtered_data_dir' (str): Output directory for the
+                  unfiltered combined CSV (level '00' only).
+    
+    Returns:
+        pandas.DataFrame: Filtered DataFrame containing only accepted scenes
+            and valid rows, with 'date_start' and 'date_end' re-parsed as
+            pandas Timestamps. For levels other than '02' and '03', the
+            original DataFrame is returned unchanged.
+    
+    Notes:
+        **Per-row drops (levels '02' and '03', applied in order):**
+    
+        1. Remove rows where `direction_of_sea_ice_displacement == 0` or
+           `sea_ice_speed == 0` (zero bearing or zero speed).
+        2. Remove rows where `sea_ice_speed >= 25.0 m s⁻¹` (50 km files) or
+           `>= 35.0 m s⁻¹` (75 km files).
+        3. Remove rows where `Maxcorr2 <= Maxcorr1`.
+    
+        **Scene-level rejection (levels '02' and '03', entire scene
+        discarded if):**
+    
+        1. Fewer than 60% of rows have `Maxcorr2 > Maxcorr1`, evaluated
+           after the bearing/speed validity drop but before the per-row
+           Maxcorr drop.
+        2. Remaining row count falls below `ignore_vector_threshold` after
+           all per-row drops.
+    
+        - Each filter step is logged individually, reporting rows dropped and
+          the scene identifier. Rejected scenes are logged at WARNING level;
+          accepted scenes and per-row drops at INFO level.
+        - The 60% Maxcorr check precedes the per-row Maxcorr drop
+          intentionally: a scene where the majority of vectors have poor
+          correlation is rejected outright rather than thinned.
+    """
+    
+    import os
+    import logging
+    import pandas as pd
+    from tqdm import tqdm
+
+    # log activity
+    logger = logging.getLogger('sar_drift_converter')
+    
+    
+    if config['level'] in ['02', '03']:
+        accepted = []
+        scenes = list(df_all.groupby(['File1', 'File2']))
+        total_scenes = len(scenes)
+        chunks = max(1, total_scenes // 20)
+        for (file1, file2), df_scene in tqdm(
+                scenes, desc='Filtering scenes...',
+                total=total_scenes,
+                miniters=chunks,
+                mininterval=0,
+                unit='scene'
+            ):
+            scene_id = f"{file1}_{file2}"
+            use_75km = df_scene['_use_75km'].iloc[0]
+            initial_row_size = df_scene.shape[0]
+    
+            # remove invalid bearings and speeds
+            df_scene = df_scene[
+                ~(
+                    (df_scene['direction_of_sea_ice_displacement'] == 0) &
+                    (df_scene['sea_ice_speed'] == 0)
+                )
+            ]
+            if initial_row_size != df_scene.shape[0]:
+                logger.info(
+                    f"{scene_id} | after bearing/speed validity: "
+                    f"{df_scene.shape[0]} (dropped "
+                    f"{initial_row_size - df_scene.shape[0]})"
+                )
+                
+            # remove invalid speeds
+            speed_thresh = 35.0 if use_75km else 25.0
+            row_count_before = df_scene.shape[0]
+            df_scene = df_scene[df_scene['sea_ice_speed'] < speed_thresh]
+            if row_count_before != df_scene.shape[0]:
+                logger.info(
+                    f"{scene_id} | after speed filter "
+                    f"(sea_ice_speed >= {speed_thresh}): {df_scene.shape[0]} "
+                    f"(dropped {row_count_before - df_scene.shape[0]})"
+                )
+    
+            # reject scene if < 60% have MaxCorr2 > MaxCorr1
+            pct_correct = (
+                df_scene['Maxcorr2'] > df_scene['Maxcorr1']
+            ).mean() * 100
+            if pct_correct < 60:
+                logger.warning(
+                    f"Reject scene: {scene_id} | "
+                    f"pct_correct={pct_correct:.1f}% (<60%)"
+                )
+                continue
+    
+            # remove rows where MaxCorr2 <= MaxCorr1
+            row_count_before = df_scene.shape[0]
+            df_scene = df_scene[df_scene['Maxcorr2'] > df_scene['Maxcorr1']]
+            if row_count_before != df_scene.shape[0]:
+                logger.info(
+                    f"{scene_id} | after Maxcorr2 > Maxcorr1: "
+                    f"{df_scene.shape[0]} (dropped "
+                    f"{row_count_before - df_scene.shape[0]})"
+                )
+    
+            # reject scene if too few observations
+            if df_scene.shape[0] < config['ignore_vector_threshold']:
+                logger.warning(
+                    f"Reject scene: {scene_id} | "
+                    f"only {df_scene.shape[0]} observations "
+                    f"(threshold={config['ignore_vector_threshold']})"
+                )
+                continue
+    
+            logger.info(
+                f"Accepted scene: {scene_id} | final rows={df_scene.shape[0]}"
+            )
+            accepted.append(df_scene)
+            
+    
+        print('Updating Data Frame with filtered data...')
+        df_all = pd.concat(accepted, ignore_index=True)
+        df_all['date_start'] = pd.to_datetime(
+            df_all['date_start'],
+            format='%Y-%m-%d %H:%M:%S'
+        )
+        df_all['date_end'] = pd.to_datetime(
+            df_all['date_end'],
+            format='%Y-%m-%d %H:%M:%S'
+        )
+        logger.info(
+            f"After filtering: {df_all.shape[0]} rows across "
+            f"{len(accepted)} scenes"
+        )
+    
+    
+    # save filtered combined CSV
+    if config['level'] == "00":
+        print('Saving combined Data Frame...')
+        df_all.to_csv(
+            os.path.join(
+                config['filtered_data_dir'],'filtered_combined.csv'
+            ),
+            index=False
+        )    
+    
+    return df_all
+
+
+def _copy_to_gdrive(config):
+    import subprocess
+    import logging
+    logger = logging.getLogger('sar_drift_converter')
+
+    service_account = config.get('gdrive_service_account')
+    folder_id = config.get('gdrive_folder_id')
+    if not service_account or not folder_id:
+        return
+
+    logger.info('Copying output files to Google Drive...')
+    result = subprocess.run(
+        [
+            'rclone', 'copy',
+            config['file_server'],
+            f':drive,service_account_file={service_account},'
+            f'root_folder_id={folder_id}:',
+            '--transfers', '8'
+        ],
+        capture_output=True,
+        text=True
+    )
+    if result.returncode != 0:
+        logger.error(f'rclone copy failed: {result.stderr}')
+    else:
+        logger.info('Google Drive copy complete')
+        
+        
+
+###############
+# Create Output
+###############
+
 def create_netcdf(df, nc_path, config, template_ds, multi_layered=False):
     """
     Create a gridded NetCDF sea-ice drift product from point/vector
@@ -2229,6 +2827,7 @@ def create_netcdf(df, nc_path, config, template_ds, multi_layered=False):
     df_copy = df.copy()
     df_copy['date_start'] = pd.to_datetime(df_copy['date_start'])
     df_copy['date_end'] = pd.to_datetime(df_copy['date_end'])
+    
 
 
     # for level 03, retain only inlier vectors and recode outlier_category
@@ -2248,7 +2847,7 @@ def create_netcdf(df, nc_path, config, template_ds, multi_layered=False):
             (df_copy['sea_ice_speed'] == 0)
         ).astype(int)
 
-        # speed threshold varies per scene — apply per scene_id group
+        # speed threshold varies per scene - apply per scene_id group
         for scene_id, grp in df_copy.groupby('scene_id'):
             speed_thresh = 35.0 if grp['_use_75km'].iloc[0] else 25.0
             speed_error = (~(grp['sea_ice_speed'] < speed_thresh)).astype(int)
@@ -2697,7 +3296,7 @@ def create_shape_package(df, gpkg_path, config):
             return None
     
         # two vectors can have slightly different lon/lat but map to
-        # the same 12.5 km grid cell — keep last occurrence, consistent
+        # the same 12.5 km grid cell - keep last occurrence, consistent
         # with NetCDF and HTML/JSON output deduplication strategy
         lons = df_local['longitude_1'].to_numpy()
         lats = df_local['latitude_1'].to_numpy()
@@ -2716,7 +3315,7 @@ def create_shape_package(df, gpkg_path, config):
         if dupes.any():
             logger.info(
                 f"Level 03 GeoPackage: dropping {dupes.sum()} duplicate "
-                "grid cell vector(s) — keeping last occurrence"
+                "grid cell vector(s). Keeping last occurrence"
             )
         df_local = df_local[~dupes].drop(columns=['_grid_i', '_grid_j'])
     
@@ -2828,9 +3427,8 @@ def create_vector_html_and_json(df, html_path, data_dir, si_json_path,
     # confirm template GeoJSON reference files are in data_dir
     _add_json_templates(data_dir, config)
     
-    # confirm HTML viewer exists
-    if not os.path.exists(html_path):
-        shutil.copy(config['html_vector_template'], html_path)
+    # always update HTML viewer
+    shutil.copy(config['html_vector_template'], html_path)
 
 
     df_local = df.copy()
@@ -2871,21 +3469,22 @@ def create_vector_html_and_json(df, html_path, data_dir, si_json_path,
         df_local = df_local[~dupes]
         logger.warning(
             f'Level 03 HTML: dropping {dupes.sum()} duplicate '
-             'starting lon/lat vector(s) — keeping last occurrence of '
+             'starting lon/lat vector(s). Keeping last occurrence of '
             f'{df_local.shape[0]} vector(s).'
         )
         
-    
     date1 = df_local['date_start'].min().strftime('%Y-%m-%d')
     date2 = df_local['date_end'].max().strftime('%Y-%m-%d')
     
+    
     vectors = [
         [
-            round(float(row.longitude_1), config['coordinate_precision']),
-            round(float(row.latitude_1), config['coordinate_precision']),
-            round(float(row.longitude_2), config['coordinate_precision']),
-            round(float(row.latitude_2), config['coordinate_precision']),
-            round(float(row.sea_ice_speed_kmdy), config['speed_precision'])
+            float(row.longitude_1),
+            float(row.latitude_1),
+            float(row.longitude_2),
+            float(row.latitude_2),
+            float(row.sea_ice_speed_kmdy),
+            float(row.direction_of_sea_ice_displacement)
         ]
         for row in df_local.itertuples(index=False)
     ]
@@ -2907,14 +3506,15 @@ def create_vector_html_and_json(df, html_path, data_dir, si_json_path,
     df_buoy_drift = config['buoy_drift']
     date_filter = (df_buoy_drift['date'].astype(str) == date1)
     buoy_daily_drift = df_buoy_drift[date_filter].reset_index(drop=True).copy()
-
+    
     vectors = [
         [
-            round(float(row.longitude_1), config['coordinate_precision']),
-            round(float(row.latitude_1), config['coordinate_precision']),
-            round(float(row.longitude_2), config['coordinate_precision']),
-            round(float(row.latitude_2), config['coordinate_precision']),
-            round(float(row.speed_kmdy), config['speed_precision'])
+            float(row.longitude_1),
+            float(row.latitude_1),
+            float(row.longitude_2),
+            float(row.latitude_2),
+            float(row.speed_kmdy),
+            float(row.bearing)
         ]
         for row in buoy_daily_drift.itertuples(index=False)
     ]
@@ -2926,22 +3526,23 @@ def create_vector_html_and_json(df, html_path, data_dir, si_json_path,
         'vectors': vectors
     }
     
-    with open(buoy_json_path, 'w', encoding='utf-8') as f:
-        json.dump(payload, f, separators=(',', ':'))                
-
-    logger.info(f'Created JSON {buoy_json_path}')
+    if len(vectors) > 0:
+        # only create bouy JSON if there are buoy data.
+        # Data avaliable lags to SAR drift data available.
+        with open(buoy_json_path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, separators=(',', ':'))                
+    
+        logger.info(f'Created JSON {buoy_json_path}')
     
     
     # update available dates
     if os.path.exists(available_dates_path):
         with open(available_dates_path, 'r', encoding='utf-8') as f:
-            available_dates = json.load(f)
+            available_dates = set(json.load(f))
     else:
-        available_dates = []
-    if date1 not in available_dates:
-        available_dates.append(date1.replace('-',''))
-        available_dates = sorted(available_dates)
-        with open(available_dates_path, 'w', encoding='utf-8') as f:
-            json.dump(available_dates, f, separators=(',', ':'))
-
+        available_dates = set()
     
+    if date1 not in available_dates:
+        available_dates.add(date1.replace('-', ''))
+        with open(available_dates_path, 'w', encoding='utf-8') as f:
+            json.dump(sorted(available_dates), f, separators=(',', ':'))

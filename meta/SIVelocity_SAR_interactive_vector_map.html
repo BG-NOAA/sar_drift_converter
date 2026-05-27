@@ -155,7 +155,7 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0b1a2e; colo
         Sea ice drift vectors computed from pairs of SAR (Synthetic Aperture Radar) images using feature tracking.
         Arrows show direction and speed of ice motion over ~24 hours.
         <br><br>
-        <a href="https://shospital.github.io/polarwatch/stac.html" target="_blank">View STAC Catalog →</a>
+        <a href="https://polarwatch.noaa.gov/stac.html" target="_blank">View STAC Catalog →</a>
       </div>
     </div>
   </div>
@@ -228,8 +228,7 @@ function getColorMode() { return document.getElementById('colorBy').value; }
 function getColor(vec) {
   const spd = vec[4];
   if (getColorMode() === 'bearing') {
-    const dx = vec[2] - vec[0], dy = vec[3] - vec[1];
-    const bear = ((90 - Math.atan2(dy, dx) * 180 / Math.PI) % 360 + 360) % 360;
+    const bear = (vec[5] + 360) % 360; // normalize to 0–360.
     return interpolateStops(BEARING_STOPS, bear / 360);
   }
   return interpolateStops(SPEED_STOPS, spd / MAX_SPD);
@@ -378,17 +377,28 @@ function drawBuoys(vectors, scale, opacity) {
   buoyLayer = L.layerGroup();
 
   vectors.forEach(v => {
-    const [lon1, lat1, lon2, lat2, spdx100] = v;
-    const color = '#ff6b35';  // distinct orange for buoys
-
-    const line = L.polyline([[lat1, lon1], [lat2, lon2]], {
-      color, weight: Math.max(1.5, scale), opacity
-    });
+    const [lon1, lat1, lon2, lat2] = v;
+    // Two-tone buoy arrows contrasts with all color scales and is safe for all color vision types.
+    const outerColor = '#000000';
+    const innerColor = '#ffffff';
+	const outerWeight = Math.max(5.0, scale * 2.5);
+	const innerWeight = Math.max(3.0, scale * 1.4);
 
     const p1 = crs.projection.project(L.latLng(lat1, lon1));
     const p2 = crs.projection.project(L.latLng(lat2, lon2));
     const pdx = p2.x - p1.x, pdy = p2.y - p1.y;
     const len = Math.sqrt(pdx * pdx + pdy * pdy);
+
+    // Draw black outline then white fill for both shaft and arrowhead
+    const lineOuter = L.polyline([[lat1, lon1], [lat2, lon2]], {
+      color: outerColor, weight: outerWeight, opacity, interactive: false
+    });
+    const lineInner = L.polyline([[lat1, lon1], [lat2, lon2]], {
+      color: innerColor, weight: innerWeight, opacity, interactive: false
+    });
+    buoyLayer.addLayer(lineOuter);
+    buoyLayer.addLayer(lineInner);
+
     if (len > 0) {
       const headLen = Math.min(len * 0.35, 15000 * scale);
       const angle = Math.atan2(pdy, pdx);
@@ -396,12 +406,10 @@ function drawBuoys(vectors, scale, opacity) {
       const a2 = angle - Math.PI * 0.8;
       const tip1 = crs.projection.unproject(L.point(p2.x + headLen * Math.cos(a1), p2.y + headLen * Math.sin(a1)));
       const tip2 = crs.projection.unproject(L.point(p2.x + headLen * Math.cos(a2), p2.y + headLen * Math.sin(a2)));
-      const head = L.polyline([
-        [tip1.lat, tip1.lng], [lat2, lon2], [tip2.lat, tip2.lng]
-      ], { color, weight: Math.max(1.5, scale), opacity });
-      buoyLayer.addLayer(head);
+      const headCoords = [[tip1.lat, tip1.lng], [lat2, lon2], [tip2.lat, tip2.lng]];
+      buoyLayer.addLayer(L.polyline(headCoords, { color: outerColor, weight: outerWeight, opacity, interactive: false }));
+      buoyLayer.addLayer(L.polyline(headCoords, { color: innerColor, weight: innerWeight, opacity, interactive: false }));
     }
-    buoyLayer.addLayer(line);
   });
 
   buoyLayer.addTo(map);
@@ -410,38 +418,71 @@ function drawBuoys(vectors, scale, opacity) {
 }
 
 // ── Hover ─────────────────────────────────────────────────────────────────────
+// Grid spacing is 12.5 km; half-cell = 6250 m defines the axis-aligned bounding
+// box centered on each vector's midpoint. Mouse must fall inside the box to trigger.
+const HALF_CELL_M = 6250;
+
+// Project a [lon, lat] to EPSG:3413 meters and return {x, y}
+function toProjected(lon, lat) {
+  return crs.projection.project(L.latLng(lat, lon));
+}
+
+// Return true if projected point {px, py} is inside the axis-aligned bounding
+// box centered on the midpoint of the vector's tail (lon1,lat1) → tip (lon2,lat2).
+function inVectorBox(px, py, lon1, lat1, lon2, lat2) {
+  const p1 = toProjected(lon1, lat1);
+  const p2 = toProjected(lon2, lat2);
+  const mx = (p1.x + p2.x) / 2;
+  const my = (p1.y + p2.y) / 2;
+  return Math.abs(px - mx) <= HALF_CELL_M && Math.abs(py - my) <= HALF_CELL_M;
+}
+
 map.on('mousemove', function(e) {
   const { lat, lng } = e.latlng;
   document.getElementById('hoverCoord').textContent = `${lat.toFixed(3)}°N, ${lng.toFixed(3)}°E`;
 
-  // search SAR vectors
-  const filtered = getFilteredVectors();
-  let best = null, bestDist = Infinity;
-  for (const v of filtered) {
-    const d = (v[1] - lat)**2 + (v[0] - lng)**2;
-    if (d < bestDist) { bestDist = d; best = v; }
-  }
+  // Project mouse position once
+  const mouse = crs.projection.project(e.latlng);
+  const px = mouse.x, py = mouse.y;
 
-  // search buoy vectors
-  let bestBuoy = null, bestBuoyDist = Infinity;
-  if (document.getElementById('showBuoys').checked) {
-    for (const v of allBuoyVectors) {
-      const d = (v[1] - lat)**2 + (v[0] - lng)**2;
-      if (d < bestBuoyDist) { bestBuoyDist = d; bestBuoy = v; }
+  // Search SAR vectors — find first whose bounding box contains the mouse.
+  // Also track nearest midpoint so ties go to the closest vector.
+  const filtered = getFilteredVectors();
+  let best = null, bestMidDist = Infinity;
+  for (const v of filtered) {
+    if (inVectorBox(px, py, v[0], v[1], v[2], v[3])) {
+      const p1 = toProjected(v[0], v[1]);
+      const p2 = toProjected(v[2], v[3]);
+      const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
+      const d = (px - mx)**2 + (py - my)**2;
+      if (d < bestMidDist) { bestMidDist = d; best = v; }
     }
   }
 
-  // show whichever is closer
-  if (bestBuoy && bestBuoyDist < 4 && bestBuoyDist <= bestDist) {
+  // Search buoy vectors — same box logic using buoy tail/tip coords.
+  let bestBuoy = null, bestBuoyMidDist = Infinity;
+  if (document.getElementById('showBuoys').checked) {
+    for (const v of allBuoyVectors) {
+      if (inVectorBox(px, py, v[0], v[1], v[2], v[3])) {
+        const p1 = toProjected(v[0], v[1]);
+        const p2 = toProjected(v[2], v[3]);
+        const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
+        const d = (px - mx)**2 + (py - my)**2;
+        if (d < bestBuoyMidDist) { bestBuoyMidDist = d; bestBuoy = v; }
+      }
+    }
+  }
+
+  // Show whichever hit is closer to the mouse; clear if neither box matched.
+  if (bestBuoy && bestBuoyMidDist <= bestMidDist) {
     const spd = bestBuoy[4];
-    const bear = bestBuoy[5];
+    const bear = (bestBuoy[5] + 360) % 360;
     document.getElementById('hoverVal').textContent = `${spd.toFixed(1)} km/day`;
     document.getElementById('hoverDetail').textContent = `Bearing: ${bear.toFixed(0)}° · Buoy`;
-  } else if (best && bestDist < 4) {
+  } else if (best) {
     const spd = best[4];
+    const bear = (best[5] + 360) % 360;
     document.getElementById('hoverVal').textContent = `${spd.toFixed(1)} km/day`;
-    const dx = best[2] - best[0], dy = best[3] - best[1];
-    const bear = ((90 - Math.atan2(dy, dx) * 180 / Math.PI) % 360 + 360) % 360;
     document.getElementById('hoverDetail').textContent = `Bearing: ${bear.toFixed(0)}°`;
   } else {
     document.getElementById('hoverVal').textContent = '—';

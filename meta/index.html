@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SAR Drift Files</title>
+  <link rel="stylesheet" href="../css/all.min.css" />
+  <link href="../css/bootstrap.min.css" rel="stylesheet" />
+  <link rel="stylesheet" href="../css/pw-theme.css" />
+  <link rel="icon" type="image/png" href="../css/images/noaa_logo_circle_72x72.svg" />
+  <style>
+    .drill-card {
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      padding: 1.1rem 1.25rem;
+      background: #fff;
+      height: 100%;
+    }
+    .drill-card:hover {
+      border-color: #2c6ead;
+      background: #e9f2fb;
+    }
+    .drill-card .card-label {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #6b7280;
+      margin-bottom: 4px;
+    }
+    .drill-card .card-title {
+      font-size: 1rem;
+      font-weight: 600;
+      color: #1f4f84;
+      margin-bottom: 4px;
+    }
+    .drill-card .card-sub {
+      font-size: 12px;
+      color: #6b7280;
+    }
+    .drill-card.output-nc   { border-left: 4px solid #2c6ead; }
+    .drill-card.output-gpkg { border-left: 4px solid #16a34a; }
+    .drill-card.output-html { border-left: 4px solid #d97706; }
+
+    .breadcrumb-bar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+      font-size: 13px;
+      margin-bottom: 1.25rem;
+      color: #6b7280;
+    }
+    .breadcrumb-bar .crumb {
+      color: #2c6ead;
+      cursor: pointer;
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+    .breadcrumb-bar .crumb:hover { color: #1f4f84; }
+    .breadcrumb-bar .sep { color: #d1d5db; }
+    .breadcrumb-bar .current { color: #374151; font-weight: 600; }
+
+    .level-section { display: none; }
+    .level-section.active { display: block; }
+
+    .section-heading {
+      font-size: 14px;
+      font-weight: 600;
+      color: #374151;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      margin-bottom: 1rem;
+      padding-bottom: 6px;
+      border-bottom: 1px solid #e5e7eb;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Navigation -->
+  <nav class="navbar navbar-expand-lg navbar-dark fixed-top">
+    <div class="container-fluid px-4 px-lg-5">
+      <a class="navbar-brand d-flex align-items-center" href="http://localhost:8000/index.html">
+        <img src="../image/noaa_logo_circle_72x72.svg" alt="NOAA" height="50" class="me-2">
+        NOAA PolarWatch
+      </a>
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+      <div class="collapse navbar-collapse justify-content-end" id="navbarNav">
+        <ul class="navbar-nav">
+          <li class="nav-item"><a class="nav-link" href="http://localhost:8000/index.html#about">About PolarWatch</a></li>
+          <li class="nav-item"><a class="nav-link" href="http://localhost:8000/stac.html">Data Catalog</a></li>
+          <li class="nav-item"><a class="nav-link" href="https://coastwatch.noaa.gov/cwn/about/contact-us.html" target="_blank">Contact Us</a></li>
+        </ul>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Main Content -->
+  <div class="container-fluid px-4 px-lg-5">
+    <div class="row mt-2">
+      <div class="col-12">
+
+        <!-- Page header: title and EPSG injected by Python -->
+        <section class="section pb-2">
+          <h2 class="mb-1" id="pageTitle">SAR Sea Ice Drift Files</h2>
+          <p class="text-muted mb-0" id="pageSubtitle">Select a processing level to browse outputs.</p>
+        </section>
+
+        <!-- Breadcrumb -->
+        <div class="breadcrumb-bar" id="breadcrumb">
+          <span class="current">Processing Level</span>
+        </div>
+
+        <!-- LEVEL SELECTION -->
+        <div class="level-section active" id="section-level">
+          <div class="section-heading">Processing Level</div>
+          <div class="row g-3">
+
+            <div class="col-12 col-md-4">
+              <div class="drill-card" onclick="selectLevel('PL01')">
+                <div class="card-label">Level 01</div>
+                <div class="card-title">Processing Level 01</div>
+                <div class="card-sub">Outputs: NetCDF</div>
+              </div>
+            </div>
+
+            <div class="col-12 col-md-4">
+              <div class="drill-card" onclick="selectLevel('PL02')">
+                <div class="card-label">Level 02</div>
+                <div class="card-title">Processing Level 02</div>
+                <div class="card-sub">Outputs: NetCDF, GeoPackage</div>
+              </div>
+            </div>
+
+            <div class="col-12 col-md-4">
+              <div class="drill-card" onclick="selectLevel('PL03')">
+                <div class="card-label">Level 03</div>
+                <div class="card-title">Processing Level 03</div>
+                <div class="card-sub">Outputs: NetCDF, GeoPackage, Interactive Map</div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- YEAR SELECTION (populated dynamically) -->
+        <div class="level-section" id="section-year">
+          <div class="section-heading">Year</div>
+          <div class="row g-3" id="year-cards"></div>
+          <div id="map-card-row" style="display:none">
+            <div class="section-heading mt-4">Interactive Map</div>
+            <div class="row g-3" id="map-cards"></div>
+          </div>
+        </div>
+
+        <!-- OUTPUT TYPE SELECTION (filtered by level) -->
+        <div class="level-section" id="section-output">
+          <div class="section-heading">Output Type</div>
+          <div class="row g-3" id="output-cards"></div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <footer>
+    <div class="container text-center">
+      <div class="row justify-content-center mb-3">
+        <div class="col-auto"><a href="https://www.noaa.gov" class="text-white text-decoration-none">NOAA</a></div>
+        <div class="col-auto"><a href="https://www.nesdis.noaa.gov" class="text-white text-decoration-none">NESDIS</a></div>
+        <div class="col-auto"><a href="https://www.star.nesdis.noaa.gov" class="text-white text-decoration-none">STAR</a></div>
+        <div class="col-auto"><a href="https://coastwatch.noaa.gov" class="text-white text-decoration-none">CoastWatch</a></div>
+      </div>
+    </div>
+  </footer>
+
+  <script src="../js/bootstrap.bundle.min.js"></script>
+  <script>
+    // ── CONFIG ─────────────────────────────────────────────────────────────────
+    // Python script updates EPSG_LABEL, EPSG_DESC, and AVAILABLE_YEARS.
+    // OUTPUT_TYPES defines what each processing level exposes.
+    // HTML_VIEWER_PATH points to the interactive vector map HTML file.
+
+    const EPSG_LABEL = 'EPSG:3413';                         // PYTHON: update per folder
+    const EPSG_DESC  = 'NSIDC Sea Ice Polar Stereographic North'; // PYTHON: update per folder
+    const HTML_VIEWER_PATH = 'Processing%20Level%20-%2003%20(PL03)/SIVelocity_SAR_interactive_vector_map.html'; // PYTHON: update if path changes
+
+    // PYTHON: replace this array with available years, e.g. [2024, 2025]
+    const AVAILABLE_YEARS = [2024, 2025, 2026];
+
+    const OUTPUT_TYPES = {
+      PL01: ['nc'],
+      PL02: ['nc', 'gpkg'],
+      PL03: ['nc', 'gpkg', 'html'],
+    };
+
+    const OUTPUT_META = {
+      nc:   { label: 'NetCDF',           sub: '.nc files',              css: 'output-nc',   ext: 'nc' },
+      gpkg: { label: 'GeoPackage',       sub: '.gpkg files',            css: 'output-gpkg', ext: 'gpkg' },
+      html: { label: 'Interactive Map',  sub: 'Plotly vector map viewer', css: 'output-html', ext: 'html' },
+    };
+
+    // Folder name template — matches your actual directory names
+    const LEVEL_FOLDER = {
+      PL01: 'Processing%20Level%20-%2001%20(PL01)',
+      PL02: 'Processing%20Level%20-%2002%20(PL02)',
+      PL03: 'Processing%20Level%20-%2003%20(PL03)',
+    };
+
+    // ── STATE ──────────────────────────────────────────────────────────────────
+    let selectedLevel = null;
+    let selectedYear  = null;
+
+    // ── INIT ───────────────────────────────────────────────────────────────────
+    document.getElementById('pageTitle').textContent    = `SAR Sea Ice Drift Files — ${EPSG_LABEL}`;
+    document.getElementById('pageSubtitle').textContent = `${EPSG_DESC} — Select a processing level to browse outputs.`;
+
+    // ── NAVIGATION ─────────────────────────────────────────────────────────────
+    function showSection(id) {
+      document.querySelectorAll('.level-section').forEach(s => s.classList.remove('active'));
+      document.getElementById(id).classList.add('active');
+    }
+
+    function updateBreadcrumb() {
+      const bc = document.getElementById('breadcrumb');
+      const parts = [];
+
+      parts.push(`<span class="crumb" onclick="goToLevel()">Processing Level</span>`);
+
+      if (selectedLevel) {
+        if (selectedYear) {
+          parts.push(`<span class="sep">›</span>`);
+          parts.push(`<span class="crumb" onclick="goToYear()">${selectedLevel}</span>`);
+          parts.push(`<span class="sep">›</span>`);
+          parts.push(`<span class="current">${selectedYear}</span>`);
+        } else {
+          parts.push(`<span class="sep">›</span>`);
+          parts.push(`<span class="current">${selectedLevel}</span>`);
+        }
+      } else {
+        // overwrite first part as non-clickable current
+        parts[0] = `<span class="current">Processing Level</span>`;
+      }
+
+      bc.innerHTML = parts.join(' ');
+    }
+
+    function goToLevel() {
+      selectedLevel = null;
+      selectedYear  = null;
+      updateBreadcrumb();
+      showSection('section-level');
+    }
+
+    function goToYear() {
+      selectedYear = null;
+      updateBreadcrumb();
+      showSection('section-year');
+    }
+
+    // ── LEVEL SELECTION ────────────────────────────────────────────────────────
+    function selectLevel(level) {
+      selectedLevel = level;
+      selectedYear  = null;
+      updateBreadcrumb();
+      buildYearCards();
+      showSection('section-year');
+    }
+
+    function buildYearCards() {
+      const container = document.getElementById('year-cards');
+      container.innerHTML = '';
+
+      if (!AVAILABLE_YEARS || AVAILABLE_YEARS.length === 0) {
+        container.innerHTML = '<div class="col-12"><p class="text-muted">No years available.</p></div>';
+        return;
+      }
+
+      AVAILABLE_YEARS.forEach(year => {
+        const col = document.createElement('div');
+        col.className = 'col-6 col-md-3 col-lg-2';
+        col.innerHTML = `
+          <div class="drill-card" onclick="selectYear(${year})">
+            <div class="card-label">Year</div>
+            <div class="card-title">${year}</div>
+          </div>`;
+        container.appendChild(col);
+      });
+
+      // Single Interactive Map card for levels with html output — no year needed
+      const hasHtml = (OUTPUT_TYPES[selectedLevel] || []).includes('html');
+      const mapRow  = document.getElementById('map-card-row');
+      const mapContainer = document.getElementById('map-cards');
+      mapContainer.innerHTML = '';
+      if (hasHtml) {
+        mapContainer.innerHTML = `
+          <div class="col-12 col-md-4">
+            <div class="drill-card output-html" onclick="openOutput('html')">
+              <div class="card-label">${selectedLevel}</div>
+              <div class="card-title">Interactive Map</div>
+              <div class="card-sub">Date selector built in — opens in new tab ↗</div>
+            </div>
+          </div>`;
+        mapRow.style.display = 'block';
+      } else {
+        mapRow.style.display = 'none';
+      }
+    }
+
+    // ── YEAR SELECTION ─────────────────────────────────────────────────────────
+    function selectYear(year) {
+      selectedYear = year;
+      updateBreadcrumb();
+
+      // Build output cards excluding html (handled by the Interactive Map card)
+      const nonHtmlTypes = (OUTPUT_TYPES[selectedLevel] || []).filter(t => t !== 'html');
+      if (nonHtmlTypes.length === 0) return;
+
+      buildOutputCards(nonHtmlTypes);
+      showSection('section-output');
+    }
+
+    function buildOutputCards(types) {
+      const container = document.getElementById('output-cards');
+      container.innerHTML = '';
+
+      types.forEach(type => {
+        const meta = OUTPUT_META[type];
+        const col  = document.createElement('div');
+        col.className = 'col-12 col-md-4';
+        col.innerHTML = `
+          <div class="drill-card ${meta.css}" onclick="openOutput('${type}')">
+            <div class="card-label">${selectedLevel} › ${selectedYear}</div>
+            <div class="card-title">${meta.label}</div>
+            <div class="card-sub">${meta.sub}</div>
+          </div>`;
+        container.appendChild(col);
+      });
+    }
+
+    // ── OUTPUT SELECTION ───────────────────────────────────────────────────────
+    function openOutput(type) {
+      const levelFolder = LEVEL_FOLDER[selectedLevel];
+
+      if (type === 'html') {
+        // Open the interactive vector map viewer in a new tab
+        const viewer = HTML_VIEWER_PATH
+          + `?level=${selectedLevel}&year=${selectedYear}`;
+        window.open(viewer, '_blank');
+      } else {
+        // Open the directory listing for nc or gpkg in a new tab
+        const path = `${levelFolder}/${selectedYear}/${type}/`;
+        window.open(path, '_blank');
+      }
+    }
+  </script>
+
+</body>
+</html>
