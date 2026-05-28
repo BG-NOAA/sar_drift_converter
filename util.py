@@ -1153,6 +1153,8 @@ def _download_uw_iabp_buoy_data(config):
     start_date_str  = config['start_date'].strftime('%Y-%m-%d')
     end_date_str  = config['end_date'].strftime('%Y-%m-%d')
     
+    
+    os.makedirs(config['buoy_dir'], exist_ok=True)
     complete_buoy_data_file = os.path.join(
         config['buoy_dir'],
         f'{complete_buoy_data_file_basename}_{start_date_str}_'
@@ -1523,6 +1525,7 @@ def _get_layer_name(scene_id):
     )
 
     return layer_name
+
 
 
 def _update_interactive_html_files(config, epsg):
