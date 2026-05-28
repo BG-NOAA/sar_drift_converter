@@ -13,17 +13,9 @@
 # Python cache
 __pycache__
 
-# Output files
-**/*.gpkg
-**/*.nc
-**/*.png
-**/*.npz
-**/*.log
-
 # Ignored folders
 buoys
 input
-input_test
 layer_to_gpkg
 level_output
 log
@@ -31,5 +23,4 @@ misc
 npz
 overlays
 sample_day
-sample_year
 SIVelocity_SAR
