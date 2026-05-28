@@ -1713,6 +1713,7 @@ def _update_buoys_vectors(data_dir, config):
     from tqdm import tqdm
 
     logger = logging.getLogger('sar_drift_converter')
+    os.makedirs(data_dir, exist_ok=True)
 
     df_buoy_drift = config['buoy_drift']
     groups = list(df_buoy_drift.groupby('date'))

@@ -1126,8 +1126,7 @@ def process_level_output(test=False):
     if test:
         processing_levels = ['00']
     else:
-        # processing_levels = ['01', '02', '03']
-        processing_levels = ['03']
+        processing_levels = ['01', '02', '03']
     
     obs_read=df_raw.shape[0]
     total_days=df_raw['date_start'].dt.date.nunique()
