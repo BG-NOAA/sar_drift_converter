@@ -1,12 +1,17 @@
+beautifulsoup4
 cartopy
 geopandas
 matplotlib
+nc-time-axis
 netCDF4
 numpy
 pandas
 pyproj
 rasterio>=1.3.0
+requests
+scikit-learn
 scipy
 shapely
 tqdm
+urllib3
 xarray

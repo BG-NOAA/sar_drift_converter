@@ -1,12 +1,13 @@
-# SAR Drift Converter & Outlier Tools
+# SAR Drift Converter
 
-This repository converts **SAR sea‑ice drift "gfilter" text outputs** into GIS- and analysis-ready products:
+This repository converts **SAR sea-ice drift "gfilter" text outputs** into GIS- and analysis-ready products:
 
 - **Formatted CSV** (cleaned/consistent columns)
-- **GeoPackage (`.gpkg`)** with drift lines in a configurable projected CRS — one file per day across all scenes
-- **NetCDF (`.nc`)** on a regular grid with metadata populated from a **CDL template** — two files per day: a multi-layered scenes file and a single-layer daily summary
-- **Interactive vector HTML** — one file per day across all scenes (levels `00` and `03`)
-- Optional utilities: outlier detection (z-score and Mahalanobis)
+- **GeoPackage (`.gpkg`)** with drift lines in a configurable projected CRS — for levels `00`/`02`, one layer per scene per day; for level `03`, one combined daily layer
+- **NetCDF (`.nc`)** on a regular grid with metadata populated from a **CDL template** — two files per day: a multi-layered scenes file (one time layer per scene pair) and a single-layer daily summary
+- **Interactive vector HTML** — one file per level/EPSG combination, with per-day JSON data files (levels `00` and `03` only)
+- **Buoy drift JSON** — per-day JSON files from UW IABP buoy observations, served alongside SAR vectors in the HTML viewer
+- Outlier detection (z-score and Mahalanobis) and buoy data download/processing utilities
 
 ---
 
@@ -29,33 +30,34 @@ pip install -r requirements.txt
 
 ### Package list
 
-| Package | Notes |
-|---------|-------|
-| `cartopy` | Cartopy basemap rendering in the layer viewer notebook |
+| Package |  Notes |
+|---------|--------|
+| `beautifulsoup4` | HTML parsing for SAR drift file download |
+| `cartopy` | Cartopy basemap rendering in the layer viewer notebook; not required by the main pipeline |
 | `geopandas` | GeoPackage output |
-| `matplotlib` | Quiver plot rendering in the layer viewer notebook |
-| `matplotlib-map-utils` | Map utilities |
-| `matplotlib-scalebar` | Scale bar rendering |
-| `nc-time-axis` | NetCDF time axis support (pip install via `environment.yml`) |
+| `matplotlib` | Quiver plot rendering in the layer viewer notebook; not required by the main pipeline |
+| `nc-time-axis` | NetCDF time axis support; installed via pip in both environments |
 | `netCDF4` | NetCDF read/write |
 | `numpy` | Numerical computation |
 | `pandas` | DataFrame processing |
 | `pyproj` | CRS transformation |
-| `python=3.10` | Minimum Python version (conda) |
-| `rasterio` | Raster I/O |
+| `python=3.10` | Minimum Python version (conda only) |
+| `rasterio>=1.3.0` | Raster I/O |
+| `requests` | HTTP file downloads |
 | `scikit-learn` | `LedoitWolf` covariance for Mahalanobis outlier detection |
 | `scipy` | Statistical functions |
 | `shapely` | Geometry construction |
 | `tqdm` | Progress bars |
+| `urllib3` | HTTP utilities (SSL warning suppression) |
 | `xarray` | NetCDF dataset handling |
 
-> **Note:** `geopandas` is easiest to install via **conda-forge**. `cartopy`, `matplotlib`, and `matplotlib-map-utils` are required by the layer viewer notebook but not by the main pipeline script.
+> **Note:** `geopandas` and `cartopy` install most reliably via **conda-forge**; pip users may encounter compilation errors for these two packages. `cartopy` and `matplotlib` are only required by the layer viewer notebook, not by the main pipeline script. `nc-time-axis` is installed via pip in both environments since it is not available on conda-forge.
 
 ---
 
 ## Configuration (`config.json`)
 
-All runs are driven by a JSON config file passed via `-c config.json`. Every key listed below is required — the script will exit with an error if any key is missing or unexpected.
+All runs are driven by a JSON config file passed via `-c config.json`. Every key listed below is required — the script will exit with an error if any key is missing or unexpected. Keys beginning with `_comment` are permitted and silently ignored.
 
 ### Input / batch settings
 
@@ -65,56 +67,51 @@ All runs are driven by a JSON config file passed via `-c config.json`. Every key
 | `sar_drift_directory` | str | Directory containing gfilter input files (used when `batch_process` is `true`) |
 | `sar_drift_filename` | str | Path to a single gfilter input file (used when `batch_process` is `false`) |
 | `delimiter` | str | Field separator in the input file (e.g. `","`, `"\\t"`) |
+| `sar_drift_data_url` | str | URL of the directory listing page hosting SAR drift gfilter text files; scraped at startup to download new files |
+| `uw_iabp_buoy_url` | str | URL hosting UW IABP buoy observation data |
+| `uw_iabp_buoy_tables` | str | URL of the `.js` file listing active buoy identifiers |
+| `uw_iabp_buoy_filename` | str | Base filename for the downloaded buoy CSV (date range is appended automatically) |
 
 ### Output paths and templates
 
 | Key | Type | Description |
 |-----|------|-------------|
 | `file_server` | str | Root path where daily outputs are written, structured as `<file_server>/<epsg>/<level_label>/<year>/<type>/` |
-| `netcdf_cdl_file` | str | Path to the base CDL template file used to populate NetCDF metadata (e.g. `meta/sar_drift_output.cdl`); the pipeline derives the EPSG-specific variant automatically (e.g. `sar_drift_output_3413.cdl`) |
+| `netcdf_cdl_file` | str | Path to the base CDL template file used to populate NetCDF metadata (e.g. `sar_drift_output.cdl`); the pipeline derives the EPSG-specific variant automatically (e.g. `sar_drift_output_3413.cdl`) |
 | `netcdf_template_file` | str | Path to the NSIDC polar stereographic NetCDF template providing the target grid |
 | `outlier_qml_file` | str | Path to QML style file for outlier-category coloring in QGIS (applied for level `02`) |
-| `graduated_qml_file` | str | Path to QML style file for graduated-speed coloring in QGIS (applied for all levels other than `02`) |
-| `html_with_outlier_template` | str | Path to the HTML viewer template used to generate the daily vector HTML output with outlier filter |
-| `html_without_outlier_template` | str | Path to the HTML viewer template used to generate the daily vector HTML output without outlier filter |
-| `meta_dir` | str | Directory containing static reference files (`land.geojson`, `coastline.geojson`, `graticule.geojson`, `grid.json`) copied into the HTML `data/` subdirectory at runtime. Also contains CDL for NetCDF, HTML templates and QML files for GeoPackages |
+| `graduated_qml_file` | str | Path to QML style file for graduated-speed coloring in QGIS (applied for levels other than `02`) |
+| `html_vector_template` | str | Filename of the HTML viewer template for the interactive drift vector map; must be present in `meta_dir` |
+| `html_index_template` | str | Filename of the `index.html` template for the directory listing page; must be present in the project root or `meta_dir` |
+| `webpage_folders` | list | Folder names (e.g. `["css", "js", "image", "webfonts"]`) copied from `meta_dir` to the file server to support the index page |
+| `geojson_templates` | list | GeoJSON filenames (e.g. `["land.geojson", "10m_coastline_50N.geojson", "graticule_50N.geojson"]`) copied from `meta_dir` into each level's `data/` subdirectory at runtime |
+| `meta_dir` | str | Directory containing all static reference files: CDL templates, HTML templates, QML styles, GeoJSON reference layers, and web support folders |
+| `buoy_dir` | str | Directory where downloaded UW IABP buoy text files and the compiled buoy CSV are stored |
+| `output_dir` | str | Parent directory for local intermediate outputs (e.g. `"level_output"`); per-level subdirectories are created beneath this path automatically |
+| `log_dir` | str | Directory for the run log file (e.g. `"log"`); existing `.log` files are compressed to `.zip` at startup and a fresh timestamped log is created |
 
-> **Note:** `output_dir`, `formatted_data_dir`, `nc_dir`, and `filtered_data_dir` are **not** config.json keys. They are derived automatically by the script as subdirectories of `level_output/<level>/`.
-
-### Optional GeoTIFF / plotting settings
-
-These keys are required in the JSON even if the features are not in active use. Set booleans to `false` and numeric values to reasonable defaults.
-
-| Key | Type | Description |
-|-----|------|-------------|
-| `use_geotiff` | bool | Enable GeoTIFF overlay workflow; if `false`, `sar_geotiff_filename` is not validated |
-| `sar_geotiff_filename` | str | Path to a SAR backscatter GeoTIFF (only checked if `use_geotiff` is `true`) |
-| `create_region_plot` | bool | Reserved for regional overview plot; stored in config but not currently active |
-| `vector_stride` | int | Display every nth vector in plots (1 = all; ≥ 1) |
-| `inlier_vector_stride` | int | Display every nth inlier vector in plots (≥ 1) |
-| `quiver_scale_small_area` | float | Quiver arrow scale for small-area plots |
-| `quiver_scale_large_area` | float | Quiver arrow scale for large-area plots |
+> **Note:** `formatted_data_dir`, `nc_dir`, and `filtered_data_dir` are **not** config.json keys. They are derived automatically by the script as subdirectories of `output_dir/<level>/`.
 
 ### Run controls
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `clear_output_dir` | bool | If `true`, delete `level_output/<level>/` and all contents before the run |
-| `overwrite` | bool | If `true`, rewrite all output files even if they already exist on disk; if `false`, any day whose file server outputs are all present is skipped entirely without running scene processing |
+| `clear_output_dir` | bool | If `true`, delete `output_dir/<level>/` and all contents before the run |
+| `overwrite` | bool | If `true`, rewrite all output files even if they already exist on disk |
+| `reprocess_days` | int | Number of most-recent days to always reprocess regardless of whether outputs already exist; set to `0` to disable |
 | `verbose` | bool | If `true`, print all resolved config parameters to stdout at startup |
 | `version` | str | Version string included in output filenames (e.g. `"01"`) |
-| `epsg` | int | Target projected CRS: `3413` (NSIDC North Polar Stereographic) or `6931` (EASE-Grid 2.0 North) |
 
 ### Processing levels
 
-The `level` parameter is passed directly to `create_level_output` rather than read from `config.json`.
+Processing levels are dispatched internally by `process_level_output` and are not read from `config.json`.
 
 | Level | Filtering | Outputs |
 |-------|-----------|---------|
-| `00` | None (testing) | NetCDF (multi-layer + single), GeoPackage, vector HTML/JSON |
-| `01` | No hard row drops; invalid bearing/speed and `Maxcorr` quality captured as `bearing_error`, `speed_error`, and `measurement_error` flags | NetCDF (multi-layer + single) |
-| `02` | **Per-row drops:** zero bearing/speed, speed above threshold, `Maxcorr2 ≤ Maxcorr1`. **Scene-level rejection:** < 60% valid Maxcorr or too few vectors | NetCDF (multi-layer + single), GeoPackage with outlier labels |
-| `03` | Same as `02`, plus inlier-only filtering: retain `outlier_category` `00`/`01`, recode to `−1` | NetCDF (multi-layer + single), GeoPackage, vector HTML/JSON (inliers only) |
+| `00` | None (diagnostic/testing) | NetCDF (scenes + daily), GeoPackage (per-scene layers), vector HTML/JSON |
+| `01` | No hard row drops; bearing/speed/correlation quality captured as `bearing_error`, `speed_error`, `measurement_error` flags in NetCDF | NetCDF (scenes + daily) only |
+| `02` | Per-row drops: zero bearing+speed simultaneously, speed above threshold, `Maxcorr2 ≤ Maxcorr1`. Scene-level rejection: <60% valid Maxcorr or too few vectors. Outlier detection applied | NetCDF (scenes + daily), GeoPackage (one layer per scene) |
+| `03` | Same as `02`, plus inlier-only filtering: retain `outlier_category` `00`/`01`, recode to `−1` | NetCDF (scenes + daily), GeoPackage (combined daily layer), vector HTML/JSON (inliers only) |
 
 ---
 
@@ -137,9 +134,9 @@ Versioned algorithm parameters are defined in `constants.py` so that changes are
 | `NEIGHBOR_RADIUS_KM` | `25.0` | Radius in kilometres for spatial neighbor lookup via `cKDTree.query_ball_point` |
 | `MIN_NEIGHBORS` | `8` | Minimum neighbors required to mark a z-score outlier result as statistically confident (units digit `1`) |
 | `MD_MIN_NEIGHBORS` | `24` | Minimum neighbors required to mark a Mahalanobis distance outlier result as statistically confident |
-| `OUTLIER_PASSES` | `3` | Maximum number of iterative outlier detection passes; each pass rebuilds the neighbor pool using only current inliers |
+| `OUTLIER_PASSES` | `3` | Maximum number of iterative outlier detection passes; iteration stops early if the inlier count stabilizes between passes |
 
-### Rounding (applied in `read_sar_drift_data_file`)
+### Rounding
 
 | Parameter | Default | Columns affected |
 |-----------|---------|-----------------|
@@ -148,7 +145,7 @@ Versioned algorithm parameters are defined in `constants.py` so that changes are
 | `SPEED_PRECISION` | `1` | `sea_ice_speed`, `sea_ice_speed_kmdy`, `distance` |
 | `BEARING_PRECISION` | `0` | `direction_of_sea_ice_displacement` |
 
-> **Note:** Rounding is applied with `numpy.round()` immediately after computation. `SPEED_PRECISION = 1` means speed values like `0.0592 m s⁻¹` are stored as `0.1` in the CSV and GeoPackage. Use the unrounded `u` / `v` components to verify speed independently: `SQRT(u² + v²) × 86400 / 1000` reproduces `sea_ice_speed_kmdy` before rounding.
+> **Note:** Rounding is applied with `numpy.round()` immediately after computation. NetCDF variables are stored as `float32`; reading them back as `float64` before rounding in the notebook removes float32 binary representation noise.
 
 ---
 
@@ -161,23 +158,19 @@ python sar_drift_converter.py -c config.json
 The script:
 
 1. Parses and validates `config.json` (`read_json_config`)
-2. Loads the NSIDC polar stereographic NetCDF template
-3. Glob-matches input `.txt`/`.csv` files from `sar_drift_directory`, or loads the single file at `sar_drift_filename`
-4. Initializes a timestamped log file in `level_output/<level>/`
-5. Reads all gfilter drift files into a single combined DataFrame (`combine_into_dataframe`); for each 50 km file, automatically substitutes the corresponding 75 km file if one exists
-6. Applies per-row and scene-level quality filters (`filter_input_data`)
-7. Groups observations by calendar day of `date_start`
-8. For each day, checks whether all expected file server outputs already exist; if they do and `overwrite` is `false`, the day is skipped entirely without running scene processing
-9. For each day requiring processing, processes all File1/File2 scene pairs (`create_scene_output`):
-   - Writes a per-scene formatted CSV
-   - Runs outlier detection
-   - Writes a per-scene NetCDF file
-   - Accumulates all post-outlier-detection rows into a combined `df_scenes` DataFrame
-10. Produces daily outputs from `df_scenes` (`create_daily_output`):
-    - Two NetCDF files: a multi-layered scenes file and a single-layer daily mosaic
-    - One GeoPackage (levels `00`, `02`, `03`)
-    - One vector HTML + companion JSON file (levels `00`, `03`)
-    - Two formatted CSVs: `<start>_<end>_raw.csv` and `<start>_<end>_processing_codes.csv`
+2. Compresses any existing `.log` files to `.zip` archives and initialises a fresh timestamped log file in `log_dir`
+3. Downloads new SAR drift gfilter files from `sar_drift_data_url`; files already present locally are skipped; links returning HTTP 404 are logged and skipped
+4. Glob-matches all `.txt`/`.csv` files from `sar_drift_directory` (batch mode) or loads the single file at `sar_drift_filename`
+5. Reads all gfilter files in parallel into a single combined DataFrame; for each 50 km file, automatically substitutes the corresponding 75 km file if one exists
+6. Drops duplicate rows and any observations where polarization is not HH in both `File1` and `File2`; the count of dropped observations is logged
+7. Applies EPSG-dependent coordinate projection once per target EPSG (`_apply_projection`); EPSGs processed: `[3413, 6931]`
+8. For levels `00` and `03`, downloads UW IABP buoy data, writes all per-day buoy JSON files, and updates the interactive HTML index file
+9. For each level/EPSG combination, calls `create_level_output`:
+   - Applies per-row and scene-level quality filters (`filter_input_data`)
+   - Groups observations by calendar day of `date_start`
+   - For each day, checks `_check_existing_files`; days within `reprocess_days` of today or where `overwrite` is `true` are always reprocessed; days where all outputs exist are skipped entirely
+   - For each day requiring processing, runs outlier detection per scene and accumulates post-detection rows into `df_scenes`
+   - Produces daily outputs from `df_scenes`: NetCDF (scenes + daily), GeoPackage, and vector HTML/JSON as applicable for the level
 
 ### Daily output filename convention
 
@@ -197,17 +190,27 @@ For example, a level `03` daily GeoPackage for 2024-12-30:
 SIVelocity_SAR/3413/Processing Level - 03 (PL03)/2024/gpkg/SIVelocity_SAR_20241230_20241231_daily_12km_NH_3413_PL03_v01.gpkg
 ```
 
+The interactive HTML viewer and its data files sit one level above the year directory:
+
+```
+SIVelocity_SAR/3413/Processing Level - 03 (PL03)/SIVelocity_SAR_interactive_vector_map.html
+SIVelocity_SAR/3413/Processing Level - 03 (PL03)/data/si_velocity_<YYYYMMDD>.json
+SIVelocity_SAR/3413/Processing Level - 03 (PL03)/data/buoy_velocity_<YYYYMMDD>.json
+SIVelocity_SAR/3413/Processing Level - 03 (PL03)/data/available_dates.json
+SIVelocity_SAR/3413/index.html
+```
+
 ### Local output subdirectory structure
 
-Created automatically under `level_output/<level>/`:
+Created automatically under `output_dir/<level>/`:
 
 | Directory | Contents |
 |-----------|----------|
 | `filtered_data/` | Unfiltered combined CSV (level `00` only) |
-| `formatted_data/` | Per-scene formatted CSVs; daily `_raw.csv` and `_processing_codes.csv` |
-| `nc/` | Per-scene NetCDF files |
+| `formatted_data/` | Per-scene formatted CSVs (level `00`); daily `_raw.csv` and `_processing_codes.csv` |
+| `nc/` | Temporary intermediate NetCDF files used during daily mosaic construction |
 
-Daily GeoPackage, vector HTML/JSON, and final NetCDF mosaics are written to `file_server` subdirectories, not to `level_output/`.
+Daily GeoPackage, vector HTML/JSON, and final NetCDF mosaics are written to `file_server` subdirectories, not to `output_dir/`.
 
 ---
 
@@ -215,24 +218,22 @@ Daily GeoPackage, vector HTML/JSON, and final NetCDF mosaics are written to `fil
 
 For a batch run covering 2024-12-30 at level `03`:
 
-**Local intermediate outputs** (`level_output/3/`):
-- `formatted_data/formatted_<scene_id>.csv` — one per scene pair
-- `formatted_data/20241230_20241231_raw.csv` — all input rows for the day
-- `formatted_data/20241230_20241231_processing_codes.csv` — post-outlier-detection rows with codes
-- `nc/<scene_id>.nc` — one per scene pair
-
-**File server daily outputs** (`SIVelocity_SAR/3413/Processing Level - 03 (PL03)/2024/`):
+**File server daily outputs** (`SIVelocity_SAR/3413/Processing Level - 03 (PL03)/`):
 - `nc/SIVelocity_SAR_20241230_20241231_scenes_12km_NH_3413_PL03_v01.nc`
 - `nc/SIVelocity_SAR_20241230_20241231_daily_12km_NH_3413_PL03_v01.nc`
 - `gpkg/SIVelocity_SAR_20241230_20241231_daily_12km_NH_3413_PL03_v01.gpkg`
-- `html/SIVelocity_SAR_20241230_20241231_daily_12km_NH_3413_PL03_v01_vector.html`
-- `html/data/si_velocity_20241230.json`
+- `SIVelocity_SAR_interactive_vector_map.html`
+- `data/si_velocity_20241230.json`
+- `data/buoy_velocity_20241230.json`
+- `data/available_dates.json`
+
+**File server index** (`SIVelocity_SAR/3413/`):
+- `index.html`
+- `css/`, `js/`, `image/`, `webfonts/` (copied from `meta_dir`)
 
 ---
 
 ## Variable Reference
-
-Variables flow through three stages: raw columns read from the gfilter source file, derived columns computed during pipeline processing, and variables written to the NetCDF and GeoPackage outputs.
 
 ### CSV source — raw input columns
 
@@ -244,58 +245,51 @@ Columns marked *dropped* are consumed during processing but not carried forward 
 | `File2` | — | ✓ | Filename of the second SAR scene (end image) |
 | `Time1_JS` | s | dropped | Start time as Julian seconds since 2000-01-01 00:00:00 |
 | `Time2_JS` | s | dropped | End time as Julian seconds since 2000-01-01 00:00:00 |
-| `Lon1` | degrees | renamed → `longitude_1` | Starting longitude of the tracked ice feature |
-| `Lat1` | degrees | renamed → `latitude_1` | Starting latitude of the tracked ice feature |
-| `Lon2` | degrees | renamed → `longitude_2` | Ending longitude of the tracked ice feature |
-| `Lat2` | degrees | renamed → `latitude_2` | Ending latitude of the tracked ice feature |
-| `Bear_deg` | degrees | dropped | Source-file bearing; used in `filter_input_data` to remove zero-bearing rows, then dropped |
-| `Speed_kmdy` | km/day | dropped | Source-file speed; used in `filter_input_data` for speed threshold filtering, then dropped |
-| `U_vel_ms` | m s⁻¹ | dropped | Source-file x-velocity component; dropped after read (recomputed from projected coordinates) |
-| `V_vel_ms` | m s⁻¹ | dropped | Source-file y-velocity component; dropped after read (recomputed from projected coordinates) |
+| `Lon1` | degrees | renamed → `longitude_1` | Starting longitude |
+| `Lat1` | degrees | renamed → `latitude_1` | Starting latitude |
+| `Lon2` | degrees | renamed → `longitude_2` | Ending longitude |
+| `Lat2` | degrees | renamed → `latitude_2` | Ending latitude |
+| `Bear_deg` | degrees | dropped | Source-file bearing; used to flag zero-bearing rows |
+| `Speed_kmdy` | km/day | dropped | Source-file speed; used for speed threshold checks |
+| `U_vel_ms` | m s⁻¹ | dropped | Source-file x-velocity; dropped after read (recomputed from projected coordinates) |
+| `V_vel_ms` | m s⁻¹ | dropped | Source-file y-velocity; dropped after read |
 | `Maxcorr1` | — | ✓ | Cross-correlation score of the first (lower-ranked) match candidate |
 | `Maxcorr2` | — | ✓ | Cross-correlation score of the second (best) match candidate; must exceed `Maxcorr1` for the row to pass filtering |
-| `img1_mean`, `img1_std` | — | dropped | Image 1 patch mean and standard deviation |
-| `img2_mean`, `img2_std` | — | dropped | Image 2 patch mean and standard deviation |
-| `img1s_mean`, `img1s_std` | — | dropped | Image 1 sub-patch mean and standard deviation |
+| `img1_mean`, `img1_std` | — | dropped | Image 1 patch statistics |
+| `img2_mean`, `img2_std` | — | dropped | Image 2 patch statistics |
+| `img1s_mean`, `img1s_std` | — | dropped | Image 1 sub-patch statistics |
 | `Npnt` | — | dropped | Number of points used in the correlation |
 | `Offset1`, `Offset2` | — | dropped | Correlation offset values |
 
 ### Derived — computed in pipeline
 
-These columns are added by `read_sar_drift_data_file` and `outlier_search` and are carried through all downstream processing.
-
 | Column | CRS / Reference | Units | Description |
 |--------|----------------|-------|-------------|
-| `scene_id` | — | — | Combination of `File1` and `File2` joined by `_`; used to group observations into scene pairs |
-| `date_start` | — | — | Start datetime converted from `Time1_JS` (format: `YYYY-MM-DD HH:MM:SS`) |
+| `scene_id` | — | — | `File1_File2`; used to group observations into scene pairs |
+| `date_start` | — | — | Start datetime converted from `Time1_JS` (`YYYY-MM-DD HH:MM:SS`) |
 | `date_end` | — | — | End datetime converted from `Time2_JS` |
 | `duration` | — | s | Observation duration (`Time2_JS − Time1_JS`) |
-| `longitude_1` | EPSG:4326 | degrees | Starting longitude (renamed from `Lon1`); rounded to `coordinate_precision` decimal places |
-| `latitude_1` | EPSG:4326 | degrees | Starting latitude (renamed from `Lat1`); rounded to `coordinate_precision` decimal places |
-| `longitude_2` | EPSG:4326 | degrees | Ending longitude (renamed from `Lon2`); rounded to `coordinate_precision` decimal places |
-| `latitude_2` | EPSG:4326 | degrees | Ending latitude (renamed from `Lat2`); rounded to `coordinate_precision` decimal places |
-| `sensor1` | — | — | Satellite identifier extracted from `File1` (prefix before first underscore) |
-| `sensor2` | — | — | Satellite identifier extracted from `File2` |
-| `X1` | EPSG:`config['epsg']` | m | Projected x-coordinate of start position; rounded to `coordinate_precision` decimal places |
-| `Y1` | EPSG:`config['epsg']` | m | Projected y-coordinate of start position; rounded to `coordinate_precision` decimal places |
-| `X2` | EPSG:`config['epsg']` | m | Projected x-coordinate of end position; rounded to `coordinate_precision` decimal places |
-| `Y2` | EPSG:`config['epsg']` | m | Projected y-coordinate of end position; rounded to `coordinate_precision` decimal places |
-| `sea_ice_x_displacement` | EPSG:`config['epsg']` | m | X displacement (`X2 − X1`); rounded to `displacement_precision` decimal places |
-| `sea_ice_y_displacement` | EPSG:`config['epsg']` | m | Y displacement (`Y2 − Y1`); rounded to `displacement_precision` decimal places |
-| `u` | EPSG:`config['epsg']` | m s⁻¹ | X-component of velocity (`sea_ice_x_displacement / duration`); rounded to `displacement_precision` decimal places |
-| `v` | EPSG:`config['epsg']` | m s⁻¹ | Y-component of velocity (`sea_ice_y_displacement / duration`); rounded to `displacement_precision` decimal places |
-| `sea_ice_speed` | geodesic | m s⁻¹ | Drift speed from geodesic distance / `duration`; rounded to `speed_precision` decimal places |
-| `sea_ice_speed_kmdy` | geodesic | km/day | Drift speed in km/day from geodesic distance; rounded to `speed_precision` decimal places |
-| `direction_of_sea_ice_displacement` | geodesic | degrees | Forward azimuth from geodesic inverse calculation (WGS84); rounded to `bearing_precision` decimal places |
-| `distance` | geodesic | m | Geodesic distance between start and end positions (WGS84); rounded to `speed_precision` decimal places |
-| `outlier_category` | — | — | Two-digit outlier code (see [Outlier detection](#outlier-detection)); `−1` = inlier, outlier filter already applied (level `03`); fill = `−9` (level `01`) |
-| `bearing_error` | — | — | `1` if `direction_of_sea_ice_displacement == 0` or `sea_ice_speed == 0`; `0` = valid; `−9` = not computed (levels `02`/`03`) |
-| `speed_error` | — | — | `1` if speed exceeds threshold (25 km/day for 50 km files; 35 km/day for 75 km files); `0` = valid; `−9` = not computed (levels `02`/`03`) |
-| `measurement_error` | — | — | `1` if `Maxcorr1 > Maxcorr2`; `0` = valid; `−9` = not computed (levels `02`/`03`) |
+| `sensor1`, `sensor2` | — | — | Satellite identifiers extracted from `File1`/`File2` |
+| `longitude_1`, `latitude_1` | EPSG:4326 | degrees | Start position; rounded to `COORDINATE_PRECISION` |
+| `longitude_2`, `latitude_2` | EPSG:4326 | degrees | End position; rounded to `COORDINATE_PRECISION` |
+| `X1`, `Y1` | EPSG:`config['epsg']` | m | Projected start position; rounded to `COORDINATE_PRECISION` |
+| `X2`, `Y2` | EPSG:`config['epsg']` | m | Projected end position; rounded to `COORDINATE_PRECISION` |
+| `sea_ice_x_displacement` | EPSG:`config['epsg']` | m | X displacement (`X2 − X1`); rounded to `DISPLACEMENT_PRECISION` |
+| `sea_ice_y_displacement` | EPSG:`config['epsg']` | m | Y displacement (`Y2 − Y1`); rounded to `DISPLACEMENT_PRECISION` |
+| `u` | EPSG:`config['epsg']` | m s⁻¹ | X-component of velocity; rounded to `DISPLACEMENT_PRECISION` |
+| `v` | EPSG:`config['epsg']` | m s⁻¹ | Y-component of velocity; rounded to `DISPLACEMENT_PRECISION` |
+| `sea_ice_speed` | geodesic | m s⁻¹ | Drift speed from geodesic distance / duration; rounded to `SPEED_PRECISION` |
+| `sea_ice_speed_kmdy` | geodesic | km/day | Drift speed in km/day; rounded to `SPEED_PRECISION` |
+| `direction_of_sea_ice_displacement` | geodesic | degrees | Forward azimuth (WGS84); rounded to `BEARING_PRECISION` |
+| `distance` | geodesic | m | Geodesic distance between start and end positions; rounded to `SPEED_PRECISION` |
+| `outlier_category` | — | — | Two-digit outlier code; `−1` = inlier filter applied (level `03`); `−9` = not computed (level `01`) |
+| `bearing_error` | — | — | `1` if both bearing and speed are exactly zero simultaneously; `0` = valid; for levels `02`/`03`, always `0` since bad vectors are removed upstream |
+| `speed_error` | — | — | `1` if speed exceeds threshold (25 m s⁻¹ for 50 km files; 35 m s⁻¹ for 75 km files); `0` = valid; for levels `02`/`03`, always `0` |
+| `measurement_error` | — | — | `1` if `Maxcorr1 > Maxcorr2`; `0` = valid; for levels `02`/`03`, always `0` |
 
 ### NetCDF output variables
 
-All gridded data variables have dimensions `(time, y, x)` projected on the NSIDC 12.5 km polar stereographic grid (EPSG:3413). Coordinates and auxiliary variables are also listed.
+All gridded data variables have dimensions `(time, y, x)`. For the scenes file, each time layer corresponds to one scene pair. For the daily file, a single time layer mosaics all scene pairs using a last-write-wins strategy (scenes sorted by time before merge). The output grid is always the NSIDC 12.5 km polar stereographic grid (EPSG:3413) regardless of `config['epsg']`. The grid is cropped to the bounding box of valid observations with a 4-cell pad on each side.
 
 | Variable | Dimensions | Type | Units | Description |
 |----------|------------|------|-------|-------------|
@@ -303,122 +297,99 @@ All gridded data variables have dimensions `(time, y, x)` projected on the NSIDC
 | `sea_ice_x_displacement` | (time, y, x) | float32 | m | X-component of ice displacement |
 | `sea_ice_y_displacement` | (time, y, x) | float32 | m | Y-component of ice displacement |
 | `direction_of_sea_ice_displacement` | (time, y, x) | float32 | degrees | Drift direction (forward azimuth) |
-| `outlier_category` | (time, y, x) | int16 | — | Outlier classification code; `−1` = inlier, outlier filter already applied (level `03`); fill value = `−9` |
-| `bearing_error` | (time, y, x) | int16 | — | Bearing validity flag; fill value = `−9` |
-| `speed_error` | (time, y, x) | int16 | — | Speed threshold flag; fill value = `−9` |
-| `measurement_error` | (time, y, x) | int16 | — | Cross-correlation quality flag; fill value = `−9` |
-| `layer_id` *(coord)* | (time) | char | — | Scene identifier string for each time layer; set as a coordinate of `time` via `time:coordinates = 'layer_id'` |
+| `outlier_category` | (time, y, x) | int16 | — | Outlier classification; `−1` = inlier filter applied (level `03`); fill value = `−9` |
+| `bearing_error` | (time, y, x) | int16 | — | Bearing/speed validity flag; `0` = valid, `1` = both zero; fill value = `−9` |
+| `speed_error` | (time, y, x) | int16 | — | Speed threshold flag; `0` = valid, `1` = exceeded; fill value = `−9` |
+| `measurement_error` | (time, y, x) | int16 | — | Cross-correlation quality flag; `0` = valid, `1` = failed; fill value = `−9` |
+| `layer_id` *(coord)* | (time) | str | — | Full `scene_id` string for each time layer |
 | `spatial_ref` | scalar | int32 | — | CRS container variable holding WKT/proj4 projection metadata |
-| `time_bnds` | (time, nv=2) | float64 | s | CF time bounds: `[min(date_start), max(date_end)]` in seconds since 2000-01-01 |
-| `time` *(coord)* | (time) | float64 | s | Scene reference time: `min(date_start)` in seconds since 2000-01-01 |
+| `time_bnds` | (time, nv=2) | float64 | s | CF time bounds in seconds since 2000-01-01 |
+| `time` *(coord)* | (time) | float64 | s | Scene reference time in seconds since 2000-01-01 |
 | `x` *(coord)* | (x) | float64 | m | x-coordinates of the 12.5 km polar stereographic grid |
 | `y` *(coord)* | (y) | float64 | m | y-coordinates of the 12.5 km polar stereographic grid |
 
-### GeoPackage output columns
+### GeoPackage output
 
-Layer name: `drift_lines`. CRS: EPSG:`config['epsg']`. Geometry: `LineString` from `(X1, Y1)` to `(X2, Y2)` in projected metres. One GeoPackage is produced per day, combining all scene pairs.
+For levels `00` and `02`, one layer per scene is written per day, named `drift_vectors_<sensor1>_<HH>_<MM>_<SS>_<sensor2>_<HH>_<MM>_<SS>`. For level `03`, a single combined `drift_vectors` layer contains all inlier vectors for the day. CRS: EPSG:`config['epsg']`. Geometry: `LineString` from `(X1, Y1)` to `(X2, Y2)`.
 
 | Column | CRS / Reference | Units | Description |
 |--------|----------------|-------|-------------|
-| `scene_id` | — | — | Scene pair identifier (`File1_File2`) |
-| `sensor1` | — | — | Satellite identifier for the start scene |
-| `sensor2` | — | — | Satellite identifier for the end scene |
-| `longitude_1` | EPSG:4326 | degrees | Starting longitude |
-| `latitude_1` | EPSG:4326 | degrees | Starting latitude |
-| `longitude_2` | EPSG:4326 | degrees | Ending longitude |
-| `latitude_2` | EPSG:4326 | degrees | Ending latitude |
-| `X1` | EPSG:`config['epsg']` | m | Projected x-coordinate of start position |
-| `Y1` | EPSG:`config['epsg']` | m | Projected y-coordinate of start position |
-| `X2` | EPSG:`config['epsg']` | m | Projected x-coordinate of end position |
-| `Y2` | EPSG:`config['epsg']` | m | Projected y-coordinate of end position |
-| `date_start` | — | — | Start datetime string (`YYYY-MM-DD HH:MM:SS`) |
-| `date_end` | — | — | End datetime string (`YYYY-MM-DD HH:MM:SS`) |
-| `duration` | — | s | Observation duration in seconds |
+| `scene_id` | — | — | Scene pair identifier |
+| `sensor1`, `sensor2` | — | — | Satellite identifiers |
+| `longitude_1`, `latitude_1` | EPSG:4326 | degrees | Start position |
+| `longitude_2`, `latitude_2` | EPSG:4326 | degrees | End position |
+| `X1`, `Y1`, `X2`, `Y2` | EPSG:`config['epsg']` | m | Projected start/end positions |
+| `date_start`, `date_end` | — | — | Observation timestamps |
+| `duration` | — | s | Observation duration |
 | `sea_ice_x_displacement` | EPSG:`config['epsg']` | m | X displacement |
 | `sea_ice_y_displacement` | EPSG:`config['epsg']` | m | Y displacement |
-| `u` | EPSG:`config['epsg']` | m s⁻¹ | X-component of velocity |
-| `v` | EPSG:`config['epsg']` | m s⁻¹ | Y-component of velocity |
+| `u`, `v` | EPSG:`config['epsg']` | m s⁻¹ | Velocity components |
 | `sea_ice_speed` | geodesic | m s⁻¹ | Drift speed |
 | `sea_ice_speed_kmdy` | geodesic | km/day | Drift speed in km/day |
 | `direction_of_sea_ice_displacement` | geodesic | degrees | Drift direction |
-| `distance` | geodesic | m | Euclidean displacement distance in projected space: sqrt(dx² + dy²) |
-| `distance_geod` | geodesic | m | Geodesic displacement distance on the WGS84 ellipsoid |
-| `outlier_category` | — | — | Two-digit outlier code; `−1` = inlier filter applied (level `03`); included only in levels `00`, `02`, and `03` |
-| `geometry` | EPSG:`config['epsg']` | — | `LineString` from `(X1, Y1)` to `(X2, Y2)` in projected metres |
-| `geometry_type` | — | — | Literal string `'line'` identifying the layer geometry type |
+| `distance`, `distance_geod` | geodesic | m | Euclidean and geodesic displacement distances |
+| `outlier_category` | — | — | Outlier code; included for levels `00`, `02`, `03` |
+| `geometry_type` | — | — | Literal `'line'` |
 
-### Vector HTML output
+### Vector HTML and JSON output
 
-One interactive HTML file and a companion JSON data file are produced per day (levels `00` and `03`), combining all scene pairs for that day. The HTML viewer renders drift vectors on an interactive Leaflet polar stereographic map. For level `03`, only inlier vectors (`outlier_category` `00`/`01`) are written and their `outlier_category` is recoded to `−1`.
+One interactive HTML viewer file is produced per level/EPSG combination (levels `00` and `03`). It loads per-day JSON data files and renders SAR drift vectors and buoy drift vectors on an interactive Leaflet polar stereographic map.
 
-The JSON file is written to a `data/` subdirectory alongside the HTML file and contains date metadata and a compact vector list:
+**SAR drift JSON** (`data/si_velocity_<YYYYMMDD>.json`) and **Buoy drift JSON** (`data/buoy_velocity_<YYYYMMDD>.json`):
 
 ```json
 {
   "date1": "YYYY-MM-DD",
   "date2": "YYYY-MM-DD",
   "count": <int>,
-  "vectors": [[lon1, lat1, lon2, lat2, speed_x100, outlier_category], ...]
+  "vectors": [[lon1, lat1, lon2, lat2, speed_kmdy, bearing], ...]
 }
 ```
 
-where `speed_x100` is drift speed in km/day multiplied by 100 and rounded to the nearest integer. The `data/` subdirectory also receives static GeoJSON reference files (land, coastline, graticule, grid) copied from `config['meta_dir']` at runtime.
+Buoy JSON files are written for all available dates in the UW IABP dataset on every run, ensuring delayed observations are captured regardless of when they arrive.
+
+**Available dates JSON** (`data/available_dates.json`): sorted list of `YYYYMMDD` strings for all days that have a SAR drift JSON file.
 
 ---
 
 ## Outlier detection
 
-The main outlier routine is `util.outlier_search(...)`. It supports two methods:
+The main outlier routine is `util.outlier_search`. It supports two methods:
 
-- **Z-score** on drift distance and bearing, computed within a spatial neighborhood
-- **Mahalanobis distance** using `LedoitWolf` covariance estimation (`sklearn.covariance.LedoitWolf`) on velocity components
+- **Z-score** on drift speed and bearing, computed within a spatial neighborhood using `cKDTree.query_ball_point`
+- **Mahalanobis distance** on displacement components `(dx, dy)` using `LedoitWolf` covariance estimation
 
-Key ideas:
+Key design decisions:
 
 - Neighbors are found **within each scene** (grouped by `File1`/`File2`)
-- Neighborhoods are computed with a **radius search** (km) using `cKDTree.query_ball_point`
-- `outlier_category` encodes **outlier type** and **statistical confidence** (whether the neighbor threshold was met):
+- Outlier detection runs for up to `OUTLIER_PASSES` passes; on each pass the neighbor pool is restricted to current inliers (`outlier_category in ['00', '01']`), preventing flagged vectors from inflating local statistics
+- Iteration stops early if the total inlier count stabilizes between passes
+- `outlier_category` encodes **outlier type** (tens digit) and **statistical confidence** (units digit: `0` = below neighbor threshold, `1` = at or above):
 
-| Code | Outlier Type | Neighbor Threshold Met |
-|------|-------------|----------------------|
-| `−1` | None (inlier — outlier filter already applied, level `03` only) | — |
-| `00` | None | No |
-| `01` | None | Yes |
-| `10` | Distance | No |
-| `11` | Distance | Yes |
-| `20` | Bearing | No |
-| `21` | Bearing | Yes |
-| `30` | Mahalanobis Distance | No |
-| `31` | Mahalanobis Distance | Yes |
-| `40` | Distance and Bearing | No |
-| `41` | Distance and Bearing | Yes |
-| `50` | Mahalanobis Distance and Distance | No |
-| `51` | Mahalanobis Distance and Distance | Yes |
-| `60` | Mahalanobis Distance and Bearing | No |
-| `61` | Mahalanobis Distance and Bearing | Yes |
-| `70` | Mahalanobis Distance, Distance and Bearing | No |
-| `71` | Mahalanobis Distance, Distance and Bearing | Yes |
-
-### Level `03` inlier filtering
-
-For level `03` outputs, `create_shape_package`, `create_vector_html_and_json`, and `create_netcdf` apply the following steps before writing:
-
-1. Retain only rows where `outlier_category` is `'00'` or `'01'` (confirmed inliers).
-2. Recode all retained rows' `outlier_category` to `−1`, signaling that the outlier algorithm has been applied and these vectors passed as inliers.
-3. If no rows survive the filter, the output file is skipped and the function returns `None`.
-
-### Iterative passes
-
-For each pass in `OUTLIER_PASSES`, only vectors with `outlier_category in ['00', '01']` are used as the neighbor pool when recomputing statistics. This prevents already-flagged vectors from influencing local statistics in subsequent passes.
+| Code | Outlier Type |
+|------|-------------|
+| `−9` | Not computed (level `01`) |
+| `−1` | Inlier — outlier filter already applied (level `03`) |
+| `00` | No outlier (below neighbor threshold) |
+| `01` | No outlier (at or above neighbor threshold) |
+| `10`/`11` | Distance (speed) outlier |
+| `20`/`21` | Bearing outlier |
+| `30`/`31` | Mahalanobis distance outlier |
+| `40`/`41` | Distance and bearing |
+| `50`/`51` | Mahalanobis and distance |
+| `60`/`61` | Mahalanobis and bearing |
+| `70`/`71` | Mahalanobis, distance, and bearing |
 
 ---
 
 ## Output quality notes
 
-- **75 km file preference:** For each 50 km gfilter file, the pipeline automatically checks for a corresponding 75 km file (same name with `_0050000m_` replaced by `_0075000m_`). If found, the 75 km file is read instead, improving spatial coverage. The speed anomaly threshold is adjusted accordingly (25 km/day for 50 km files, 35 km/day for 75 km files).
-- **Zero std:** `outlier_search` guards against `dist_std == 0` or `bear_std == 0` to avoid divide-by-zero in z-score computation.
-- **Header auto-detection:** `_detect_skip_rows` peeks at up to the first 10 lines of each input file to locate the header row (identified by the presence of `'File1'` and `'File2'`), returning the number of rows to skip before it. This handles files that include preamble lines (e.g. NetCDF source paths) before the header.
-- **Skipping completed days:** When `overwrite` is `false`, `daily_outputs_exist` checks all expected file server paths for the configured level before any scene processing begins. Days where all outputs are already present are skipped entirely, avoiding redundant outlier detection and NetCDF writes.
+- **75 km file preference:** For each 50 km gfilter file, the pipeline automatically checks for a corresponding 75 km file (`_0050000m_` → `_0075000m_`). If found, the 75 km file is read instead; the speed error threshold is adjusted accordingly (25 m s⁻¹ for 50 km files, 35 m s⁻¹ for 75 km files).
+- **HH polarization filter:** Observations where either `File1` or `File2` does not use HH polarization are dropped before any processing. The count of dropped observations is logged.
+- **Bearing and speed error flags:** For levels `00` and `01`, `bearing_error = 1` only when **both** bearing and speed are exactly zero simultaneously. For levels `02` and `03`, bad vectors are removed upstream so all surviving vectors receive flag values of `0`.
+- **Reprocessing window:** `reprocess_days` in `config.json` automatically reprocesses the most recent N days on every run, ensuring outputs are updated when SAR or buoy source data is corrected or delayed.
+- **Partial-day resume:** When `overwrite` is `false` and `reprocess_days` is `0`, each output type is checked independently. Days where only some outputs are missing are partially reprocessed.
+- **float32 precision:** NetCDF variables are stored as `float32`. Cast to `float64` and re-round when exact decimal precision is required (e.g. in the notebook).
 
 ---
 
@@ -431,10 +402,10 @@ An interactive Jupyter notebook for exploring and exporting individual time laye
 **What it does:**
 
 - Opens a NetCDF file and displays a high-level dataset summary
-- Lists all `layer_id` values so a layer can be located by scene ID or index
-- Computes per-variable statistics (shape, valid count, min/max/mean/std) for a selected layer
-- Exports a selected layer to a **GeoPackage** (`drift_lines`, EPSG:`epsg`) with an embedded QGIS QML style
-- Renders a **quiver plot PNG** of drift vectors on a Cartopy basemap; the Cartopy projection is selected dynamically based on `epsg` (North Polar Stereographic for EPSG:3413/3411; Lambert Azimuthal Equal-Area for EPSG:6931)
+- Lists all `layer_id` values (full `scene_id` strings) so a layer can be located by index or by searching for a target scene
+- Computes per-variable statistics (shape, valid count, min/max/mean/median/std) for a selected layer, correctly handling the `_FillValue = −9` for int16 flag variables
+- Exports a selected layer to a **GeoPackage** with an embedded QGIS QML style
+- Renders a **quiver plot PNG** of drift vectors on a Cartopy basemap; projection is selected dynamically based on `epsg`
 
 **Key parameters (set by the user):**
 
@@ -442,23 +413,33 @@ An interactive Jupyter notebook for exploring and exporting individual time laye
 |-----------|-------------|
 | `nc_path` | Path to the input NetCDF file |
 | `selected_layer_index` | Integer index of the time layer to export/plot |
-| `has_outliers` | `True` for level `02` files (colors arrows by outlier category); `False` for levels `01`/`03` (colors by displacement magnitude) |
-| `epsg` | EPSG code of the projected CRS used in the NetCDF file (e.g. `3413`, `6931`); controls GeoPackage layer CRS and Cartopy projection |
+| `has_outliers` | `True` for levels `00`/`02` (colors arrows by outlier category); `False` for levels `01`/`03` (colors by displacement magnitude) |
+| `epsg` | EPSG code of the projected CRS used in the NetCDF file (`3413` or `6931`) |
+
+**Layer ID format:**
+
+`layer_id` values are the full `scene_id` string, e.g.:
+```
+RCM1_SHUB_2024_10_14_05_18_19_0782198299_183.79E_75.03N_HH_C_RCM2_SHUB_2024_10_15_04_54_14_...
+```
+
+Uncomment the browse loop in the notebook to print all layer IDs if you need to find one by name.
 
 **Outputs written to disk:**
 
 | File | Location | Description |
 |------|----------|-------------|
-| `<layer_id>.gpkg` | `layer_to_gpkg/` | GeoPackage with `drift_lines` layer in EPSG:`epsg` and embedded QML style |
+| `<layer_id>.gpkg` | `layer_to_gpkg/` | GeoPackage with drift line layer in EPSG:`epsg` and embedded QML style |
 
-The PNG plot can be saved locally by right-clicking the inline image and choosing *Save Image As*.
+The PNG plot can be saved by right-clicking the inline image and choosing *Save Image As*.
 
 ---
 
 ## Quick checklist
 
-1. Update `config.json` paths (`sar_drift_directory`, `file_server`, `netcdf_template_file`, `netcdf_cdl_file`, `vector_html_file`, `meta_dir`, QML files)
-2. Run `python sar_drift_converter.py -c config.json`
-3. Open the daily `.gpkg` in QGIS to verify vector placement and styling
-4. Open the daily `_vector.html` in a browser to verify the interactive map
-5. Validate `.nc` metadata and grid (both `_scenes_` and `_daily_` variants)
+1. Update `config.json` — set `sar_drift_directory`, `file_server`, `netcdf_template_file`, `netcdf_cdl_file`, `html_vector_template`, `html_index_template`, `meta_dir`, `buoy_dir`, `log_dir`, `output_dir`, and URL keys to match your environment
+2. Ensure `beautifulsoup4`, `requests`, `scikit-learn`, and `urllib3` are installed (add to `environment.yml` and `requirements.txt` if not already present)
+3. Run `python sar_drift_converter.py -c config.json`
+4. Open the daily `.gpkg` in QGIS to verify vector placement and styling; use temporal control to step through scene layers
+5. Serve `file_server` via localhost and open the `index.html` in a browser to verify the interactive map and buoy vectors
+6. Validate `.nc` metadata and grid in the Jupyter notebook (both `_scenes_` and `_daily_` variants)

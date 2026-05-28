@@ -3,6 +3,7 @@ channels:
   - conda-forge
   - defaults
 dependencies:
+  - beautifulsoup4
   - cartopy
   - geopandas
   - matplotlib
@@ -14,9 +15,11 @@ dependencies:
       - nc-time-axis  
   - pyproj
   - python=3.10
-  - rasterio  
+  - rasterio>=1.3.0
+  - requests
   - scipy
   - scikit-learn
   - shapely
   - tqdm
+  - urllib3
   - xarray

@@ -784,61 +784,62 @@ def create_daily_output(scene_output, config, template_ds, exists):
 
 def create_level_output(df_all, config):
     """
-    Main execution workflow for converting SAR drift text files into
-    GeoPackage, NetCDF, and Plotly HTML outputs.
+    Execute the full daily processing workflow for one level/EPSG combination.
+
+    Receives a pre-projected DataFrame for a single EPSG, applies quality
+    filtering, groups observations by calendar day, and produces all
+    configured output files for each day. This function is called once per
+    level/EPSG combination by `process_level_output`.
 
     Args:
-        level  (str):  Processing level; controls filtering and output files
-                       created. Must be one of: '00', '01', '02', or '03'.
-        epsg   (int):  Output projection EPSG code. Must be 3413 (NSIDC polar
-                       stereographic north) or 6931 (NSIDC ease-grid 2.0
-                       north).
-        config (dict): Validated configuration dictionary returned by
-                       `read_json_config()`. `level` and `epsg` are written
-                       into this dict at the start of execution.
+        df_all (pandas.DataFrame): Pre-projected combined DataFrame for the
+            target EPSG, as returned by `util._apply_projection`. Must
+            contain all columns produced by `combine_into_dataframe` and
+            `_apply_projection`, including projected coordinates `X1`, `Y1`,
+            `X2`, `Y2`, displacement, speed, and bearing columns.
+        config (dict): Configuration dictionary containing all keys from
+            `read_json_config`, plus:
+                - 'level' (str): Processing level set by the caller
+                  ('00'–'03').
+                - 'epsg' (int): Target projected CRS code set by the
+                  caller (3413 or 6931).
+                - 'start_date' (date): Minimum date_start across all
+                  input data; set by the caller for levels '00' and '03'.
+                - 'end_date' (date): Maximum date_start across all input
+                  data; set by the caller for levels '00' and '03'.
+                - 'buoy_drift' (pandas.DataFrame or None): Loaded buoy
+                  drift DataFrame for levels '00' and '03'; None otherwise.
 
     Workflow:
-        1. Validate `level` and `epsg` and assign them into `config`.
-        2. Set up the output directory tree under
-           `level_output/<level>/` and optionally clear it if
-           `config['clear_output_dir']` is True.
+        1. Validate `level` and `epsg` from config.
+        2. Set up the output directory tree under `output_dir/<level>/`
+           and optionally clear it if `config['clear_output_dir']` is True.
         3. Open the NetCDF template specified by
            `config['netcdf_template_file']` to provide the target grid.
-        4. Glob-match input `.txt` and `.csv` files from
-           `config['sar_drift_directory']` (batch mode) or load a single
-           file from `config['sar_drift_file']` (single-file mode),
-           controlled by `config['batch_process']`.
-        5. Read and combine all matched input files into a single DataFrame
-           via `combine_into_dataframe()`.
-        6. Apply per-row and scene-level quality filters via
-           `filter_input_data()`.
-        7. Assign a `date_range` column (YYYYMMDD of `date_start`) and log
-           any observations that span more than one calendar day.
-        8. Group observations by `date_range`, then for each day call
-           `create_scene_output()` to produce per-scene outputs, followed
-           by `create_daily_output()` to combine scenes into daily files.
-        9. Log total elapsed run time on completion.
+        4. Apply per-row and scene-level quality filters via
+           `filter_input_data`.
+        5. Assign a `date_range` column (YYYYMMDD of `date_start`).
+        6. For each calendar day, call `_check_existing_files` to determine
+           which outputs need to be written. Days within `reprocess_days`
+           of today or where `overwrite` is True are always reprocessed.
+           Days where all outputs already exist are skipped entirely.
+        7. For each day requiring processing, call `create_scene_output`
+           to run outlier detection and accumulate per-scene rows into
+           `df_scenes`, then call `create_daily_output` to write all
+           daily output files.
+        8. For level '00', write raw and processing-codes CSVs per day.
+        9. Log total elapsed run time for this level/EPSG on completion.
 
-    Configuration keys used:
-        - 'batch_process'      (bool): If True, process all `.txt`/`.csv`
-                                       files in `sar_drift_directory`;
-                                       if False, process `sar_drift_file`
-                                       only.
-        - 'clear_output_dir'   (bool): If True, delete and recreate the
-                                       output directory before processing.
-        - 'sar_drift_directory' (str): Input directory for batch processing.
-        - 'sar_drift_file'      (str): Path to a single input file.
-        - 'netcdf_template_file'(str): Path to the NSIDC NetCDF template
-                                       providing the target grid.
-        - 'output_dir'          (str): Set internally to
-                                       `level_output/<level>/`; used as the
-                                       root for all output subdirectories.
+    Returns:
+        None
 
     Notes:
         - Progress across days is displayed via a `tqdm` progress bar.
-        - Observations where `date_end` falls on a different calendar day
-          than `date_start` are logged individually by scene with their
-          maximum time span.
+        - `output_dir`, `formatted_data_dir`, `nc_dir`, and
+          `filtered_data_dir` are written into `config` by this function
+          as subdirectories of `output_dir/<level>/`.
+        - A `gc.collect()` call is made after each day to release memory
+          held by per-scene DataFrames and outlier detection columns.
     """
     
     import util

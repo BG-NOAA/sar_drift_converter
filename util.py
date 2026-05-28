@@ -486,7 +486,7 @@ def _check_existing_files(scene_output_stub, config):
     start_date = scene_output_stub['start_date']
     reprocess_days = config['reprocess_days']
     cutoff = (
-        pd.Timestamp.normalize() - pd.Timedelta(days=reprocess_days)
+        pd.Timestamp.now().normalize() - pd.Timedelta(days=reprocess_days)
     )
     if start_date >= cutoff:
         # always rewrite output for the number of days in `reprocess_days`
@@ -1081,67 +1081,55 @@ def _add_json_templates(data_dir, config):
 
 def _download_uw_iabp_buoy_data(config):
     """
-    Download and compile IABP buoy observation data from the
-    University of Washington.
+    Download and compile UW IABP buoy observation data for the date range
+    covered by the current SAR drift dataset.
 
-    This method fetches daily buoy data hosted by the UW IABP program
-    for a user-specified date range. It handles downloading individual
-    buoy `.txt` files, combining them into a unified dataset, validating
-    against the requested date range, and merging with buoy metadata such
-    as owner, type, and location.
+    Fetches the active buoy list from the UW IABP tables URL, downloads
+    individual buoy `.txt` files, combines them into a single DataFrame,
+    filters to the SAR drift date range, and saves the compiled output as
+    a dated CSV file. If a matching compiled file already exists and
+    `overwrite` is False, the existing file is loaded and validated instead.
 
     Args:
-        initializer (object): Object containing user‑specified
-        configuration, including:
-            - `start_date` (str): Start date in YYYYMMDD format.
-            - `end_date` (str or None): End date in YYYYMMDD format,
-               or None to use current date.
-            - `overwrite` (bool): Whether to force download even if a
-               matching local file exists.
-            - Methods:
-                - `set_start_date(str)`
-                - `set_end_date(str)`
-                - `set_data_source(str)`
-                - `set_use_pickle(bool)`
+        config (dict): Configuration dictionary. Must include:
+                - 'uw_iabp_buoy_url' (str): Base URL for individual buoy
+                  `.txt` file downloads.
+                - 'uw_iabp_buoy_tables' (str): URL of the `.js` file
+                  listing active buoy identifiers.
+                - 'uw_iabp_buoy_filename' (str): Base filename for the
+                  compiled output CSV; the date range is appended
+                  automatically.
+                - 'buoy_dir' (str): Directory for downloaded buoy `.txt`
+                  files and the compiled CSV.
+                - 'start_date' (date): Minimum date_start from the SAR
+                  drift data; used as the lower bound for filtering.
+                - 'end_date' (date): Maximum date_start from the SAR
+                  drift data; used as the upper bound for filtering.
+                - 'overwrite' (bool): If True, re-download and recompile
+                  even if a matching compiled file already exists.
 
     Returns:
-        pandas.DataFrame: A cleaned and merged DataFrame of buoy data
-        with the following:
-            - Daily observations (Year, DOY, Lat, Lon, BP, Ts, Ta, etc.)
-            - High-level metadata (Buoy Type, Owner, Logistics, etc.)
-            - Aligned with the ERDDAP buoy data format
+        pandas.DataFrame: Compiled buoy observation DataFrame filtered
+            to the SAR drift date range, with columns including
+            `'time (UTC)'`, lat/lon positions, and buoy metadata.
 
     Raises:
-        SystemExit: If date formats are invalid, start date precedes data
-        availability, or if start_date > end_date.
-
-    Workflow Overview:
-        1. Validate input dates: Ensure proper formatting and
-           logical range.
-        2. Check for existing CSV:
-            - If found and not overwritten, load it after validating
-              its date range.
-        3. Fetch buoy metadata table from UW IABP site and identify
-           active buoys.
-        4. Download `.txt` files for each buoy, prioritizing
-           recent/active ones.
-        5. Combine all `.txt` files into a master observation table.
-        6. Clean and filter data by the date range and valid coordinates.
-        7. Merge metadata with daily observations.
-        8. Align columns to match ERDDAP standard and save the file.
+        SystemExit: Via `error_msg` if the stored file's date range does
+            not cover `config['start_date']`, indicating the buoy data
+            needs to be re-downloaded.
 
     Notes:
-        - Downloads text files for each buoy to
-          `self.config['buoy_data_dir']`.
-        - Saves merged output as a CSV named:
-          `<basename>_<start_date>_<end_date>.csv`
-        - Updates the `initializer` object with revised start/end dates
-          and pickle usage flags.
-        - Prints progress and status messages using `tqdm` and `print`.
+        - The compiled CSV is named using the start and end dates:
+          `<uw_iabp_buoy_filename>_<start_date>_<end_date>.csv`.
+        - Individual buoy `.txt` files are saved to `buoy_dir` and
+          reused on subsequent runs unless the buoy is active (recent
+          observations may be incomplete until the buoy stops
+          transmitting).
         - Data is only available from 2010 onward.
-        - Data with invalid coordinates or physically impossible values
-          (e.g., negative pressure) are filtered out.
-        - Reuses downloaded `.txt` files unless active or missing.
+        - Observations with invalid coordinates or physically impossible
+          values are filtered out.
+        - Progress is displayed via `tqdm` during the download phase.
+        - SSL verification is disabled via `urllib3.disable_warnings`.
     """
     
     import requests
@@ -1491,9 +1479,40 @@ def _load_buoy_data(config):
     
     
 def _get_layer_name(scene_id):
-    # unique layer name is:
-    # [sensor_1]_[hour_1]_[minute_1]_[second_1]_
-    # [sensor_2]_[hour_2]_[minute_2]_[secomd_2]
+    """
+    Derive a short GeoPackage layer name from a full scene_id string.
+    
+    Constructs a compact layer identifier from the sensor names and
+    observation timestamps of both scenes in the pair, avoiding the
+    full scene_id length which can exceed GeoPackage layer name limits.
+    
+    Args:
+        scene_id (str): Full scene pair identifier in the format
+            `<File1>_<File2>`, where each file follows the SAR gfilter
+            naming convention:
+            `<sensor>_<provider>_<YYYY>_<MM>_<DD>_<HH>_<MM>_<SS>_
+            <julian_seconds>_<lon>_<lat>_<pol>_<C>`
+    
+    Returns:
+        str: Layer name in the format:
+            `drift_vectors_<sensor1>_<HH>_<MM>_<SS>_
+            <sensor2>_<HH>_<MM>_<SS>`
+            where `HH`, `MM`, `SS` are the hour, minute, and second
+            components of each scene's acquisition time.
+    
+    Example:
+        >>> _get_layer_name(
+        ...     'RCM1_SHUB_2024_10_14_05_18_19_..._'
+        ...     'RCM2_SHUB_2024_10_15_04_54_14_...'
+        ... )
+        
+        unique layer name is:
+        [sensor_1]_[hour_1]_[minute_1]_[second_1]_
+        [sensor_2]_[hour_2]_[minute_2]_[secomd_2]
+        --- or ---
+        `drift_vectors_RCM1_05_18_19_RCM2_04_54_14`        
+    """
+
     scene_id_parts = scene_id.split('_')
     layer_name = (
         f'drift_vectors_{scene_id_parts[0]}_'
@@ -1507,6 +1526,59 @@ def _get_layer_name(scene_id):
 
 
 def _update_interactive_html_files(config, epsg):
+    """
+    Write or refresh the interactive HTML index file and supporting web
+    assets for the given EPSG output directory.
+
+    Reads the `index.html` template, substitutes the EPSG label,
+    description, available year range, and viewer path, then writes the
+    result to `<file_server>/<epsg>/index.html`. Copies CSS, JS, image,
+    and web font support folders from `meta_dir` to the file server. Then
+    calls `_update_buoys_vectors` to write or refresh all per-day buoy
+    JSON files for the level `03` data directory.
+
+    This function is called once per EPSG for levels '00' and '03' during
+    `process_level_output`, before the day loop begins.
+
+    Args:
+        config (dict): Configuration dictionary. Must include:
+                - 'file_server' (str): Root output path.
+                - 'html_index_template' (str): Path to the index.html
+                  template file.
+                - 'html_vector_template' (str): Filename of the vector
+                  viewer HTML used to construct the viewer path constant
+                  in the index.
+                - 'webpage_folders' (list[str]): Folder names to copy
+                  from `meta_dir` to the file server EPSG directory
+                  (e.g. `['css', 'js', 'image', 'webfonts']`).
+                - 'meta_dir' (str): Directory containing web support
+                  folders and template files.
+                - 'start_date' (date): Minimum date_start across all
+                  input data; used to derive the start year for the
+                  `AVAILABLE_YEARS` constant.
+                - 'end_date' (date): Maximum date_start across all input
+                  data; used to derive the end year.
+                - 'buoy_drift' (pandas.DataFrame): Full buoy drift
+                  DataFrame passed through to `_update_buoys_vectors`.
+                - 'epsg' (int): Target EPSG code; used to construct the
+                  buoy data directory path.
+        epsg (int): EPSG code for the output directory (3413 or 6931).
+            Controls which EPSG label and description are substituted
+            into the template and which subdirectory receives the files.
+
+    Returns:
+        None
+
+    Notes:
+        - The following JavaScript constants are updated in the template
+          via regex substitution: `EPSG_LABEL`, `EPSG_DESC`,
+          `AVAILABLE_YEARS`, and `HTML_VIEWER_PATH`.
+        - Web support folders at the destination are deleted and
+          re-copied on each call to ensure stale assets are replaced.
+        - Buoy JSON files are written for the level `03` data directory
+          only: `<file_server>/<epsg>/Processing Level - 03 (PL03)/data/`.
+    """
+    
     import os
     import shutil
     import re
@@ -2556,25 +2628,26 @@ def filter_input_data(df_all, config):
     
     Notes:
         **Per-row drops (levels '02' and '03', applied in order):**
-    
-        1. Remove rows where `direction_of_sea_ice_displacement == 0` or
-           `sea_ice_speed == 0` (zero bearing or zero speed).
-        2. Remove rows where `sea_ice_speed >= 25.0 m s⁻¹` (50 km files) or
-           `>= 35.0 m s⁻¹` (75 km files).
+
+        1. Remove rows where `direction_of_sea_ice_displacement == 0`
+           AND `sea_ice_speed == 0` simultaneously. A zero bearing alone
+           or zero speed alone does not trigger a drop; both must be zero.
+        2. Remove rows where `sea_ice_speed >= 25.0 m s⁻¹` (50 km files)
+           or `>= 35.0 m s⁻¹` (75 km files).
         3. Remove rows where `Maxcorr2 <= Maxcorr1`.
-    
+
         **Scene-level rejection (levels '02' and '03', entire scene
         discarded if):**
-    
+
         1. Fewer than 60% of rows have `Maxcorr2 > Maxcorr1`, evaluated
            after the bearing/speed validity drop but before the per-row
            Maxcorr drop.
         2. Remaining row count falls below `ignore_vector_threshold` after
            all per-row drops.
-    
-        - Each filter step is logged individually, reporting rows dropped and
-          the scene identifier. Rejected scenes are logged at WARNING level;
-          accepted scenes and per-row drops at INFO level.
+
+        - Each filter step is logged individually, reporting rows dropped
+          and the scene identifier. Rejected scenes are logged at WARNING
+          level; accepted scenes and per-row drops at INFO level.
         - The 60% Maxcorr check precedes the per-row Maxcorr drop
           intentionally: a scene where the majority of vectors have poor
           correlation is rejected outright rather than thinned.
