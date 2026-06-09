@@ -82,7 +82,7 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0b1a2e; colo
 <body>
 
 <div class="header">
-  <h1>🌊 PolarWatch — Sea Ice Velocity (SAR)</h1>
+  <h1> PolarWatch — Sea Ice Velocity (SAR)</h1>
   <span class="subtitle">Daily Drift Vectors · 12 km · Northern Hemisphere</span>
 </div>
 
@@ -263,41 +263,51 @@ drawLegend();
 
 // ── Map ───────────────────────────────────────────────────────────────────────
 proj4.defs('EPSG:3413', '+proj=stere +lat_0=90 +lat_ts=70 +lon_0=-45 +k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs');
-const crs = new L.Proj.CRS('EPSG:3413',
-  '+proj=stere +lat_0=90 +lat_ts=70 +lon_0=-45 +k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs',
-  { resolutions: [8000, 4000, 2000, 1000, 500, 250], origin: [-4194304, 4194304] }
+const crs = new L.Proj.CRS('EPSG:3413', '+proj=stere +lat_0=90 +lat_ts=70 +lon_0=-45 +k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs',
+  { resolutions: [8000, 4000, 2000, 1000, 500, 250], origin: [-3843750.0, 5856250.0] }
 );
 const map = L.map('map', { crs, center: [90, 0], zoom: 0, minZoom: 0, maxZoom: 5, zoomControl: false });
 L.control.zoom({ position: 'topright' }).addTo(map);
 
+map.on('zoomstart', () => {
+  loadingEl.classList.remove('hidden');
+});
+
+map.on('zoomend', () => {
+  // Small delay lets Leaflet finish repainting before hiding overlay
+  setTimeout(() => loadingEl.classList.add('hidden'), 200);
+});
+
 // ── Reference layers ──────────────────────────────────────────────────────────
 let landLayer, coastLayer, gratLayer;
-let refLayersLoaded = false;
 
 async function loadReferenceLayers() {
   const [landRes, coastRes, gratRes] = await Promise.all([
-    fetch('data/land.geojson').then(r => r.json()),
-    fetch('data/10m_coastline_50N.geojson').then(r => r.json()),
-    fetch('data/graticule_50N.geojson').then(r => r.json()),
+    fetch('maps/land_polygons_50N.geojson').then(r => r.json()),
+	fetch('maps/10m_coastline_50N.geojson').then(r => r.json()),
+    fetch('maps/graticule_50N.geojson').then(r => r.json())
   ]);
   landLayer = L.geoJSON(landRes, {
-    style: { fillColor: '#e8ecf0', fillOpacity: 0.7, stroke: false }, interactive: false
+    style: { weight: 0, fillColor: '#c8d4b8', fillOpacity: 1.0 }, interactive: false
   }).addTo(map);
   coastLayer = L.geoJSON(coastRes, {
-    style: { color: '#999', weight: 1.2, opacity: 0.8 }, interactive: false
-  }).addTo(map);
+    style: { color: '#222222', weight: 0.8, opacity: 1.0 }, interactive: false
+  }).addTo(map);  
   gratLayer = L.geoJSON(gratRes, {
-    style: f => ({ color: '#aaa', weight: 0.7, opacity: 0.6, dashArray: f.properties.type === 'lat' ? '4 4' : '2 6' }),
+    style: f => {
+        if (f.properties.value === 50 && f.properties.type === 'lat') {
+            // 50N boundary — prominent dashed circle
+            return { color: '#666', weight: 1.0, opacity: 1.0, dashArray: '4 4' };
+        }
+        if (f.properties.type === 'lat') {
+            // Other lat lines
+            return { color: '#888', weight: 0.5, opacity: 1.0, dashArray: '3 5' };
+        }
+        // Lon lines — solid, slightly more visible
+        return { color: '#888', weight: 0.5, opacity: 1.0, dashArray: null };
+    },
     interactive: false
   }).addTo(map);
-  gratRes.features.forEach(f => {
-    const coords = f.geometry.coordinates, p = f.properties;
-    let pt, text;
-    if (p.type === 'lat') { const m = coords[Math.floor(coords.length/2)]; pt = [m[1],m[0]]; text = `${p.value}°N`; }
-    else { pt = [coords[0][1],coords[0][0]]; text = p.value===0?'0°':p.value>0?`${p.value}°E`:`${-p.value}°W`; }
-    L.marker(pt, { icon: L.divIcon({ className:'grat-label', html:text, iconSize:[44,14], iconAnchor:[22,7] }), interactive:false }).addTo(map);
-  });
-  refLayersLoaded = true;
 }
 
 // ── Arrow rendering ───────────────────────────────────────────────────────────
@@ -338,9 +348,10 @@ function drawArrows(vectors, scale, opacity) {
     arrowLayer.addLayer(line);
   });
 
-  arrowLayer.addTo(map);
   if (coastLayer) coastLayer.bringToFront();
+  if (landLayer) landLayer.bringToFront();
   if (gratLayer) gratLayer.bringToFront();
+  arrowLayer.addTo(map);
 }
 
 function getFilteredVectors() {
@@ -348,17 +359,28 @@ function getFilteredVectors() {
 }
 
 function updateDisplay() {
+  // Draw GMASI first so all other layers render on top
+  drawGmasi(currentGmasiData);
+
   const filtered = getFilteredVectors();
   const scale = parseFloat(document.getElementById('scaleRange').value);
   const opacity = parseFloat(document.getElementById('opacityRange').value);
-  drawArrows(filtered, scale, opacity);
-  
+  drawArrows(filtered, scale, 1.0);
+
   if (document.getElementById('showBuoys').checked && allBuoyVectors.length > 0) {
-    drawBuoys(allBuoyVectors, scale, opacity);
+    drawBuoys(allBuoyVectors, scale, 1.0);
   } else {
     if (buoyLayer) { map.removeLayer(buoyLayer); buoyLayer = null; }
   }
 
+  // Layer order back to front: GMASI → coast → land → SAR → buoys → graticule
+  if (gmasiLayer)  gmasiLayer.bringToFront();
+  if (coastLayer)  coastLayer.bringToFront();
+  if (landLayer) landLayer.bringToFront();
+  if (arrowLayer)  arrowLayer.bringToFront();
+  if (buoyLayer)   buoyLayer.bringToFront();
+  if (gratLayer)   gratLayer.bringToFront();
+  
   const speeds = filtered.map(v => v[4]);
   if (speeds.length > 0) {
     const sum = speeds.reduce((a,b) => a+b, 0);
@@ -371,34 +393,36 @@ function updateDisplay() {
   }
 }
 
+// ── GMASI Ice Coverage Layer ──────────────────────────────────────────────────
+let gmasiLayer = null;
+let currentGmasiData = null;  // store geojson between date load and display
+
+function drawGmasi(geojson) {
+  if (gmasiLayer) { map.removeLayer(gmasiLayer); gmasiLayer = null; }
+  if (!geojson || !geojson.features || geojson.features.length === 0) return;
+
+  const canvas = L.canvas({ padding: 0.5 });
+  gmasiLayer = L.geoJSON(geojson, {
+    renderer: canvas,
+    style: { fillColor: '#ffffff', fillOpacity: 1.0, color: '#ffffff', weight: 1.0, opacity: 1.0 },
+    interactive: false
+  }).addTo(map);
+}
+
 // ── Buoy Layer ───────────────────────────────────────────────────────────────────
 function drawBuoys(vectors, scale, opacity) {
   if (buoyLayer) map.removeLayer(buoyLayer);
   buoyLayer = L.layerGroup();
-
   vectors.forEach(v => {
-    const [lon1, lat1, lon2, lat2] = v;
-    // Two-tone buoy arrows contrasts with all color scales and is safe for all color vision types.
-    const outerColor = '#000000';
-    const innerColor = '#ffffff';
-	const outerWeight = Math.max(5.0, scale * 2.5);
-	const innerWeight = Math.max(3.0, scale * 1.4);
-
+    const [buoy_id, lon1, lat1, lon2, lat2] = v;
+    const weight = Math.max(3.0, scale * 1.8);
     const p1 = crs.projection.project(L.latLng(lat1, lon1));
     const p2 = crs.projection.project(L.latLng(lat2, lon2));
     const pdx = p2.x - p1.x, pdy = p2.y - p1.y;
     const len = Math.sqrt(pdx * pdx + pdy * pdy);
-
-    // Draw black outline then white fill for both shaft and arrowhead
-    const lineOuter = L.polyline([[lat1, lon1], [lat2, lon2]], {
-      color: outerColor, weight: outerWeight, opacity, interactive: false
-    });
-    const lineInner = L.polyline([[lat1, lon1], [lat2, lon2]], {
-      color: innerColor, weight: innerWeight, opacity, interactive: false
-    });
-    buoyLayer.addLayer(lineOuter);
-    buoyLayer.addLayer(lineInner);
-
+    buoyLayer.addLayer(L.polyline([[lat1, lon1], [lat2, lon2]], {
+      color: '#000000', weight, opacity, interactive: false
+    }));
     if (len > 0) {
       const headLen = Math.min(len * 0.35, 15000 * scale);
       const angle = Math.atan2(pdy, pdx);
@@ -406,15 +430,16 @@ function drawBuoys(vectors, scale, opacity) {
       const a2 = angle - Math.PI * 0.8;
       const tip1 = crs.projection.unproject(L.point(p2.x + headLen * Math.cos(a1), p2.y + headLen * Math.sin(a1)));
       const tip2 = crs.projection.unproject(L.point(p2.x + headLen * Math.cos(a2), p2.y + headLen * Math.sin(a2)));
-      const headCoords = [[tip1.lat, tip1.lng], [lat2, lon2], [tip2.lat, tip2.lng]];
-      buoyLayer.addLayer(L.polyline(headCoords, { color: outerColor, weight: outerWeight, opacity, interactive: false }));
-      buoyLayer.addLayer(L.polyline(headCoords, { color: innerColor, weight: innerWeight, opacity, interactive: false }));
+      buoyLayer.addLayer(L.polyline(
+        [[tip1.lat, tip1.lng], [lat2, lon2], [tip2.lat, tip2.lng]],
+        { color: '#000000', weight, opacity, interactive: false }
+      ));
     }
   });
-
   buoyLayer.addTo(map);
   if (coastLayer) coastLayer.bringToFront();
   if (gratLayer) gratLayer.bringToFront();
+  if (buoyLayer) buoyLayer.bringToFront();
 }
 
 // ── Hover ─────────────────────────────────────────────────────────────────────
@@ -463,9 +488,9 @@ map.on('mousemove', function(e) {
   let bestBuoy = null, bestBuoyMidDist = Infinity;
   if (document.getElementById('showBuoys').checked) {
     for (const v of allBuoyVectors) {
-      if (inVectorBox(px, py, v[0], v[1], v[2], v[3])) {
-        const p1 = toProjected(v[0], v[1]);
-        const p2 = toProjected(v[2], v[3]);
+	  if (inVectorBox(px, py, v[1], v[2], v[3], v[4])) {
+	    const p1 = toProjected(v[1], v[2]);
+	    const p2 = toProjected(v[3], v[4]);
         const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
         const d = (px - mx)**2 + (py - my)**2;
         if (d < bestBuoyMidDist) { bestBuoyMidDist = d; bestBuoy = v; }
@@ -475,10 +500,10 @@ map.on('mousemove', function(e) {
 
   // Show whichever hit is closer to the mouse; clear if neither box matched.
   if (bestBuoy && bestBuoyMidDist <= bestMidDist) {
-    const spd = bestBuoy[4];
-    const bear = (bestBuoy[5] + 360) % 360;
+    const spd = bestBuoy[5];
+    const bear = (bestBuoy[6] + 360) % 360;
     document.getElementById('hoverVal').textContent = `${spd.toFixed(1)} km/day`;
-    document.getElementById('hoverDetail').textContent = `Bearing: ${bear.toFixed(0)}° · Buoy`;
+    document.getElementById('hoverDetail').textContent = `Bearing: ${bear.toFixed(0)}° · Buoy ID: ${bestBuoy[0]}`;
   } else if (best) {
     const spd = best[4];
     const bear = (best[5] + 360) % 360;
@@ -517,46 +542,66 @@ function setStatus(msg, isError = false) {
 }
 
 async function loadDate(dateStr) {
-  // dateStr is "YYYYMMDD"
   loadingEl.classList.remove('hidden');
   noDataEl.classList.add('hidden');
 
   try {
-    const resp = await fetch(`data/si_velocity_${dateStr}.json`);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const data = await resp.json();
+    // Load SAR vectors
+    try {
+      const resp = await fetch(`SIVelocity_SAR/si_velocity_${dateStr}.json`);
+      if (resp.ok) {
+        const data = await resp.json();
+        allVectors = data.vectors;
+        document.getElementById('dateRange').textContent = `${data.date1} → ${data.date2}`;
+        document.getElementById('vecCount').textContent = `${data.count.toLocaleString()} total`;
+      } else {
+        allVectors = [];
+      }
+    } catch {
+      allVectors = [];
+    }
 
-    allVectors = data.vectors;
-    document.getElementById('dateRange').textContent = `${data.date1} → ${data.date2}`;
-    document.getElementById('vecCount').textContent = `${data.count.toLocaleString()} total`;
+    // Load buoy vectors
+    try {
+      const buoyResp = await fetch(`BuoyVelocity/buoy_velocity_${dateStr}.json`);
+      if (buoyResp.ok) {
+        const buoyData = await buoyResp.json();
+        allBuoyVectors = buoyData.vectors ?? [];
+      } else {
+        allBuoyVectors = [];
+      }
+    } catch {
+      allBuoyVectors = [];
+    }
 
-	// Load buoy vectors for the same date
-	try {
-	  const buoyResp = await fetch(`data/buoy_velocity_${dateStr}.json`);
-	  if (buoyResp.ok) {
-		const buoyData = await buoyResp.json();
-		allBuoyVectors = buoyData.vectors ?? [];
-	  } else {
-		allBuoyVectors = [];
-	  }
-	} catch {
-	  allBuoyVectors = [];
-	}
-	
-    updateDisplay();
+    // Load GMASI ice coverage
+    let gmasiLoaded = false;
+    try {
+      const gmasiResp = await fetch(`GMASI_Sea_Ice/gmasi_${dateStr}.geojson`);
+      if (gmasiResp.ok) {
+        currentGmasiData = await gmasiResp.json();
+        gmasiLoaded = true;
+      } else {
+        currentGmasiData = null;
+      }
+    } catch {
+      currentGmasiData = null;
+    }
 
-    const idx = availableDates.indexOf(dateStr);
-    const pos = idx >= 0 ? `${idx + 1} of ${availableDates.length}` : '';
-    setStatus(pos);
+    // Show no-data warning only if all three sources are empty
+    const hasData = allVectors.length > 0
+                 || allBuoyVectors.length > 0
+                 || gmasiLoaded;
+    if (!hasData) {
+      noDataEl.classList.remove('hidden');
+      setStatus('No data for this date', true);
+    } else {
+      updateDisplay();
+      const idx = availableDates.indexOf(dateStr);
+      const pos = idx >= 0 ? `${idx + 1} of ${availableDates.length}` : '';
+      setStatus(pos);
+    }
 
-  } catch (err) {
-    allVectors = [];
-    if (arrowLayer) { map.removeLayer(arrowLayer); arrowLayer = null; }
-    document.getElementById('dateRange').textContent = '—';
-    document.getElementById('vecCount').textContent = '—';
-    ['statMin','statMax','statMean','statN'].forEach(id => document.getElementById(id).textContent = '—');
-    noDataEl.classList.remove('hidden');
-    setStatus('No data for this date', true);
   } finally {
     loadingEl.classList.add('hidden');
   }
@@ -603,7 +648,7 @@ async function init() {
   // Load reference layers and available dates in parallel
   const [_, datesData] = await Promise.allSettled([
     loadReferenceLayers(),
-    fetch('data/available_dates.json').then(r => r.json()),
+    fetch('SIVelocity_SAR/available_dates.json').then(r => r.json()),
   ]);
 
   if (datesData.status === 'fulfilled' && Array.isArray(datesData.value) && datesData.value.length > 0) {

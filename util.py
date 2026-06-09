@@ -41,9 +41,15 @@ Copyright notice
 
 
 # =============================================================
+# Grid projections
+#
+# Polar stereographic
 # Grid navigation functions from 
 # https://github.com/nsidc/polarstereo-lonlat-convert-py/blob/
 # main/polar_convert/polar_convert.py
+#
+# EASE 2.0 Grid
+# https://nsidc.org/data/user-resources/help-center/guide-ease-grids
 # =============================================================
 
 # The grid size cell dimensions in km
@@ -208,6 +214,48 @@ def _polar_lonlat_to_ij(longitude, latitude, grid_size, hemisphere):
     
     return [i, j]
 
+    
+def _ease2_lonlat_to_ij(lons, lats, config):
+    """
+    Convert WGS84 lon/lat to EASE-Grid 2.0 North 12.5 km grid indices.
+
+    Projects geographic coordinates (EPSG:4326) into EASE-Grid 2.0 North
+    (EPSG:6931) and computes 0-based (i, j) grid cell indices, where i is
+    the column (x direction) and j is the row (y direction, 0 = top/north).
+
+    Expects standard -180 to 180 longitudes (unlike _polar_lonlat_to_ij
+    which requires 0-360).
+
+    Parameters:
+        lons (array-like): Longitudes in degrees (-180 to 180, EPSG:4326).
+        lats (array-like): Latitudes in degrees (EPSG:4326).
+        config (dict): Configuration dictionary. Must include:
+            - 'transformer_6931' (pyproj.Transformer): Cached transformer
+              for EPSG:4326 → EPSG:6931 conversion. Created once upstream
+              and reused across calls to avoid the per-call cost of
+              Transformer.from_crs(), which involves PROJ database access
+              and pipeline compilation.
+
+    Returns:
+        tuple: (i, j) as numpy int64 arrays of grid column and row indices.
+               Points outside the grid are not explicitly checked; callers
+               should validate against grid bounds if needed.
+    """
+    
+    import numpy as np
+
+    EASE2_N_ORIGIN_X = -9_000_000.0
+    EASE2_N_ORIGIN_Y =  9_000_000.0
+    RES = 12_500.0
+
+
+    mx, my = config['transformer_6931'].transform(lons, lats)
+
+    i = np.floor((mx - EASE2_N_ORIGIN_X) / RES).astype(np.int64)
+    j = np.floor((EASE2_N_ORIGIN_Y - my) / RES).astype(np.int64)
+
+    return i, j  
+
 
 #=========================
 # Standard error messaging
@@ -296,6 +344,9 @@ def _download_sar_drift_files(config):
     from bs4 import BeautifulSoup
     from urllib.parse import urljoin
     import urllib3
+    import ssl
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.ssl_ import create_urllib3_context
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     
     # log activity
@@ -333,21 +384,39 @@ def _download_sar_drift_files(config):
     
     download_folder = config['sar_drift_directory']        
     tqdm_desc = "Downloading SAR drift gfilter files"
-    for file_url in tqdm(download_links, desc=tqdm_desc, unit='file'):
-        filename = os.path.basename(file_url)
-        local_path = os.path.join(download_folder, filename)
-        
-        # Overwrite if already downloaded
-        try:
-            with requests.get(file_url, stream=True, verify=False) as r:
-                r.raise_for_status()
-                with open(local_path, 'wb') as f:
-                    for chunk in r.iter_content(chunk_size=1048576):
-                        f.write(chunk)
-            logger.info(f"Downloaded {filename}")
-        except requests.exceptions.HTTPError as e:
-            logger.warning(f"Skipping {filename}: {e}")
+            
 
+    class TLSAdapter(HTTPAdapter):
+        """
+        Custom HTTP adapter that overrides the default SSL context to handle
+        TLS negotiation issues with www.star.nesdis.noaa.gov. The server
+        intermittently closes connections during handshake with default
+        urllib3 TLS settings. Using a permissive cipher suite and disabling
+        cert verification resolves the EOF errors seen with standard requests.
+        """
+        def init_poolmanager(self, *args, **kwargs):
+            ctx = create_urllib3_context()
+            ctx.set_ciphers('DEFAULT')
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            kwargs['ssl_context'] = ctx
+            return super().init_poolmanager(*args, **kwargs)
+    
+    with requests.Session() as session:
+        session.mount('https://', TLSAdapter())
+        
+        for file_url in tqdm(download_links, desc=tqdm_desc, unit=' file'):
+            filename = os.path.basename(file_url)
+            local_path = os.path.join(download_folder, filename)
+            try:
+                r = session.get(file_url, verify=False, timeout=(10, 120))
+                r.raise_for_status()
+                with open(local_path, 'w') as f:
+                    f.write(r.text)
+                logger.info(f"Downloaded {filename}")
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"Skipping {filename}: {e}")            
+ 
 
 def _read_gfilter_file(args):
     """
@@ -536,9 +605,10 @@ def _check_existing_files(scene_output_stub, config):
     epsg  = str(config['epsg'])
     lvl   = f"Processing Level - {config['level']} (PL{config['level']})"
     yr    = start[:4]
-    nc_dir   = os.path.join(config['file_server'], epsg, lvl, yr, 'nc')
-    gpkg_dir = os.path.join(config['file_server'], epsg, lvl, yr, 'gpkg')
-    data_dir = os.path.join(config['file_server'], epsg, lvl, 'data')
+    file_server = config[f"file_server_{epsg}"]
+    nc_dir   = os.path.join(file_server, 'data_files', lvl, yr, 'nc')
+    gpkg_dir = os.path.join(file_server, 'data_files', lvl, yr, 'gpkg')
+    data_dir = os.path.join(file_server, 'viewer', 'SIVelocity_SAR')
 
 
     # check NetCDF scenes
@@ -546,7 +616,7 @@ def _check_existing_files(scene_output_stub, config):
     if config['level'] in ['00', '01', '02']:
         nc_scenes_exists = os.path.exists(os.path.join(
             nc_dir,
-            f"SIVelocity_SAR_{start}_{end}_scenes_12km_NH_{config['epsg']}"
+            f"SIVelocity_SAR_{start}_{end}_scenes_12km_NH_{epsg}"
             f"_PL{config['level']}_v{config['version']}.nc"
         ))
         
@@ -555,7 +625,7 @@ def _check_existing_files(scene_output_stub, config):
     if config['level'] in ['00', '01', '02', '03']:
         nc_daily_exists = os.path.exists(os.path.join(
             nc_dir,
-            f"SIVelocity_SAR_{start}_{end}_daily_12km_NH_{config['epsg']}"
+            f"SIVelocity_SAR_{start}_{end}_daily_12km_NH_{epsg}"
             f"_PL{config['level']}_v{config['version']}.nc"
         ))
 
@@ -564,24 +634,17 @@ def _check_existing_files(scene_output_stub, config):
     if config['level'] in ['00', '02', '03']:
         gpkg_exists = os.path.exists(os.path.join(
             gpkg_dir,
-            f"SIVelocity_SAR_{start}_{end}_daily_12km_NH_{config['epsg']}"
+            f"SIVelocity_SAR_{start}_{end}_daily_12km_NH_{epsg}"
             f"_PL{config['level']}_v{config['version']}.gpkg"
         ))
         
-    # check JSON (check both since buoy data are a day behind SAR drift data)
-    si_json_exists = True
+    # check JSON
+    json_exists = True
     if config['level'] in ['00', '03']:
-        si_json_exists = os.path.exists(
+        json_exists = os.path.exists(
             os.path.join(data_dir, f"si_velocity_{start}.json")
         )
-    buoy_json_exists = True
-    if config['level'] in ['00', '03']:
-        buoy_json_exists = os.path.exists(
-            os.path.join(data_dir, f"buoy_velocity_{start}.json")
-        )
 
-    json_exists = si_json_exists and buoy_json_exists
-    
    
     result = {
         'nc_scenes': nc_scenes_exists,
@@ -589,6 +652,7 @@ def _check_existing_files(scene_output_stub, config):
         'gpkg': gpkg_exists,
         'json': json_exists
     }
+    
     return result
 
 
@@ -627,84 +691,72 @@ def _detect_skip_rows(input_file):
     )
     
     
-def _set_metadata(config):
+def _load_cdl_as_dataset(config):
     """
-    Generate a NetCDF metadata template from an EPSG-specific CDL file
-    and load it as an xarray.Dataset.
+    Generate an in-memory xarray Dataset from an EPSG-specific CDL file.
 
     Constructs the EPSG-specific CDL filename from the base CDL path in
-    config (e.g. 'meta/sar_drift_output.cdl' becomes
-    'meta/sar_drift_output_3413.cdl'), runs `ncgen` to convert it to a
-    NetCDF file, and loads the result with xarray. The output .nc file is
-    named using both the EPSG code and processing level to avoid collisions
-    across projections and levels.
+    config (e.g. 'sar_drift_output.cdl' becomes
+    'sar_drift_output_3413.cdl'), runs `ncgen` to convert it to a temporary
+    NetCDF file in a 'tmp' subdirectory of meta_dir, loads the result into
+    memory, then deletes the temporary file. No .nc file is permanently
+    written to the meta directory.
 
     The returned dataset contains only metadata (attributes and structure)
-    and is typically used as a template whose attributes are applied to a
-    data-driven NetCDF file.
+    and is used as a template whose attributes and coordinates are applied
+    to a data-driven NetCDF file.
 
     Parameters:
         config (dict): Configuration dictionary containing:
-            - 'netcdf_cdl_file' (str): Path to the base CDL file
-                                       (e.g. 'meta/sar_drift_output.cdl').
+            - 'meta_dir' (str): Directory containing CDL files. A 'tmp'
+                                subdirectory is created here if it does
+                                not already exist.
+            - 'netcdf_cdl_file' (str): Base CDL filename
+                                       (e.g. 'sar_drift_output.cdl').
             - 'epsg' (str | int): EPSG code used to select the correct
-                                  CDL file (e.g. 3413).
-            - 'level' (str): Processing level used in the output .nc filename
-                             (e.g. '03'). One of '00', '01', '02', '03'.
+                                  CDL file (e.g. 3413 or 6931).
 
     Returns:
-        xarray.Dataset: Dataset containing only metadata from the
-                        generated NetCDF file, opened with
-                        decode_times=False.
+        xarray.Dataset: In-memory dataset containing metadata, coordinates,
+                        and empty data variables from the CDL template,
+                        opened with decode_times=False.
 
     Raises:
-        SystemExit: If the `ncgen` command fails or returns a non-zero
-                    exit code.
+        SystemExit: If the CDL file is not found or `ncgen` returns a
+                    non-zero exit code.
     """
-
+    
     import util
     import os
     import subprocess
     import xarray as xr
-    
-    
-    cdl_file = os.path.join(config['meta_dir'], config['netcdf_cdl_file'])
-    cdl_file_dir = os.path.dirname(cdl_file)
-    cdl_file_basename = os.path.basename(cdl_file)
-    cdl_file_stem = os.path.splitext(cdl_file_basename)[0]
-    epsg_cdl_file = os.path.join(
-        cdl_file_dir,
-        f'{cdl_file_stem}_{config["epsg"]}.cdl'
-    )
-    if not os.path.exists(epsg_cdl_file):
-        util.error_msg(f"Cannot find `{epsg_cdl_file}`")
-        
-    ncgen_ofile_nc = os.path.join(
-        cdl_file_dir,
-        f'{cdl_file_stem}_{config["epsg"]}_{config["level"]}.nc'
-    )
-    
-    
-    # Run ncgen command to generate the netCDF file from CDL
-    myCmd1 = " ".join(
-        [
-            "ncgen",
-            "-o",
-            ncgen_ofile_nc,
-            epsg_cdl_file,
-        ]
-    )
-        
-    rc = subprocess.call(myCmd1, shell=True)
-    if rc != 0:
-        error_msg(
-            'Error in `ncgen` call. Cannot continue.\n'
-            f'Command: {myCmd1}\nError Code: {rc}'
+
+    cdl_file_path = config[f"netcdf_cdl_file_{config['epsg']}"]
+    cdl_file_basename = os.path.splitext(os.path.basename(cdl_file_path))[0]
+
+    if not os.path.exists(cdl_file_path):
+        util.error_msg(f"Cannot find `{cdl_file_path}`")
+
+    tmp_dir = os.path.join(config['meta_dir'], 'tmp')
+    os.makedirs(tmp_dir, exist_ok=True)
+    tmp_nc = os.path.join(tmp_dir, f'{cdl_file_basename}.nc')
+
+    try:
+        rc = subprocess.call(
+            f'ncgen -o {tmp_nc} {cdl_file_path}',
+            shell=True
         )
-        
-    with xr.open_dataset(ncgen_ofile_nc, decode_times=False) as ds:
-        # .load() pulls data into memory so the file can close
-        return ds.load()
+        if rc != 0:
+            util.error_msg(
+                'Error in `ncgen` call. Cannot continue.\n'
+                f'Command: ncgen -o {tmp_nc} {cdl_file_path}\n'
+                f'Error Code: {rc}'
+            )
+        with xr.open_dataset(tmp_nc, decode_times=False) as ds:
+            return ds.load()
+    finally:
+        if os.path.exists(tmp_nc):
+            os.remove(tmp_nc)
 
 
 def _apply_projection(df_raw, epsg, config):
@@ -1041,444 +1093,6 @@ def _embed_qml_style(gpkg_path, layer_name, config):
     conn.commit()    
     conn.close()
 
-
-def _add_json_templates(data_dir, config):
-    """
-    Copy reference map template files into the viewer's data directory if
-    they are not already present.
-
-    Ensures that the static GeoJSON files required by the HTML viewer
-    (land, coastline, graticules, grid) are available in `data_dir` before
-    the viewer is served. Files that already exist at the destination are
-    left untouched.
-
-    Args:
-        data_dir (str): Destination directory where template files must be
-                        present. Typically the `data/` subdirectory adjacent
-                        to the HTML viewer file.
-        config (dict): Configuration dictionary. Must include:
-                - 'meta_dir' (str): Directory containing the source template
-                  files. Expected files are 'land.json', 'coastline.json',
-                  'graticules.json', and 'grid.json'.
-
-    Returns:
-        None
-
-    Notes:
-        - Only missing files are copied; existing files are not overwritten.
-        - `data_dir` must already exist before this function is called.
-    """
-    
-    import os
-    import shutil
-
-    for template_name in config['geojson_templates']:
-        src_path = os.path.join(config['meta_dir'], template_name)
-        dest_path = os.path.join(data_dir, template_name)
-        if not os.path.exists(dest_path):
-            shutil.copy(src_path, dest_path)
-    
-
-def _download_uw_iabp_buoy_data(config):
-    """
-    Download and compile UW IABP buoy observation data for the date range
-    covered by the current SAR drift dataset.
-
-    Fetches the active buoy list from the UW IABP tables URL, downloads
-    individual buoy `.txt` files, combines them into a single DataFrame,
-    filters to the SAR drift date range, and saves the compiled output as
-    a dated CSV file. If a matching compiled file already exists and
-    `overwrite` is False, the existing file is loaded and validated instead.
-
-    Args:
-        config (dict): Configuration dictionary. Must include:
-                - 'uw_iabp_buoy_url' (str): Base URL for individual buoy
-                  `.txt` file downloads.
-                - 'uw_iabp_buoy_tables' (str): URL of the `.js` file
-                  listing active buoy identifiers.
-                - 'uw_iabp_buoy_filename' (str): Base filename for the
-                  compiled output CSV; the date range is appended
-                  automatically.
-                - 'buoy_dir' (str): Directory for downloaded buoy `.txt`
-                  files and the compiled CSV.
-                - 'start_date' (date): Minimum date_start from the SAR
-                  drift data; used as the lower bound for filtering.
-                - 'end_date' (date): Maximum date_start from the SAR
-                  drift data; used as the upper bound for filtering.
-                - 'overwrite' (bool): If True, re-download and recompile
-                  even if a matching compiled file already exists.
-
-    Returns:
-        pandas.DataFrame: Compiled buoy observation DataFrame filtered
-            to the SAR drift date range, with columns including
-            `'time (UTC)'`, lat/lon positions, and buoy metadata.
-
-    Raises:
-        SystemExit: Via `error_msg` if the stored file's date range does
-            not cover `config['start_date']`, indicating the buoy data
-            needs to be re-downloaded.
-
-    Notes:
-        - The compiled CSV is named using the start and end dates:
-          `<uw_iabp_buoy_filename>_<start_date>_<end_date>.csv`.
-        - Individual buoy `.txt` files are saved to `buoy_dir` and
-          reused on subsequent runs unless the buoy is active (recent
-          observations may be incomplete until the buoy stops
-          transmitting).
-        - Data is only available from 2010 onward.
-        - Observations with invalid coordinates or physically impossible
-          values are filtered out.
-        - Progress is displayed via `tqdm` during the download phase.
-        - SSL verification is disabled via `urllib3.disable_warnings`.
-    """
-    
-    import requests
-    import os
-    import glob
-    import pandas as pd
-    from tqdm import tqdm
-    import urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    
-    import logging
-    
-    
-    logger = logging.getLogger('sar_drift_converter')
-    
-    # Use previous file found for date range
-    complete_buoy_data_file_basename = (
-        os.path.splitext(config['uw_iabp_buoy_filename'])[0]
-    )
-    
-    start_date_str  = config['start_date'].strftime('%Y-%m-%d')
-    end_date_str  = config['end_date'].strftime('%Y-%m-%d')
-    
-    
-    os.makedirs(config['buoy_dir'], exist_ok=True)
-    complete_buoy_data_file = os.path.join(
-        config['buoy_dir'],
-        f'{complete_buoy_data_file_basename}_{start_date_str}_'
-        f'{end_date_str}.csv'
-    )
-    
-    
-    if os.path.exists(complete_buoy_data_file) and not config['overwrite']:
-        logger.info(
-            "Loading previously downloaded data file | "
-            f"{complete_buoy_data_file}"
-          )
-        df = pd.read_csv(
-            complete_buoy_data_file,
-            delimiter=',',
-            header=0,
-            low_memory=False
-        )
-        
-        # check start and end dates match  the corresponding dates
-        # in stored data file before continuing
-        df['time (UTC)'] = pd.to_datetime(df['time (UTC)'])
-        min_date = df['time (UTC)'].dt.date.min()
-        max_date = df['time (UTC)'].dt.date.max()
-        if min_date < config['start_date']:
-            error_msg(
-                f"The start date in the stored file {min_date} does not "
-                "match the SAR drift data start date"
-                f"{config['start_date']}. The buoy data needs to be "
-                "downloaded. Either set `overwrite`=true in config file or "
-                f" delete {complete_buoy_data_file}"
-            )
-
-        if max_date > config['end_date']:
-            error_msg(
-                f"The end date in the stored file {max_date} does not "
-                "match the SAR drift data end date"
-                f"{config['end_date']}. The buoy data needs to be "
-                "downloaded. Either set `overwrite`=true in config file or "
-                f" delete {complete_buoy_data_file}"
-            )
-        
-        return df
-    
-    
-    # get high-level buoy attributes
-    url = config['uw_iabp_buoy_tables']
-    js_text = requests.get(url, verify=False).text
-    data_entries = js_text.split('\n')
-    
-    cols = [
-        'BuoyID', 'WMO', 'Start Year', 'Buoy Type', 'Owner', 'Logistics', 
-        'Latest Report', 'Latest Latitude', 'Latest Longitude',
-        'Latest BP', 'Latest Ts', 'Latest Ta'
-    ]
-    buoy_data = []
-    for entry in data_entries:
-        if entry.startswith('['):
-            # convert entry into a list
-            entry = entry.replace('"', '').replace('[', '').replace(']','')
-            entry_list = entry.split(',')                                  
-            buoy_data.append(entry_list[0:12]) # only take 12 columns
-    df_buoy_table = pd.DataFrame(columns=cols, data=buoy_data)
-    
-    # fix `Latest Report` column set NaN to 2012-12-31 00:00:00
-    df_buoy_table['Latest Report'] = pd.to_datetime(
-        df_buoy_table['Latest Report'], errors='coerce'
-    )
-    default_date = pd.Timestamp("2012-12-31 00:00:00")
-    df_buoy_table['Latest Report'] = (
-        df_buoy_table['Latest Report'].fillna(default_date)
-    )
-
-
-    df_buoy_table['report_date'] = (
-        df_buoy_table['Latest Report'].dt.strftime('%Y-%m-%d')
-    )
-        
-    
-    # Filter buoys whose latest report falls within the configured date range    
-    date_range_mask = (
-        (df_buoy_table['report_date'].notna()) &
-        (df_buoy_table['report_date'] >= start_date_str) &
-        (df_buoy_table['report_date'] <= end_date_str)
-    )
-    in_range_buoy_list = df_buoy_table.loc[date_range_mask, 'BuoyID'].unique()
-    
-    
-    # download each buoy file
-    logger.info(
-        f"Downloading UW IABP buoy data | {config['start_date']} "
-        f"to {config['end_date']} | Total buoys {len(in_range_buoy_list)}"
-    )
-    for buoy_id in tqdm(
-            in_range_buoy_list,
-            desc='Downloading buoy data',
-            unit='buoy file'
-        ):
-        logger.info(f"Downloading buoy {buoy_id}")
-        buoy_file = os.path.join(config['buoy_dir'], f"{buoy_id}.txt")
-        url = f"{config['uw_iabp_buoy_url']}?bid={buoy_id}"
-        buoy_text = requests.get(url, verify=False).text
-        with open(buoy_file, 'w', encoding='utf-8') as txt:
-            txt.write(buoy_text)
-
-            
-    # create new complete buoy data CSV file
-    downloaded_buoy_list = []
-    for buoy_path in tqdm(glob.glob(os.path.join(
-            config['buoy_dir'], '*.txt')),
-            desc='Building complete buoy data file',
-            unit='buoy'
-        ):
-        if 'copy' in buoy_path:
-            # corrupted downloaded files with have `copy` in file name
-            continue
-        
-        with open(buoy_path, 'r', encoding='UTF-8') as txt:
-            for idx, line in enumerate(txt):
-                line = line.strip()
-                if line and idx > 0: # skip heading
-                    downloaded_buoy_list.append(line.split(','))
-
-
-    # create data frame of all downloaded buoys
-    df = pd.DataFrame(downloaded_buoy_list)
-    df = df.iloc[:, [0, 1, 4, 6, 7]].copy()
-    df.columns = ['BuoyID', 'Year', 'DOY', 'Lat', 'Lon']
-    df['Year'] = df['Year'].astype(int)
-    df['DOY']  = df['DOY'].astype(float)
-    base_year = pd.to_datetime(df['Year'].astype(str), format='%Y')
-    full_datetime = base_year + pd.to_timedelta(df['DOY'] - 1, unit='D')
-    df['time (UTC)'] = full_datetime
-    df['date'] = df['time (UTC)'].dt.strftime('%Y-%m-%d')
-    df.drop(['Year', 'DOY'], axis=1, inplace=True)
-    
-    
-    # reduce observations to match start and end dates
-    date_filter = (
-        (df['date'] >= start_date_str) &
-        (df['date'] <= end_date_str)
-    )
-    df = df[date_filter]
-    
-    
-    # rename geographic coordinate columns
-    df.rename(columns={
-        'BuoyID': 'buoy_id',
-        'Lon': 'lon',
-        'Lat': 'lat'
-    }, inplace=True)
-    df['lat'] = df['lat'].astype(float)
-    df['lon'] = df['lon'].astype(float)
-
-    df.to_csv(complete_buoy_data_file, index=False)
-    
-    return df
-
-
-def _load_buoy_data(config):
-    import numpy as np
-    import pandas as pd
-    import logging
-    from tqdm import tqdm
-    
-    print('Opening buoy data file...')
-    
-    logger = logging.getLogger('sar_drift_converter')
-    
-    df = _download_uw_iabp_buoy_data(config)
-    df['time (UTC)'] = pd.to_datetime(
-        df['time (UTC)'], format='%Y-%m-%dT%H:%M:%SZ'
-    )
-    
-    logger.info(f'Loaded buoy data | {df.shape[0]} rows')
-        
-    # Filter out buoys below 50°N (outside Arctic/sub-Arctic)
-    # region of interest
-    df_filter = (df['lat'] >= 50.0)
-    df = df[df_filter].copy()
-    
-    
-    # If -180 appears for lon and -90 appears for lat,
-    # it is a false reading. Also filter out invalid coordiantes!           
-    df_filter = (
-        (df['lat'] != -90.0) &
-        (df['lon'] != -180.0) &
-        (df['lat'].between(-90.0, 90.0)) &
-        (df['lon'].between(-180.0, 360.0))
-    )            
-    df = df[df_filter].copy()
-
-   
-    # Take the first observation of each day per buoy regardless of hour,
-    # since hour==0 is unreliable. Some buoys report multiple times in the
-    # first hour and some days have no midnight observation at all
-    df = (
-        df.groupby(['buoy_id', 'date'], as_index=False)
-          .first()
-          .sort_values(['buoy_id', 'time (UTC)'])
-    )
-    
-    buoys_skipped = []
-    drift_results = []
-    
-    buoy_groups = list(df.groupby('buoy_id'))
-    for buoy_id, df_buoy in tqdm(
-            buoy_groups, desc='Processing buoys', unit='buoy'
-        ):
-    
-        # Cannot track buoys without zero-hour observations
-        if df_buoy.shape[0] == 0:
-            buoys_skipped.append(f'{buoy_id}: no zero-hour observations')
-            continue
-
-        
-        # Skip buoy if there is just one observation
-        # (no drift interval possible)
-        first_obs = df_buoy['date'].iloc[0]
-        last_obs  = df_buoy['date'].iloc[-1]
-        if first_obs == last_obs:
-            buoys_skipped.append(f'{buoy_id}: only one observation')
-            continue
-        
-                
-        """
-        For each buoy, create two aligned slices of the midnight-only rows:
-          starts = every row except the last
-          ends   = every row except the first
-        When paired by position, each start row lines up with the very next
-        midnight observation for that buoy, forming one drift interval per row.
-        `groupby` ensures the last row of one buoy never bleeds into the
-        next buoy.
-        """
-        starts = df_buoy.iloc[:-1].reset_index(drop=True)
-        ends   = df_buoy.iloc[1:].reset_index(drop=True)
-    
-        drift_df = pd.DataFrame({
-            'buoy_id':     starts['buoy_id'],
-            'date':        starts['date'],
-            'latitude_1':  starts['lat'],
-            'longitude_1': starts['lon'],
-            'latitude_2':  ends['lat'],
-            'longitude_2': ends['lon'],
-            'duration':    (
-                ends['time (UTC)'] - starts['time (UTC)']
-            ).dt.total_seconds()
-        })
-    
-        
-        drift = pd.DataFrame(_calculate_drift_daily(
-            lat1=drift_df['latitude_1'].values,
-            lon1=drift_df['longitude_1'].values,
-            lat2=drift_df['latitude_2'].values,
-            lon2=drift_df['longitude_2'].values,
-            duration=drift_df['duration'].values,
-            epsg=config['epsg']
-        ))
-        drift.insert(0, 'buoy_id', drift_df['buoy_id'].values)
-        drift.insert(1, 'date', drift_df['date'].values)
-        drift.insert(2, 'latitude_1', drift_df['latitude_1'].values)
-        drift.insert(3, 'longitude_1', drift_df['longitude_1'].values)
-        drift.insert(4, 'latitude_2', drift_df['latitude_2'].values)
-        drift.insert(5, 'longitude_2', drift_df['longitude_2'].values)
-        
-        # as with SAR drift filter, remove buoys where drift > 25 km/day
-        speed_filter = (drift['speed_kmdy'] <= 25)
-        drift = drift[speed_filter].copy()
-        
-        drift_results.append(drift)
-    
-    # Combine all buoys into a single DataFrame
-    drift_all = pd.concat(drift_results, ignore_index=True)
-    
-    # round values
-    drift_all['latitude_1'] = np.round(
-        drift_all['latitude_1'], config['coordinate_precision']
-    )
-    drift_all['longitude_1'] = np.round(
-        drift_all['longitude_1'], config['coordinate_precision']
-    )
-    drift_all['latitude_2']= np.round(
-        drift_all['latitude_2'], config['coordinate_precision']
-    )
-    drift_all['longitude_2'] = np.round(
-        drift_all['longitude_2'], config['coordinate_precision']
-    )
-    drift_all['X1'] = np.round(drift_all['X1'], config['coordinate_precision'])
-    drift_all['Y1'] = np.round(drift_all['Y1'], config['coordinate_precision'])
-    drift_all['X2'] = np.round(drift_all['X2'], config['coordinate_precision'])
-    drift_all['Y2'] = np.round(drift_all['Y2'], config['coordinate_precision'])
-    drift_all['dx'] = np.round(
-        drift_all['dx'], config['displacement_precision']
-    )
-    drift_all['dy'] = np.round(
-        drift_all['dy'], config['displacement_precision']
-    )
-    drift_all['distance'] = np.round(
-        drift_all['distance'], config['displacement_precision']
-    )
-    drift_all['distance_geod']  = np.round(
-        drift_all['distance_geod'], config['displacement_precision']
-    )
-    drift_all['bearing'] = np.round(
-        drift_all['bearing'], config['bearing_precision']
-    )
-    drift_all['u']= np.round(drift_all['u'], config['displacement_precision'])
-    drift_all['v']= np.round(drift_all['v'], config['displacement_precision'])
-    drift_all['speed_ms'] = np.round(
-        drift_all['speed_ms'], config['displacement_precision']
-    )
-    drift_all['speed_kmdy'] = np.round(
-        drift_all['speed_kmdy'], config['displacement_precision']
-    )
-
-    # log skipped buoys
-    if buoys_skipped:
-        logger.info(f'Skipped {len(buoys_skipped)} buoy(s) |')
-        for msg in buoys_skipped:
-            logger.info(f'Buoy skipped | {msg}')
-
-    
-    return drift_all
-    
     
 def _get_layer_name(scene_id):
     """
@@ -1527,231 +1141,205 @@ def _get_layer_name(scene_id):
     return layer_name
 
 
-
-def _update_interactive_html_files(config, epsg):
+def _update_interactive_html_files(config):
     """
-    Write or refresh the interactive HTML index file and supporting web
-    assets for the given EPSG output directory.
+    Write or refresh the interactive HTML index and vector map viewer
+    files, and copy supporting web assets, for the given EPSG output
+    directory.
 
-    Reads the `index.html` template, substitutes the EPSG label,
-    description, available year range, and viewer path, then writes the
-    result to `<file_server>/<epsg>/index.html`. Copies CSS, JS, image,
-    and web font support folders from `meta_dir` to the file server. Then
-    calls `_update_buoys_vectors` to write or refresh all per-day buoy
-    JSON files for the level `03` data directory.
+    Reads two HTML templates — the drill-down index and the interactive
+    Leaflet vector map viewer — applies EPSG-specific substitutions via
+    regex, and writes the results to the file server. Copies CSS, JS,
+    image, and webfont support folders from ``meta_dir`` to the file
+    server root, and copies GeoJSON reference files to the viewer's
+    ``maps/`` subdirectory.
 
-    This function is called once per EPSG for levels '00' and '03' during
-    `process_level_output`, before the day loop begins.
+    This function is called once per EPSG for levels ``'00'`` and
+    ``'03'`` during ``process_level_output``, before the day loop begins.
 
     Args:
         config (dict): Configuration dictionary. Must include:
-                - 'file_server' (str): Root output path.
-                - 'html_index_template' (str): Path to the index.html
-                  template file.
-                - 'html_vector_template' (str): Filename of the vector
-                  viewer HTML used to construct the viewer path constant
-                  in the index.
-                - 'webpage_folders' (list[str]): Folder names to copy
-                  from `meta_dir` to the file server EPSG directory
-                  (e.g. `['css', 'js', 'image', 'webfonts']`).
-                - 'meta_dir' (str): Directory containing web support
-                  folders and template files.
-                - 'start_date' (date): Minimum date_start across all
-                  input data; used to derive the start year for the
-                  `AVAILABLE_YEARS` constant.
-                - 'end_date' (date): Maximum date_start across all input
-                  data; used to derive the end year.
-                - 'buoy_drift' (pandas.DataFrame): Full buoy drift
-                  DataFrame passed through to `_update_buoys_vectors`.
-                - 'epsg' (int): Target EPSG code; used to construct the
-                  buoy data directory path.
-        epsg (int): EPSG code for the output directory (3413 or 6931).
-            Controls which EPSG label and description are substituted
-            into the template and which subdirectory receives the files.
+
+            - ``'epsg'`` (int): Target EPSG code (3413 or 6931).
+            - ``'file_server_<epsg>'`` (str): Root output path for the
+              given EPSG, e.g. ``'file_server_3413'``.
+            - ``'html_index_template'`` (str): Path to the ``index.html``
+              template file.
+            - ``'html_vector_template'`` (str): Path to the interactive
+              vector map HTML template.
+            - ``'webpage_folders'`` (list[str]): Folder names to copy
+              from ``meta_dir`` to the file server root
+              (e.g. ``['css', 'js', 'image', 'webfonts']``).
+            - ``'geojson_templates'`` (list[str]): GeoJSON filenames to
+              copy from ``meta_dir`` into ``viewer/maps/``.
+            - ``'meta_dir'`` (str): Directory containing web support
+              folders and template files.
+            - ``'start_date'`` (date): Minimum ``date_start`` across all
+              input data; used to derive the start year for the
+              ``AVAILABLE_YEARS`` constant.
+            - ``'end_date'`` (date): Maximum ``date_start`` across all
+              input data; used to derive the end year.
 
     Returns:
         None
 
     Notes:
-        - The following JavaScript constants are updated in the template
-          via regex substitution: `EPSG_LABEL`, `EPSG_DESC`,
-          `AVAILABLE_YEARS`, and `HTML_VIEWER_PATH`.
+        - The following JavaScript constants are updated in
+          ``index.html`` via regex: ``EPSG_LABEL``, ``EPSG_DESC``, and
+          ``AVAILABLE_YEARS``.
+        - The following are updated in the vector map viewer via regex:
+          ``proj4.defs``, ``L.Proj.CRS`` constructor, ``origin``, and
+          the CRS label in the sidebar info box.
         - Web support folders at the destination are deleted and
           re-copied on each call to ensure stale assets are replaced.
-        - Buoy JSON files are written for the level `03` data directory
-          only: `<file_server>/<epsg>/Processing Level - 03 (PL03)/data/`.
+        - GeoJSON files are only copied if they do not already exist at
+          the destination.
     """
-    
+
     import os
     import shutil
     import re
+    import json
 
-    EPSG_META = {
+    epsg = config['epsg']
+
+    # template content per EPSG
+    _, imax, jmax, xmin, ymin = _grid_params(12.5, NORTH)
+    xmin_m = xmin * 1000
+    ymin_m = ymin * 1000
+    xmax_m = xmin_m + imax * 12500
+    ymax_m = ymin_m + jmax * 12500
+    proj_bounds = f'[[{ymin_m}, {xmin_m}], [{ymax_m}, {xmax_m}]]'
+    
+    EPSG_PROJ = {
         3413: {
-            'label': 'EPSG:3413',
+            'proj4_name': 'EPSG:3413',
+            'proj4_def':  (
+                '+proj=stere +lat_0=90 +lat_ts=70 +lon_0=-45 +k=1 +x_0=0 '
+                '+y_0=0 +datum=WGS84 +units=m +no_defs'
+            ),
             'desc':  'NSIDC Sea Ice Polar Stereographic North',
+            'origin': f'[{xmin_m}, {ymax_m}]',
+            'bounds': proj_bounds
         },
         6931: {
-            'label': 'EPSG:6931',
+            'proj4_name': 'EPSG:6931',
+            'proj4_def':  (
+                '+proj=laea +lat_0=90 +lon_0=0 +x_0=0 +y_0=0 '
+                '+datum=WGS84 +units=m +no_defs'
+            ),
             'desc':  'NSIDC EASE-Grid 2.0 North',
+            'origin': '[-9000000, 9000000]',
+            'bounds': '[[-9000000, -9000000], [9000000, 9000000]]'
         },
     }
 
-    # year range
-    start_year = config['start_date'].year
-    end_year   = config['end_date'].year
-    years      = list(range(start_year, end_year + 1))
-    years_range   = '[' + ', '.join(str(y) for y in years) + ']'
-
-    # Read template
-    index_html_template_path = config['html_index_template']
-    with open(index_html_template_path, 'r') as f:
-        html_content = f.read()
-
-
-    # update template content
-    epsg_label = EPSG_META[epsg]['label']
-    epsg_desc  = EPSG_META[epsg]['desc']
-
-    html_content = re.sub(
-        r"const EPSG_LABEL\s*=\s*'[^']*';",
-        f"const EPSG_LABEL = '{epsg_label}';",
-        html_content
-    )
-    html_content = re.sub(
-        r"const EPSG_DESC\s*=\s*'[^']*';",
-        f"const EPSG_DESC  = '{epsg_desc}';",
-        html_content
-    )
-    html_content = re.sub(
-        r"const AVAILABLE_YEARS\s*=\s*\[[^\]]*\];",
-        f"const AVAILABLE_YEARS = {years_range};",
-        html_content
-    )
-    viewer_path = (
-        f"Processing%20Level%20-%2003%20(PL03)/"
-        f"{os.path.basename(config['html_vector_template'])}"
-    )
-    html_content = re.sub(
-        r"const HTML_VIEWER_PATH\s*=\s*'[^']*';",
-        lambda _: f"const HTML_VIEWER_PATH = '{viewer_path}';",
-        html_content
-    )
     
-    # create index.html
-    index_html_path = os.path.join(
-        config['file_server'], str(epsg), 'index.html'
+    proj = EPSG_PROJ[epsg]
+    file_server = config[f"file_server_{epsg}"]
+    view_directory = os.path.join(file_server, 'viewer')
+    os.makedirs(view_directory, exist_ok=True)
+
+    # update interactive vector map
+    with open(config['html_vector_template'], 'r') as f:
+        viewer_content = f.read()
+
+    # proj4.defs line
+    viewer_content = re.sub(
+        r"proj4\.defs\('EPSG:\d+',\s*'[^']*'\);",
+        lambda _: (
+            f"proj4.defs('{proj['proj4_name']}', '{proj['proj4_def']}');"
+        ),
+        viewer_content
     )
-    os.makedirs(os.path.dirname(index_html_path), exist_ok=True)
+    # L.Proj.CRS constructor
+    viewer_content = re.sub(
+        r"new L\.Proj\.CRS\('EPSG:\d+',\s*'[^']*',",
+        lambda _: (
+            f"new L.Proj.CRS('{proj['proj4_name']}', '{proj['proj4_def']}',"
+        ),
+        viewer_content
+    )
+    # origin inside CRS options
+    viewer_content = re.sub(
+        r"origin:\s*\[-?\d+,\s*-?\d+\]",
+        lambda _: f"origin: {proj['origin']}",
+        viewer_content
+    )
+    # CRS label in the sidebar info box
+    viewer_content = re.sub(
+        r"CRS: EPSG:[\d?]+",
+        lambda _: f"CRS: {proj['proj4_name']}",
+        viewer_content
+    )
+
+    viewer_out_path = os.path.join(
+        view_directory, os.path.basename(config['html_vector_template'])
+    )
+    with open(viewer_out_path, 'w') as f:
+        f.write(viewer_content)
+        
+
+    # update index.html
+    # derive year range from available_dates.json if it exists,
+    # otherwise fall back to config start/end dates
+    available_dates_path = os.path.join(
+        file_server, 'viewer', 'SIVelocity_SAR', 'available_dates.json'
+    )
+    if os.path.exists(available_dates_path):
+        with open(available_dates_path, 'r', encoding='utf-8') as f:
+            available_dates = json.load(f)
+        years = sorted({int(d[:4]) for d in available_dates if len(d) >= 4})
+    else:
+        start_year = config['start_date'].year
+        end_year   = config['end_date'].year
+        years = list(range(start_year, end_year + 1))
+    
+    years_js = '[' + ', '.join(str(y) for y in years) + ']'
+
+    with open(config['html_index_template'], 'r') as f:
+        index_content = f.read()
+
+    index_content = re.sub(
+        r"const EPSG_LABEL\s*=\s*'[^']*';",
+        lambda _: f"const EPSG_LABEL = '{proj['proj4_name']}';",
+        index_content
+    )
+    index_content = re.sub(
+        r"const EPSG_DESC\s*=\s*'[^']*';",
+        lambda _: f"const EPSG_DESC  = '{proj['desc']}';",
+        index_content
+    )
+    index_content = re.sub(
+        r"const AVAILABLE_YEARS\s*=\s*\[[^\]]*\];",
+        lambda _: f"const AVAILABLE_YEARS = {years_js};",
+        index_content
+    )
+
+    index_html_path = os.path.join(file_server, 'index.html')
     with open(index_html_path, 'w') as f:
-        f.write(html_content)
+        f.write(index_content)
+        
 
     # copy css/js support folders
     for dir_name in config['webpage_folders']:
         src = os.path.join(config['meta_dir'], dir_name)
-        dst = os.path.join(config['file_server'], str(epsg), dir_name)
+        dst = os.path.join(file_server, dir_name)
         if os.path.isdir(src):
             if os.path.exists(dst):
                 shutil.rmtree(dst)
             shutil.copytree(src, dst)
-            
-            
-    # update buoy JSON files
-    data_dir = os.path.join(
-        config['file_server'],  str(config['epsg']),
-        'Processing Level - 03 (PL03)', 'data'
-    )
-    _update_buoys_vectors(data_dir, config)
-    
 
-def _update_buoys_vectors(data_dir, config):
-    """
-    Write per-day buoy drift JSON files for all dates in the buoy drift
-    DataFrame stored in config.
+    # copy geojson files
+    maps_dir = os.path.join(view_directory, 'maps')
+    os.makedirs(maps_dir, exist_ok=True)
+    for template_name in config['geojson_templates']:
+        src_path  = os.path.join(config['meta_dir'], template_name)
+        dest_path = os.path.join(maps_dir, template_name)
+        if not os.path.exists(dest_path):
+            shutil.copy(src_path, dest_path)
 
-    Buoy observation data from the UW IABP dataset may be delayed relative
-    to SAR drift data. This function iterates over all available buoy data
-    and writes or overwrites a per-day JSON file for each date that has at
-    least one observation. Running on the full DataFrame each time ensures
-    delayed observations are always captured regardless of when they arrive.
 
-    Args:
-        data_dir (str): Directory path where per-day buoy JSON files are
-            written. Each file is named `buoy_velocity_<YYYYMMDD>.json`.
-        config (dict): Configuration dictionary. Must include:
-                - 'buoy_drift' (pandas.DataFrame): Full buoy drift
-                  DataFrame with columns:
-                      - 'date' (str): Observation date ('YYYY-MM-DD').
-                      - 'longitude_1', 'latitude_1' (float): Start
-                        position (EPSG:4326, degrees).
-                      - 'longitude_2', 'latitude_2' (float): End
-                        position (EPSG:4326, degrees).
-                      - 'speed_kmdy' (float): Drift speed (km day⁻¹).
-                      - 'bearing' (float): Forward azimuth (degrees).
-
-    Returns:
-        None
-
-    Notes:
-        - Per-day JSON files are only written when at least one buoy
-          observation exists for that date.
-        - Each JSON payload follows the format:
-            {
-              'date1': 'YYYY-MM-DD',
-              'date2': 'YYYY-MM-DD',
-              'count': int,
-              'vectors': [[lon1, lat1, lon2, lat2, speed_kmdy, bearing], ...]
-            }
-        - The JSON is written without indentation for compact output.
-        - Existing files are overwritten unconditionally.
-        - Progress is displayed via a tqdm progress bar keyed on unique
-          dates in the DataFrame.
-    """
-    import os
-    import json
-    import logging
-    from tqdm import tqdm
-
-    logger = logging.getLogger('sar_drift_converter')
-    os.makedirs(data_dir, exist_ok=True)
-
-    df_buoy_drift = config['buoy_drift']
-    groups = list(df_buoy_drift.groupby('date'))
-
-    for date, group in tqdm(groups, desc='Writing buoy JSON files'):
-        date_str = str(date).replace('-', '')
-
-        vectors = [
-            [
-                float(row.longitude_1),
-                float(row.latitude_1),
-                float(row.longitude_2),
-                float(row.latitude_2),
-                float(row.speed_kmdy),
-                float(row.bearing)
-            ]
-            for row in group.itertuples(index=False)
-        ]
-
-        if len(vectors) == 0:
-            continue
-
-        payload = {
-            'date1':   str(date),
-            'date2':   str(date),
-            'count':   len(vectors),
-            'vectors': vectors
-        }
-
-        json_path = os.path.join(
-            data_dir, f'buoy_velocity_{date_str}.json'
-        )
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(payload, f, separators=(',', ':'))
-
-        logger.info(f'Updated buoy JSON {json_path}')
-            
-            
 #=============
 # Calculations
 #=============
@@ -2554,7 +2142,7 @@ def combine_into_dataframe(files, config):
             executor.map(_read_gfilter_file, args),
             total=len(args),
             desc='Reading gfilter files...',
-            unit='file',
+            unit=' file',
             file=sys.stdout,
             dynamic_ncols=True
         ))
@@ -2621,8 +2209,6 @@ def filter_input_data(df_all, config):
                                  '03' return `df_all` unchanged.
                 - 'ignore_vector_threshold' (int): Minimum number of rows a
                   scene must retain after all per-row drops to be accepted.
-                - 'filtered_data_dir' (str): Output directory for the
-                  unfiltered combined CSV (level '00' only).
     
     Returns:
         pandas.DataFrame: Filtered DataFrame containing only accepted scenes
@@ -2676,7 +2262,7 @@ def filter_input_data(df_all, config):
                 total=total_scenes,
                 miniters=chunks,
                 mininterval=0,
-                unit='scene'
+                unit=' scene'
             ):
             scene_id = f"{file1}_{file2}"
             use_75km = df_scene['_use_75km'].iloc[0]
@@ -2764,7 +2350,7 @@ def filter_input_data(df_all, config):
         print('Saving combined Data Frame...')
         df_all.to_csv(
             os.path.join(
-                config['filtered_data_dir'],'filtered_combined.csv'
+                config['test_output_dir'], 'filtered_combined.csv'
             ),
             index=False
         )    
@@ -2811,11 +2397,11 @@ def create_netcdf(df, nc_path, config, template_ds, multi_layered=False):
     observations. Supports both single-scene and multi-scene (daily)
     output in one unified function.
 
-    Maps input drift vectors onto the NSIDC 12.5 km polar stereographic
-    grid, populates a NetCDF dataset using attributes from a CDL metadata
-    template, crops the output to the spatial extent of all valid
-    observations with padding, and writes the result to disk with
-    compression.
+    Maps input drift vectors onto the target projection grid using the
+    EPSG code in config, populates a NetCDF dataset using attributes from
+    a pre-built template dataset, crops the output to the spatial extent
+    of all valid observations with padding, and writes the result to disk
+    with compression.
 
     For single-scene output (`multi_layered=False`), the DataFrame is
     treated as one scene and written as a single time layer. For daily
@@ -2842,7 +2428,7 @@ def create_netcdf(df, nc_path, config, template_ds, multi_layered=False):
                   azimuth (degrees).
                 - 'outlier_category' (str): Two-digit outlier code. For
                   level '03', only rows with values '00' or '01' are
-                  retained and recoded to -1 before writing.
+                  retained and recoded to np.int16(-1) before writing.
                 - 'Maxcorr1', 'Maxcorr2' (float): Cross-correlation
                   scores; used for `measurement_error` flag in levels
                   '00'/'01'.
@@ -2850,45 +2436,52 @@ def create_netcdf(df, nc_path, config, template_ds, multi_layered=False):
                   controls speed threshold for `speed_error` flag. For
                   multi-layered output this is evaluated per scene group
                   since different scenes may differ.
-        base_name (str): Base filename (without extension). Output is
-            written to `<config['nc_dir']>/<base_name>.nc`.
+        nc_path (str): Full output path for the NetCDF file.
         config (dict): Configuration dictionary. Must include:
-                - 'nc_dir' (str): Output directory.
                 - 'level' (str): Processing level ('00'–'03'); controls
                   inlier filtering, error flag computation, and fill
                   value assignment.
-                - 'epsg' (int): EPSG code used upstream for displacement
-                  computation. Does not affect output grid, which is
-                  always the NSIDC 12.5 km polar stereographic grid.
-        template_ds (xarray.Dataset): Template dataset providing the
-            target grid coordinate arrays and dimensions.
+                - 'epsg' (int): EPSG code controlling which grid index
+                  function is used. Supported values: 3413
+                  (_polar_lonlat_to_ij) and 6931 (_ease2_lonlat_to_ij).
+        template_ds (xarray.Dataset): Pre-built template dataset
+            providing grid coordinate arrays, variable attributes, and
+            global attributes. Built externally via
+            `_load_cdl_as_dataset` and passed in to avoid redundant I/O
+            across calls.
         multi_layered (bool): If False (default), writes a single time
             layer for the scene. If True, groups `df` by `scene_id` and
             writes one time layer per group for daily output.
 
     Returns:
-        str: Path to the written NetCDF file. Returns None early if
-            level is '03' and no rows survive the inlier filter.
+        None
 
     Notes:
-        - The output grid is always the NSIDC 12.5 km polar stereographic
-          grid, regardless of `config['epsg']`.
-        - `time` coordinate uses minimum `date_start` in Julian seconds
-          (seconds since 2000-01-01).
+        - Grid indices are computed per EPSG: EPSG:3413 uses
+          `_polar_lonlat_to_ij` with 0-360 normalized longitudes;
+          EPSG:6931 uses `_ease2_lonlat_to_ij` with standard -180-180
+          longitudes. An unsupported EPSG raises ValueError.
+        - `time` coordinate uses minimum `date_start` per layer in
+          seconds since 2000-01-01 12:00:00 UTC.
         - `time_bnds` spans [min(date_start), max(date_end)] per time
           layer.
-        - `layer_id` is set to `scene_id` for each time layer.
+        - `layer_id` is set to the formatted scene_id for each time
+          layer.
         - The bounding box crop uses all finite `sea_ice_speed` values
-          across the full grid, regardless of whether output is single-
-          scene or multi-scene. A 4-cell pad is applied on each side.
-        - Duplicate (i, j) assignments within a time layer are detected
-          and logged; the last observation written wins.
+          collapsed across all time layers. A 4-cell pad is applied on
+          each side.
+        - If two observations map to the same (i, j) within a time layer,
+          the last one written wins (numpy fancy-index behavior).
         - All int16 flag variables use -9 as `_FillValue`.
-        - For level '03', `outlier_category` is recoded to -1 for all
-          written observations.
+        - For level '03', `outlier_category` is recoded to np.int16(-1)
+          for all retained observations.
+        - For level '03', if no rows survive the inlier filter the
+          function returns early with no file written.
         - For `multi_layered=True`, `speed_error` threshold is evaluated
           per scene group using that group's `_use_75km` value, since
           scenes within a day may differ.
+        - `bearing_error` is set to 1 if `direction_of_sea_ice_
+          displacement == 0` or `sea_ice_speed <= 0`, else 0.
     """
 
     import numpy as np
@@ -2911,17 +2504,16 @@ def create_netcdf(df, nc_path, config, template_ds, multi_layered=False):
     if config['level'] == '03':
         outlier_filter = df_copy['outlier_category'].isin(['00', '01'])
         df_copy = df_copy[outlier_filter].copy()
-        df_copy['outlier_category'] = -1
+        df_copy['outlier_category'] = np.int16(-1)
         if df_copy.shape[0] == 0:
             logger.info('All outliers found. No data to process.')
-            return None
-
+            return
 
     # compute error flags per row for levels 00/01
     if config['level'] in ['00', '01']:
         df_copy['bearing_error'] = (
             (df_copy['direction_of_sea_ice_displacement'] == 0) &
-            (df_copy['sea_ice_speed'] == 0)
+            (df_copy['sea_ice_speed'] <= 0)
         ).astype(int)
 
         # speed threshold varies per scene - apply per scene_id group
@@ -2944,21 +2536,42 @@ def create_netcdf(df, nc_path, config, template_ds, multi_layered=False):
     # map all observations to (i, j) grid indices
     lons = df_copy["longitude_1"].to_numpy(dtype=float)
     lats = df_copy["latitude_1"].to_numpy(dtype=float)
-    lons_normalized = np.where(lons < 0, lons + 360, lons)
-    i_all, j_all = _polar_lonlat_to_ij(
-        lons_normalized, lats, grid_size=12.5, hemisphere="north"
-    )
+
+    if config['epsg'] == 3413:
+        # _polar_lonlat_to_ij expects 0-360 longitudes
+        lons_normalized = np.where(lons < 0, lons + 360, lons)
+        i_all, j_all = _polar_lonlat_to_ij(
+            lons_normalized, lats, grid_size=12.5, hemisphere="north"
+        )
+        
+        # xmin/ymin from _grid_params are already cell centers (km),
+        # converted to metres here. y flipped to top-down (row 0 = north)
+        # to match the j-flip inside _polar_lonlat_to_ij.
+        RES = 12_500.0
+        _, imax, jmax, xmin, ymin = _grid_params(12.5, NORTH)
+        x_coords = (xmin * 1000) + RES * np.arange(imax)
+        y_coords = (ymin * 1000) + RES * np.arange(jmax)
+        y_coords = y_coords[::-1]  # flip y-coordinates
+        
+    elif config['epsg'] == 6931:
+        i_all, j_all = _ease2_lonlat_to_ij(lons, lats, config)
+        
+        # Cell centers computed from EASE-Grid 2.0 North origin constants.
+        RES = 12_500.0
+        x_coords = -9_000_000.0 + RES * np.arange(1440) + RES / 2
+        y_coords =  9_000_000.0 - RES * np.arange(1440) - RES / 2
+        
+        
+    # assign EPSG-specfic i,j values to data frame copy    
     i_all = np.asarray(i_all, dtype=np.int64)
     j_all = np.asarray(j_all, dtype=np.int64)
     df_copy = df_copy.reset_index(drop=True)
     df_copy['grid_i'] = i_all
     df_copy['grid_j'] = j_all
-
+    
 
     # determine scene groups and time layer count
     epoch = pd.Timestamp('2000-01-01')
-    x_coords = template_ds['x'].values
-    y_coords = template_ds['y'].values
 
     if multi_layered:
         scene_groups = [
@@ -2969,6 +2582,7 @@ def create_netcdf(df, nc_path, config, template_ds, multi_layered=False):
         scene_groups = [(df_copy['scene_id'].iloc[0], df_copy)]
 
     n_time = len(scene_groups)
+
     grid_shape = (n_time, template_ds.sizes['y'], template_ds.sizes['x'])
 
     # build time arrays across all scene groups
@@ -2991,29 +2605,23 @@ def create_netcdf(df, nc_path, config, template_ds, multi_layered=False):
     # create NetCDF file
     netcdf_grid = None
     try:
-        # load CDL metadata attributes
-        meta_ds = _set_metadata(config)
-
-        global_attrs = meta_ds.attrs.copy()
-        sea_ice_speed_attrs = meta_ds["sea_ice_speed"].attrs.copy()
-        sea_ice_x_attrs = meta_ds["sea_ice_x_displacement"].attrs.copy()
-        sea_ice_y_attrs = meta_ds["sea_ice_y_displacement"].attrs.copy()
+        global_attrs = template_ds.attrs.copy()
+        sea_ice_speed_attrs = template_ds["sea_ice_speed"].attrs.copy()
+        sea_ice_x_attrs = template_ds["sea_ice_x_displacement"].attrs.copy()
+        sea_ice_y_attrs = template_ds["sea_ice_y_displacement"].attrs.copy()
         direction_attrs = (
-            meta_ds["direction_of_sea_ice_displacement"].attrs.copy()
+            template_ds["direction_of_sea_ice_displacement"].attrs.copy()
         )
-        outlier_attrs = meta_ds["outlier_category"].attrs.copy()
-        bearing_error_attrs = meta_ds["bearing_error"].attrs.copy()
-        speed_error_attrs = meta_ds["speed_error"].attrs.copy()
-        measurement_error_attrs = meta_ds["measurement_error"].attrs.copy()
-        spatial_ref_attrs = meta_ds["spatial_ref"].attrs.copy()
-        x_attrs = meta_ds["x"].attrs.copy()
-        y_attrs = meta_ds["y"].attrs.copy()
-        time_attrs = meta_ds["time"].attrs.copy()
-        layer_id_attrs = meta_ds["layer_id"].attrs.copy()
+        outlier_attrs = template_ds["outlier_category"].attrs.copy()
+        bearing_error_attrs = template_ds["bearing_error"].attrs.copy()
+        speed_error_attrs = template_ds["speed_error"].attrs.copy()
+        measurement_error_attrs = template_ds["measurement_error"].attrs.copy()
+        spatial_ref_attrs = template_ds["spatial_ref"].attrs.copy()
+        x_attrs = template_ds["x"].attrs.copy()
+        y_attrs = template_ds["y"].attrs.copy()
+        time_attrs = template_ds["time"].attrs.copy()
+        layer_id_attrs = template_ds["layer_id"].attrs.copy()
         time_attrs['coordinates'] = 'layer_id'
-
-        meta_ds.close()
-        del meta_ds
 
         # build empty grid
         netcdf_grid = xr.Dataset(
@@ -3090,34 +2698,27 @@ def create_netcdf(df, nc_path, config, template_ds, multi_layered=False):
 
         # populate grid (one time layer per scene group)
         for t_idx, (scene_id, grp) in enumerate(scene_groups):
-            # seen_key = set()
-            for row in grp.itertuples(index=False):
-                ix = int(row.grid_i)
-                iy = int(row.grid_j)
-                # index_key = (ix, iy)
-                # if index_key in seen_key:
-                #     logger.info(
-                #         f'{scene_id} | Duplicate entry at ({ix}, {iy})'
-                #     )
-                # seen_key.add(index_key)
+            ix = grp['grid_i'].to_numpy(dtype=np.int64)
+            iy = grp['grid_j'].to_numpy(dtype=np.int64)
 
-                netcdf_grid["sea_ice_speed"].values[
-                    t_idx, iy, ix] = np.float32(row.sea_ice_speed)
-                netcdf_grid["sea_ice_x_displacement"].values[
-                    t_idx, iy, ix] = np.float32(row.sea_ice_x_displacement)
-                netcdf_grid["sea_ice_y_displacement"].values[
-                    t_idx, iy, ix] = np.float32(row.sea_ice_y_displacement)
-                netcdf_grid["direction_of_sea_ice_displacement"].values[
-                    t_idx, iy, ix] = np.float32(
-                        row.direction_of_sea_ice_displacement)
-                netcdf_grid["outlier_category"].values[
-                    t_idx, iy, ix] = np.int16(row.outlier_category)
-                netcdf_grid["bearing_error"].values[
-                    t_idx, iy, ix] = np.int16(row.bearing_error)
-                netcdf_grid["speed_error"].values[
-                    t_idx, iy, ix] = np.int16(row.speed_error)
-                netcdf_grid["measurement_error"].values[
-                    t_idx, iy, ix] = np.int16(row.measurement_error)
+            g = netcdf_grid  # alias to keep lines short
+            g["sea_ice_speed"].values[t_idx, iy, ix] = (
+                grp['sea_ice_speed'].to_numpy(dtype=np.float32))
+            g["sea_ice_x_displacement"].values[t_idx, iy, ix] = (
+                grp['sea_ice_x_displacement'].to_numpy(dtype=np.float32))
+            g["sea_ice_y_displacement"].values[t_idx, iy, ix] = (
+                grp['sea_ice_y_displacement'].to_numpy(dtype=np.float32))
+            g["direction_of_sea_ice_displacement"].values[t_idx, iy, ix] = (
+                grp['direction_of_sea_ice_displacement']
+                .to_numpy(dtype=np.float32))
+            g["outlier_category"].values[t_idx, iy, ix] = (
+                grp['outlier_category'].to_numpy(dtype=np.int16))
+            g["bearing_error"].values[t_idx, iy, ix] = (
+                grp['bearing_error'].to_numpy(dtype=np.int16))
+            g["speed_error"].values[t_idx, iy, ix] = (
+                grp['speed_error'].to_numpy(dtype=np.int16))
+            g["measurement_error"].values[t_idx, iy, ix] = (
+                grp['measurement_error'].to_numpy(dtype=np.int16))
 
 
         # crop to bounding box of all finite speed values across all layers
@@ -3190,24 +2791,31 @@ def create_shape_package(df, gpkg_path, config):
     """
     Create a GeoPackage containing drift line vectors for SAR drift data.
 
-    Builds LineString geometries from projected start and end coordinates
-    (EPSG:`config['epsg']`) and writes them to a GeoPackage. For levels
-    '00' and '02', one layer is written per scene pair, named
+    Snaps all observations to the nearest grid cell center for the
+    configured projection (EPSG:3413 or EPSG:6931) before building
+    geometries, consistent with the NetCDF output. LineString geometries
+    are built from the snapped start position to the snapped start plus
+    displacement (X1_snapped + dx, Y1_snapped + dy). For levels '00' and
+    '02', one layer is written per scene pair, named
     `drift_vectors_<scene_id>`. For level '03', a single `drift_vectors`
     layer is written containing only inlier vectors (outlier_category '00'
-    or '01'), with outlier_category recoded to -1. A QML style file is
-    embedded directly into the GeoPackage's `layer_styles` table for each
-    layer for automatic styling when opened in QGIS.
+    or '01'), with outlier_category recoded to -1 and duplicate grid cells
+    deduplicated keeping the last occurrence. A QML style file is embedded
+    directly into the GeoPackage's `layer_styles` table for each layer for
+    automatic styling when opened in QGIS.
 
     Args:
         df (pandas.DataFrame): Input DataFrame containing drift vectors, as
             produced by `read_sar_drift_data_file` and `outlier_search`.
             Expected columns:
                 Projected coordinates (EPSG:`config['epsg']`, metres):
-                    - 'X1', 'Y1' (float): Start position.
-                    - 'X2', 'Y2' (float): End position.
+                    - 'X1', 'Y1' (float): Start position (overwritten by
+                      snapped grid cell center before writing).
+                    - 'X2', 'Y2' (float): End position (overwritten by
+                      snapped start plus displacement before writing).
                 Geographic coordinates (degrees):
-                    - 'longitude_1', 'latitude_1' (float): Start lon/lat.
+                    - 'longitude_1', 'latitude_1' (float): Start lon/lat;
+                      used to compute grid cell snap position.
                     - 'longitude_2', 'latitude_2' (float): End lon/lat.
                 Timestamps and duration:
                     - 'date_start' (str): Start datetime
@@ -3218,8 +2826,10 @@ def create_shape_package(df, gpkg_path, config):
                 Sensor identifiers:
                     - 'sensor1', 'sensor2' (str): Satellite/sensor IDs.
                 Measurement variables:
-                    - 'sea_ice_x_displacement' (float): X displacement (m).
-                    - 'sea_ice_y_displacement' (float): Y displacement (m).
+                    - 'sea_ice_x_displacement' (float): X displacement (m);
+                      added to snapped X1 to compute X2.
+                    - 'sea_ice_y_displacement' (float): Y displacement (m);
+                      added to snapped Y1 to compute Y2.
                     - 'u' (float): X velocity component (m s⁻¹).
                     - 'v' (float): Y velocity component (m s⁻¹).
                     - 'sea_ice_speed' (float): Drift speed (m s⁻¹).
@@ -3243,9 +2853,11 @@ def create_shape_package(df, gpkg_path, config):
                       levels '00' and '02'.
         gpkg_path (str): Full path for the output GeoPackage file.
         config (dict): Configuration dictionary containing:
-                - 'epsg' (int): EPSG code of the projected CRS used for
-                                `X1`, `Y1`, `X2`, `Y2` coordinates and set
-                                as the GeoPackage layer CRS.
+                - 'epsg' (int): EPSG code controlling both the grid snap
+                                function and the GeoPackage layer CRS.
+                                Supported values: 3413
+                                (_polar_lonlat_to_ij, _grid_params) and
+                                6931 (_ease2_lonlat_to_ij).
                 - 'level' (str): Processing level; controls layer structure
                                  and outlier filtering:
                                      '00': one layer per scene, all vectors
@@ -3253,6 +2865,9 @@ def create_shape_package(df, gpkg_path, config):
                                            with outlier_category included
                                      '03': single layer, inliers only,
                                            outlier_category recoded to -1
+                - 'overwrite' (bool): If True and the output file exists,
+                                      it is deleted before writing to
+                                      prevent layer accumulation.
                 - 'outlier_qml_file' (str): Path to the QML style file used
                                             for level '02' (colors vectors
                                             by outlier category).
@@ -3266,22 +2881,28 @@ def create_shape_package(df, gpkg_path, config):
         filtering.
 
     Notes:
-        - Geometry is a `LineString` from `(X1, Y1)` to `(X2, Y2)` in
-          EPSG:`config['epsg']` projected metres, not from geographic
-          coordinates.
+        - X1/Y1 are overwritten with the snapped grid cell center in the
+          target projection. X2/Y2 are set to X1_snapped +
+          sea_ice_x_displacement and Y1_snapped + sea_ice_y_displacement,
+          consistent with NetCDF grid cell assignment.
+        - For EPSG:3413, grid cell centers are derived from _grid_params()
+          with 0-360 normalized longitudes passed to _polar_lonlat_to_ij().
+          For EPSG:6931, cell centers use the EASE-Grid 2.0 North origin
+          constants via _ease2_lonlat_to_ij().
+        - Geometry is a LineString from snapped (X1, Y1) to snapped
+          (X2, Y2) in EPSG:`config['epsg']` projected metres.
         - CRS is set to EPSG:`config['epsg']`.
         - A helper column `geometry_type` is added with the literal value
           `'line'` to identify the layer geometry type.
-        - Only the columns listed in `needed_cols` (plus `outlier_category`
-          where applicable) are written; all other DataFrame columns are
-          excluded.
+        - Only the columns listed in `needed_cols` are written; `_grid_i`
+          and `_grid_j` are internal and excluded from all output layers.
         - For levels '00' and '02', layers are named
           `drift_vectors_<scene_id>`. The first scene is written with
           mode='w' and subsequent scenes with mode='a' to append layers
           without overwriting.
-        - For level '03', duplicate starting positions (longitude_1,
-          latitude_1) are dropped keeping the last occurrence, and a
-          warning is logged if any duplicates are found.
+        - For level '03', duplicate grid cell assignments are dropped
+          keeping the last occurrence, consistent with NetCDF deduplication
+          behavior. A warning is logged if any duplicates are found.
         - The QML style is embedded via `_embed_qml_style` for each layer,
           so end users do not need the QML file present to load the styled
           layer in QGIS.
@@ -3314,6 +2935,32 @@ def create_shape_package(df, gpkg_path, config):
     ]        
     df_local=df_local[needed_cols]
     
+    # snap all observations to grid cell centers, consistent with NetCDF
+    lons = df_local['longitude_1'].to_numpy()
+    lats = df_local['latitude_1'].to_numpy()
+    
+    if config['epsg'] == 3413:
+        lons_normalized = np.where(lons < 0, lons + 360, lons)
+        i, j = _polar_lonlat_to_ij(
+            lons_normalized, lats, grid_size=12.5, hemisphere='north'
+        )
+        RES = 12_500.0
+        _, imax, jmax, xmin, ymin = _grid_params(12.5, NORTH)
+        x_snapped = (xmin * 1000) + RES * i
+        y_snapped = (ymin * 1000) + RES * (jmax - 1 - j)
+    elif config['epsg'] == 6931:
+        i, j = _ease2_lonlat_to_ij(lons, lats, config)
+        RES = 12_500.0
+        x_snapped = -9_000_000.0 + RES * i + RES / 2
+        y_snapped =  9_000_000.0 - RES * j - RES / 2
+    
+    df_local['_grid_i'] = i
+    df_local['_grid_j'] = j
+    df_local['X1'] = x_snapped
+    df_local['Y1'] = y_snapped
+    df_local['X2'] = x_snapped + df_local['sea_ice_x_displacement']
+    df_local['Y2'] = y_snapped + df_local['sea_ice_y_displacement']
+    
     
     
     if config['level'] in ['00', '02']:
@@ -3321,14 +2968,21 @@ def create_shape_package(df, gpkg_path, config):
         unique_test = {}
         scene_idx = 0
         for scene_id, df_scene in df_local.groupby('scene_id'):
-            df_scene = df_scene.copy()
+            df_scene = df_scene.copy().drop(columns=['_grid_i', '_grid_j'])
             
             layer_name = _get_layer_name(scene_id)
     
             if layer_name not in unique_test:
                 unique_test[layer_name] = ''
             else:
-                df_scene.to_csv('duplicate_scene_ids', index=True)
+                if config['level'] == '00':
+                    df_scene.to_csv(
+                        os.path.join(
+                            config['test_output_dir'],
+                            'duplicate_scene_ids'
+                        ),
+                        index=True
+                    )
                 logger.warning(
                     'Duplicate scene id found. |'
                     f'Scene ID: {scene_id} Layer Name: {layer_name}'
@@ -3368,24 +3022,8 @@ def create_shape_package(df, gpkg_path, config):
         df_local = df_local[outlier_filter].copy()
         df_local['outlier_category'] = -1
         if df_local.shape[0] == 0:
-            # it might be possible the data frame was labelled
-            # as all outliers.
             return None
-    
-        # two vectors can have slightly different lon/lat but map to
-        # the same 12.5 km grid cell - keep last occurrence, consistent
-        # with NetCDF and HTML/JSON output deduplication strategy
-        lons = df_local['longitude_1'].to_numpy()
-        lats = df_local['latitude_1'].to_numpy()
-        lons_normalized = np.where(lons < 0, lons + 360, lons)
-        i, j = _polar_lonlat_to_ij(
-            lons_normalized,
-            lats,
-            grid_size=12.5,
-            hemisphere='north'
-        )
-        df_local['_grid_i'] = i
-        df_local['_grid_j'] = j
+
         dupes = df_local.duplicated(
             subset=['_grid_i', '_grid_j'], keep='last'
         )
@@ -3422,75 +3060,94 @@ def create_shape_package(df, gpkg_path, config):
     logger.info(f'Created GeoPackage {gpkg_path}')
            
     
-def create_vector_html_and_json(df, html_path, data_dir, si_json_path,
-                                buoy_json_path, available_dates_path, config):
+def create_vector_html_and_json(df, html_path, data_dir, json_path,
+                                available_dates_path, config):
     """
     Serialize drift vector observations to a compact JSON file and write
     an accompanying interactive HTML viewer.
 
-    Writes a single JSON object containing date metadata and a list of
-    per-vector entries, then produces a self-contained HTML file that loads
-    the JSON from the `data/` subdirectory and renders drift vectors on an
-    interactive Leaflet polar stereographic map. For level '03', only inlier
-    vectors are retained and their outlier category is recoded to '-1' before
-    writing.
+    Snaps all SAR drift observations to the nearest grid cell center for
+    the configured projection (EPSG:3413 or EPSG:6931), back-projects the
+    snapped origin and displaced endpoint to EPSG:4326, and writes a single
+    JSON object containing date metadata and a list of per-vector entries.
+    Produces a self-contained HTML file that loads the JSON from the `data/`
+    subdirectory and renders drift vectors on an interactive Leaflet polar
+    stereographic map. Only inlier vectors (outlier_category '00' or '01')
+    are retained; duplicate grid cell assignments are deduplicated keeping
+    the latest by `date_end`. 
 
     Args:
-        df (pandas.DataFrame): Input drift observations. Expected columns:
+        df (pandas.DataFrame): Input SAR drift observations. Expected
+            columns:
                 - 'longitude_1', 'latitude_1' (float): Start position
-                  (EPSG:4326, degrees).
+                  (EPSG:4326, degrees); used to compute grid cell snap.
+                  Overwritten with back-projected snapped cell center
+                  before writing to JSON.
                 - 'longitude_2', 'latitude_2' (float): End position
-                  (EPSG:4326, degrees).
-                - 'duration' (float): Observation duration (s); written as
-                  a rounded integer in each vector entry.
-                - 'date_start' (datetime-like): Start timestamp; the minimum
-                  value across all rows is written as `date1`
+                  (EPSG:4326, degrees); overwritten with back-projected
+                  snapped origin plus displacement before writing to JSON.
+                - 'sea_ice_x_displacement' (float): X displacement in
+                  projected space (m); added to snapped X1 to compute
+                  the snapped endpoint before back-projection.
+                - 'sea_ice_y_displacement' (float): Y displacement in
+                  projected space (m); added to snapped Y1 to compute
+                  the snapped endpoint before back-projection.
+                - 'sea_ice_speed_kmdy' (float): Drift speed (km day⁻¹);
+                  written directly to the vectors list.
+                - 'direction_of_sea_ice_displacement' (float): Forward
+                  azimuth (degrees); written directly to the vectors list.
+                - 'date_start' (datetime-like): Start timestamp; the
+                  minimum value across retained rows is written as `date1`
                   (format: 'YYYY-MM-DD').
-                - 'date_end' (datetime-like): End timestamp; the maximum
-                  value across all rows is written as `date2`
+                - 'date_end' (datetime-like): End timestamp; used for
+                  duplicate resolution (latest kept) and the maximum value
+                  across retained rows is written as `date2`
                   (format: 'YYYY-MM-DD').
-                - 'outlier_category' (str): Two-digit outlier code. For level
-                  '03', only rows with values '00' or '01' are retained and
-                  the value is recoded to '-1' before writing.
+                - 'outlier_category' (str): Two-digit outlier code; only
+                  rows with values '00' or '01' are retained.
         html_path (str): Full path for the output HTML viewer file. The
-                         parent directory must already exist. The HTML file
-                         references the JSON using only the basename of
-                         `json_path` under a `data/` prefix, so the JSON
-                         file must be placed in a `data/` subdirectory
-                         relative to the HTML file's location.
+                         HTML file references the JSON using only the
+                         basename of `si_json_path` under a `data/`
+                         prefix, so the JSON must be placed in a `data/`
+                         subdirectory relative to the HTML file's location.
         data_dir (str): Directory where reference GeoJSON template files
                         (land, coastline, graticule) are confirmed to exist
                         via `_add_json_templates`. Must be the `data/`
                         subdirectory served alongside the HTML file.
-        json_path (str): Full path for the output JSON file. Parent directory
-                         must already exist.
+        json_path (str): Full path for the output SAR drift JSON file.
+                         Parent directory must already exist.
+        available_dates_path (str): Full path to the JSON file tracking
+                                    all available processed dates. Created
+                                    if it does not exist; `date1` is added
+                                    if not already present.
         config (dict): Configuration dictionary. Must include:
-                - 'level' (str): Processing level; if '03', only inlier
-                  vectors (`outlier_category` in ['00', '01']) are written
-                  and their `outlier_category` is recoded to '-1'.
+                - 'epsg' (int): EPSG code controlling the grid snap
+                                function. Supported values: 3413
+                                (_polar_lonlat_to_ij, _grid_params) and
+                                6931 (_ease2_lonlat_to_ij).
+                - 'html_vector_template' (str): Path to the HTML template
+                  file copied to `html_path`.
 
     Returns:
-        tuple[str, str] or tuple[None, None]: A two-element tuple
-            `(json_path, html_path)` with the paths of the files written,
-            or `(None, None)` if level is '03' and no rows survive the
-            inlier filter.
+        None. Returns early without writing JSON if no rows survive the
+        inlier filter.
 
     Notes:
-        - Each entry in the `vectors` list follows the format:
-            `[lon1, lat1, lon2, lat2, speed_x100, outlier_category]`
-            where `speed_x100` is drift speed in km/day multiplied by 100
-            and rounded to the nearest integer.
-        - `count` reflects the number of vectors actually written, after
-          any level '03' filtering.
+        - SAR vector lon1/lat1 and lon2/lat2 in the JSON are the
+          back-projected EPSG:4326 positions of the snapped grid cell
+          center and snapped endpoint respectively, not the raw observation
+          coordinates. This ensures consistency with NetCDF and GeoPackage
+          outputs.
+        - Each entry in the SAR `vectors` list follows the format:
+          `[lon1, lat1, lon2, lat2, speed_kmdy, bearing]`.
+        - Rows are sorted by `date_end` ascending before deduplication so
+          that the latest observation wins when two vectors map to the same
+          grid cell.
+        - `_grid_i` and `_grid_j` are internal columns used only for
+          deduplication and are not written to any output.
+        - `date1` is added to `available_dates_path` in `YYYYMMDD` format
+          (hyphens stripped) if not already present.
         - The JSON is written without indentation for compact output.
-        - The HTML viewer is produced by reading the template at
-          `config['html_template_file']` and replacing the hardcoded JSON
-          filename in the `fetch('data/...')` call with the basename of
-          `json_path`. All other HTML content is written unchanged.
-        - The HTML viewer requires a `data/` subdirectory adjacent to the
-          HTML file containing the JSON output and the reference GeoJSON
-          files (land, coastline, graticule) confirmed by
-          `_add_json_templates`.
     """
 
     import os
@@ -3498,16 +3155,10 @@ def create_vector_html_and_json(df, html_path, data_dir, si_json_path,
     import numpy as np
     import json
     import logging
+    from pyproj import Transformer
 
     logger = logging.getLogger('sar_drift_converter')
-
-    # confirm template GeoJSON reference files are in data_dir
-    _add_json_templates(data_dir, config)
     
-    # always update HTML viewer
-    shutil.copy(config['html_vector_template'], html_path)
-
-
     df_local = df.copy()
     
     # For HTML output, retain only inlier vectors (outlier_category 00 or 01),
@@ -3520,7 +3171,7 @@ def create_vector_html_and_json(df, html_path, data_dir, si_json_path,
         return
     
     
-    # sort by end date so the duplicate gaurantees to take the last index
+    # sort by end date so the duplicate guarantees to take the last index
     # that has the latest time stamp
     df_local = df_local.sort_values('date_end', ascending=True)
     
@@ -3528,15 +3179,39 @@ def create_vector_html_and_json(df, html_path, data_dir, si_json_path,
     # the same 12.5 km grid cell. if so, keep the latest (i, j) grid cell
     lons = df_local['longitude_1'].to_numpy()
     lats = df_local['latitude_1'].to_numpy()
-    lons_normalized = np.where(lons < 0, lons + 360, lons)
-    i, j = _polar_lonlat_to_ij(
-        lons_normalized,
-        lats,
-        grid_size=12.5,
-        hemisphere='north'
+
+    if config['epsg'] == 3413:
+        lons_normalized = np.where(lons < 0, lons + 360, lons)
+        i, j = _polar_lonlat_to_ij(
+            lons_normalized, lats, grid_size=12.5, hemisphere='north'
+        )
+        RES = 12_500.0
+        _, imax, jmax, xmin, ymin = _grid_params(12.5, NORTH)
+        x_snapped = (xmin * 1000) + RES * i
+        y_snapped = (ymin * 1000) + RES * (jmax - 1 - j)
+    elif config['epsg'] == 6931:
+        i, j = _ease2_lonlat_to_ij(lons, lats, config)
+        RES = 12_500.0
+        x_snapped = -9_000_000.0 + RES * i + RES / 2
+        y_snapped =  9_000_000.0 - RES * j - RES / 2
+
+    # back-project snapped cell centers to EPSG:4326 for Leaflet
+    tf_inv = Transformer.from_crs(
+        f'EPSG:{config["epsg"]}', 'EPSG:4326', always_xy=True
     )
+    lon1_snapped, lat1_snapped = tf_inv.transform(x_snapped, y_snapped)
+
+    # compute end point from snapped origin + displacement, then back-project
+    x2_snapped = x_snapped + df_local['sea_ice_x_displacement'].to_numpy()
+    y2_snapped = y_snapped + df_local['sea_ice_y_displacement'].to_numpy()
+    lon2_snapped, lat2_snapped = tf_inv.transform(x2_snapped, y2_snapped)
+
     df_local['_grid_i'] = i
     df_local['_grid_j'] = j
+    df_local['longitude_1'] = lon1_snapped
+    df_local['latitude_1'] = lat1_snapped
+    df_local['longitude_2'] = lon2_snapped
+    df_local['latitude_2'] = lat2_snapped
 
     dupes = df_local.duplicated(
         subset=['_grid_i', '_grid_j'],
@@ -3573,43 +3248,10 @@ def create_vector_html_and_json(df, html_path, data_dir, si_json_path,
         'vectors': vectors
     }
 
-    with open(si_json_path, 'w', encoding='utf-8') as f:
+    with open(json_path, 'w', encoding='utf-8') as f:
         json.dump(payload, f, separators=(',', ':'))                
 
-    logger.info(f'Created JSON {si_json_path}')
-    
-    
-    # Add buoy_json
-    df_buoy_drift = config['buoy_drift']
-    date_filter = (df_buoy_drift['date'].astype(str) == date1)
-    buoy_daily_drift = df_buoy_drift[date_filter].reset_index(drop=True).copy()
-    
-    vectors = [
-        [
-            float(row.longitude_1),
-            float(row.latitude_1),
-            float(row.longitude_2),
-            float(row.latitude_2),
-            float(row.speed_kmdy),
-            float(row.bearing)
-        ]
-        for row in buoy_daily_drift.itertuples(index=False)
-    ]
-
-    payload = {
-        'date1': date1,
-        'date2': date2,
-        'count': len(vectors),
-        'vectors': vectors
-    }
-    
-    if len(vectors) > 0:
-        # only create bouy JSON if there are buoy data.
-        # Data avaliable lags to SAR drift data available.
-        with open(buoy_json_path, 'w', encoding='utf-8') as f:
-            json.dump(payload, f, separators=(',', ':'))                
-    
-        logger.info(f'Created JSON {buoy_json_path}')
+    logger.info(f'Created JSON {json_path}')
     
     
     # update available dates

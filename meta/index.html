@@ -4,10 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SAR Drift Files</title>
-  <link rel="stylesheet" href="../css/all.min.css" />
-  <link href="../css/bootstrap.min.css" rel="stylesheet" />
-  <link rel="stylesheet" href="../css/pw-theme.css" />
-  <link rel="icon" type="image/png" href="../css/images/noaa_logo_circle_72x72.svg" />
+  <link rel="stylesheet" href="./css/all.min.css" />
+  <link href="./css/bootstrap.min.css" rel="stylesheet" />
+  <link rel="stylesheet" href="./css/pw-theme.css" />
+  <link rel="icon" type="image/png" href="./css/images/noaa_logo_circle_72x72.svg" />
   <style>
     .drill-card {
       cursor: pointer;
@@ -84,7 +84,7 @@
   <nav class="navbar navbar-expand-lg navbar-dark fixed-top">
     <div class="container-fluid px-4 px-lg-5">
       <a class="navbar-brand d-flex align-items-center" href="http://localhost:8000/index.html">
-        <img src="../image/noaa_logo_circle_72x72.svg" alt="NOAA" height="50" class="me-2">
+        <img src="./image/noaa_logo_circle_72x72.svg" alt="NOAA" height="50" class="me-2">
         NOAA PolarWatch
       </a>
       <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
@@ -180,16 +180,16 @@
     </div>
   </footer>
 
-  <script src="../js/bootstrap.bundle.min.js"></script>
+  <script src="./js/bootstrap.bundle.min.js"></script>
   <script>
     // ── CONFIG ─────────────────────────────────────────────────────────────────
     // Python script updates EPSG_LABEL, EPSG_DESC, and AVAILABLE_YEARS.
     // OUTPUT_TYPES defines what each processing level exposes.
     // HTML_VIEWER_PATH points to the interactive vector map HTML file.
 
-    const EPSG_LABEL = 'EPSG:3413';                         // PYTHON: update per folder
-    const EPSG_DESC  = 'NSIDC Sea Ice Polar Stereographic North'; // PYTHON: update per folder
-    const HTML_VIEWER_PATH = 'Processing%20Level%20-%2003%20(PL03)/SIVelocity_SAR_interactive_vector_map.html'; // PYTHON: update if path changes
+    const EPSG_LABEL = '????';  // PYTHON: update per folder
+    const EPSG_DESC  = '????'; // PYTHON: update per folder
+    const HTML_VIEWER_PATH = 'viewer/SIVelocity_SAR_interactive_vector_map.html'; 
 
     // PYTHON: replace this array with available years, e.g. [2024, 2025]
     const AVAILABLE_YEARS = [2024, 2025, 2026];
@@ -355,7 +355,7 @@
         window.open(viewer, '_blank');
       } else {
         // Open the directory listing for nc or gpkg in a new tab
-        const path = `${levelFolder}/${selectedYear}/${type}/`;
+        const path = `data_files/${levelFolder}/${selectedYear}/${type}/`;
         window.open(path, '_blank');
       }
     }

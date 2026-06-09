@@ -42,7 +42,7 @@ Copyright notice
 """
 
 
-def setup_logger(output_dir):
+def setup_logger(config):
     """
     Configure and return a file-based logger for the SAR drift converter run.
 
@@ -79,7 +79,7 @@ def setup_logger(output_dir):
     from datetime import datetime
     
     log_path = os.path.join(
-        output_dir,
+        config['log_dir'],
         f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.log"
     )
     logger = logging.getLogger('sar_drift_converter')
@@ -112,20 +112,12 @@ def read_json_config():
         - "sar_drift_directory"   (str):   Path to directory containing
                                            multiple SAR drift delimited files
                                            for batch processing.
-        - "sar_drift_filename"    (str):   Path to a single SAR drift
-                                           delimited text file.
-        - "uw_iabp_buoy_filename" (str):   Path to downloaded buoy data.
         - "sar_drift_data_url"    (str):   URL that hosts SAR drift gfilter
                                            txt files.
-        - "uw_iabp_buoy_url"      (str):   URL that hosts UQ IABP buoy data
-        - "uw_iabp_buoy_tables"   (str):   .JS file posted online with active
-                                           buoys.
-        - "netcdf_cdl_file"       (str):   Path to the base CDL file used for
-                                           NetCDF metadata. The EPSG-specific
-                                           variant is resolved at runtime by
-                                           _set_metadata().
-        - "netcdf_template_file"  (str):   Path to NetCDF template file on
-                                           which scenes will be built.
+        - "netcdf_cdl_file_3413"  (str):   Path to the base CDL file used for
+                                           NetCDF metadata. The EPSG:3413
+        - "netcdf_cdl_file_6931"  (str):   Path to the base CDL file used for
+                                           NetCDF metadata. EPSG:6931
         - "html_vector_template"  (str):   Path to HTML file that has the code
                                            to display vectors as interactive
                                            quivers with outliers.
@@ -144,32 +136,24 @@ def read_json_config():
                                            graduated vector styles to
                                            GeoPackages when opened in QGIS.
                                            Used for all levels other than '02'.
-        - "buoy_dir"              (str):   Directory containing dowloaded buoy
-                                           data.
         - "meta_dir"              (str):   Directory for template files needed
                                            during processing.
-        - "output_dir"            (str):   Parent directory for all processing
-                                           output. Per-level subdirectories
-                                           are created beneath this path by
-                                           create_level_output() before files
-                                           are finalized to `file_server`.
-                                           Typically set to "level_output".
         - "log_dir"               (str):   Directory for the run log file.
                                            Cleared at the start of each script
                                            run and recreated with a fresh
                                            timestamped log file.
-        - "file_server"           (str):   Path to where output files will be
+        - "file_server_3413"      (list):  Path to where output files will be
                                            saved and retrieved from the
                                            PolarWatch STAC host server.
-        - "clear_output_dir"      (bool):  Remove output directory and all
-                                           contents from previous runs.
+                                           (EPSG:3413)
+        - "file_server_6931"      (list):  Path to where output files will be
+                                           saved and retrieved from the
+                                           PolarWatch STAC host server.
+                                           (EPSG:6931)                                           
         - "overwrite"             (bool):  Overwrite files already created on
                                            the file server.
         - "reprocess_days"        (int):   Number of days to overwrite
                                            previously created data files.
-        - "batch_process"         (bool):  If True, process all files in
-                                           `sar_drift_directory`; if False,
-                                           process single `sar_drift_filename`.
         - "delimiter"             (str):   Field separator in the input
                                            file (e.g., ",", "\\t").
         - "verbose"               (bool):  Print detailed parameter info to
@@ -186,10 +170,9 @@ def read_json_config():
         dict: Validated configuration dictionary with normalized paths and
               outlier algorithm constants sourced from `constants.py`.
               Key highlights:
-              - 'sar_drift_directory':      normalized path (batch mode)
-              - 'sar_drift_file':           normalized path (single-file mode)
-              - 'netcdf_cdl_file':          normalized path to base CDL file
-              - 'netcdf_template_file':     normalized path to NetCDF template
+              - 'sar_drift_directory':      normalized path to input directory
+              - 'netcdf_cdl_file_3413':     normalized path to base CDL file
+              - 'netcdf_cdl_file_6931':     normalized path to base CDL file
               - 'outlier_qml_file':         normalized path to outlier QML
               - 'graduated_qml_file':       normalized path to graduated QML
               - 'ignore_vector_threshold':  sourced from constants.py
@@ -253,14 +236,12 @@ def read_json_config():
     config_keys_no_comments = set(config.keys()) - comment_keys
 
     required_json_keys = {
-        "sar_drift_directory", "sar_drift_filename", "uw_iabp_buoy_filename",
-        "sar_drift_data_url", "uw_iabp_buoy_url", "uw_iabp_buoy_tables",
-        "netcdf_cdl_file", "netcdf_template_file", "html_vector_template",
-        "html_index_template", "webpage_folders", "geojson_templates",
-        "outlier_qml_file", "graduated_qml_file",  "output_dir", "log_dir",
-        "buoy_dir", "meta_dir", "file_server", "clear_output_dir",
-        "batch_process", "overwrite", "reprocess_days", "delimiter",
-        "verbose", "version"
+        'sar_drift_directory', 'sar_drift_data_url', 'netcdf_cdl_file_3413',
+        'netcdf_cdl_file_6931', 'html_vector_template', 'html_index_template',
+        'webpage_folders', 'geojson_templates', 'outlier_qml_file',
+        'graduated_qml_file', 'log_dir', 'meta_dir', 'file_server_3413',
+        'file_server_6931', 'overwrite', 'reprocess_days', 'delimiter',
+        'verbose', 'version'
     }
 
     missing = required_json_keys - config_keys_no_comments
@@ -277,8 +258,6 @@ def read_json_config():
     # define schema
     # (key, expected_type, min_value_or_None, allow_zero)
     schema = [
-        ("batch_process",            bool,  None, None),
-        ("clear_output_dir",         bool,  None, None),
         ("overwrite"       ,         bool,  None, None),
         ("reprocess_days",           int,  None, None),
         ("verbose",                  bool,  None, None)
@@ -296,15 +275,10 @@ def read_json_config():
         config[key] = expected_type(val)
 
     # path resolution and existence checks
-    batch_process = config['batch_process']
     path_checks = [
-        ('sar_drift_directory', None, batch_process),
-        (
-            'sar_drift_filename',
-            config['sar_drift_directory'],
-            not batch_process
-        ),
-        ('netcdf_template_file',  config['meta_dir'], True),
+        ('sar_drift_directory', None, True),
+        ('netcdf_cdl_file_3413', config['meta_dir'], True),
+        ('netcdf_cdl_file_6931', config['meta_dir'], True),
         ('html_vector_template', config['meta_dir'], True),
         ('html_index_template', config['meta_dir'], True),
         ('outlier_qml_file', config['meta_dir'], True),
@@ -326,20 +300,13 @@ def read_json_config():
     # Build final config — output_dir is set by create_level_output()
     config = {
         **resolved_paths,
-        'netcdf_cdl_file':         config['netcdf_cdl_file'],
-        'uw_iabp_buoy_filename':   config['uw_iabp_buoy_filename'],
-        'buoy_dir':                config['buoy_dir'],
         'meta_dir':                config['meta_dir'],
-        'output_dir':              config['output_dir'],
         'log_dir':                 config['log_dir'],
-        'file_server':             config['file_server'],
+        'file_server_3413':        os.path.join(*config['file_server_3413']),
+        'file_server_6931':        os.path.join(*config['file_server_6931']),
         'webpage_folders':         config['webpage_folders'],
         'geojson_templates':       config['geojson_templates'],
         'sar_drift_data_url':      config['sar_drift_data_url'],
-        'uw_iabp_buoy_url':        config['uw_iabp_buoy_url'],
-        'uw_iabp_buoy_tables':     config['uw_iabp_buoy_tables'],
-        'clear_output_dir':        config['clear_output_dir'],
-        'batch_process':           config['batch_process'],
         'overwrite':               config['overwrite'],
         'reprocess_days':          config['reprocess_days'],
         'delimiter':               delimiter,
@@ -362,26 +329,19 @@ def read_json_config():
     if config['verbose']:
         labels = {
             'sar_drift_directory':           'sar drift directory',
-            'sar_drift_filename':            'sar drift file name',
-            'uw_iabp_buoy_filename':         'UW IABP buoy filename',
             'sar_drift_data_url':            'SAR drift data URL',
-            'uw_iabp_buoy_url':              'UW IABP buoy data URL',
-            'uw_iabp_buoy_tables':           'UW IABP buoy tables',
-            'netcdf_cdl_file':               'NetCDF CDL file',
-            'netcdf_template_file':          'NetCDF template file',
+            'netcdf_cdl_file_3413':          'NetCDF CDL file (EPSG:3413)',
+            'netcdf_cdl_file_6931':          'NetCDF CDL file (EPSG:6931)',
             'html_vector_template':          'HTML vector template file',
             'html_index_template':           'index.html template',
             'webpage_folders':               'Supporting index.html files',
             'geojson_templates':             'GeoJSON template files',
             'outlier_qml_file':              'outlier qml file',
             'graduated_qml_file':            'graduated qml file',
-            'buoy_dir':                      'buoy data directory',
             'meta_dir':                      'metadata directory',
-            'output_dir':                    'output directory',
             'log_dir':                       'log directory',
-            'file_server':                   'file server',
-            'clear_output_dir':              'clear output directory',
-            'batch_process':                 'batch process',
+            'file_server_3413':              'file server (EPSG:3413)',
+            'file_server_6931':              'file server (EPSG:6931)',
             'overwrite':                     'overwrite',
             'reprocess_days':                'reprocess days',
             'delimiter':                     'delimiter',
@@ -400,7 +360,7 @@ def read_json_config():
         }
         lines = ["CONF PARAMS:"]
         for key, label in labels.items():
-            lines.append(f"  {label:<25} {config[key]}")
+            lines.append(f"  {label:<30} {config[key]}")
         print('\n'.join(lines))
 
     return config
@@ -547,7 +507,7 @@ def create_scene_output(day, df_day, config, template_ds, exists):
 
         if config['level'] == '00':
             output_path = os.path.join(
-                config['formatted_data_dir'],
+                config['test_output_dir'],
                 f"formatted_{scene_id}.csv"
             )
             df_scene.to_csv(output_path, index=False)
@@ -687,7 +647,7 @@ def create_daily_output(scene_output, config, template_ds, exists):
     # multiple-layered netcdf
     if not exists['nc_scenes']:
         output_dir = os.path.join(
-            config['file_server'], epsg, lvl, yr, 'nc'
+            config[f'file_server_{epsg}'], 'data_files', lvl, yr, 'nc'
         )
         os.makedirs(output_dir, exist_ok=True)
         scenes_nc_path = os.path.join(
@@ -708,7 +668,7 @@ def create_daily_output(scene_output, config, template_ds, exists):
     # single-layer netcdf
     if not exists['nc_daily']:
         output_dir = os.path.join(
-            config['file_server'], epsg, lvl, yr, 'nc'
+            config[f'file_server_{epsg}'], 'data_files', lvl, yr, 'nc'
         )
         os.makedirs(output_dir, exist_ok=True)
         daily_nc_path = os.path.join(
@@ -728,7 +688,9 @@ def create_daily_output(scene_output, config, template_ds, exists):
 
     # GeoPackage
     if not exists['gpkg']:
-        output_dir = os.path.join(config['file_server'], epsg, lvl, yr, 'gpkg')
+        output_dir = os.path.join(
+            config[f'file_server_{epsg}'], 'data_files', lvl, yr, 'gpkg'
+        )
         os.makedirs(output_dir, exist_ok=True)
         gpkg_path = os.path.join(
             output_dir,
@@ -745,8 +707,10 @@ def create_daily_output(scene_output, config, template_ds, exists):
 
     # JSON vectors and HTML viewer
     if not exists['json']:
-        output_dir = os.path.join(config['file_server'], epsg, lvl)
-        data_dir = os.path.join(output_dir, "data")
+        output_dir = os.path.join(
+            config[f'file_server_{epsg}'], 'viewer'
+        )
+        data_dir = os.path.join(output_dir, 'SIVelocity_SAR')
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(data_dir, exist_ok=True)
 
@@ -755,11 +719,8 @@ def create_daily_output(scene_output, config, template_ds, exists):
             os.path.basename(config['html_vector_template'])
         )
                 
-        si_json_path = os.path.join(
+        json_path = os.path.join(
             data_dir, f"si_velocity_{daily_start_date_str}.json"
-        )
-        buoy_json_path = os.path.join(
-            data_dir, f"buoy_velocity_{daily_start_date_str}.json"
         )
         available_dates_path = os.path.join(
             data_dir, 'available_dates.json'
@@ -769,8 +730,7 @@ def create_daily_output(scene_output, config, template_ds, exists):
             df=scene_output['df_scenes'],
             html_path=html_path,
             data_dir=data_dir,
-            si_json_path=si_json_path,
-            buoy_json_path=buoy_json_path,
+            json_path=json_path,
             available_dates_path=available_dates_path,
             config=config
         )
@@ -807,8 +767,6 @@ def create_level_output(df_all, config):
                   input data; set by the caller for levels '00' and '03'.
                 - 'end_date' (date): Maximum date_start across all input
                   data; set by the caller for levels '00' and '03'.
-                - 'buoy_drift' (pandas.DataFrame or None): Loaded buoy
-                  drift DataFrame for levels '00' and '03'; None otherwise.
 
     Workflow:
         1. Validate `level` and `epsg` from config.
@@ -835,21 +793,16 @@ def create_level_output(df_all, config):
 
     Notes:
         - Progress across days is displayed via a `tqdm` progress bar.
-        - `output_dir`, `formatted_data_dir`, `nc_dir`, and
-          `filtered_data_dir` are written into `config` by this function
-          as subdirectories of `output_dir/<level>/`.
         - A `gc.collect()` call is made after each day to release memory
           held by per-scene DataFrames and outlier detection columns.
     """
     
     import util
     import os
-    import shutil
     from datetime import datetime
     from tqdm import tqdm
     import logging
     import pandas as pd
-    import xarray as xr
     import gc
 
     
@@ -873,27 +826,9 @@ def create_level_output(df_all, config):
         f"EPSG={config['epsg']} | {run_start}"
     )
 
-        
-    # Output directory setup
-    config['output_dir'] = os.path.normpath(
-        os.path.join('level_output', f"{config['level']}")
-    )
-    if os.path.exists(config['output_dir']) and config['clear_output_dir']:
-        print(f"Clearing output directory --> {config['output_dir']}")
-        shutil.rmtree(config['output_dir'])
-        
 
-    subdirs = ['filtered_data', 'formatted_data', 'nc']    
-    for name in subdirs:
-        path = os.path.join(config['output_dir'], name)
-        os.makedirs(path, exist_ok=True)
-        config[f'{name}_dir'] = path
-        
-        
-    # load NSIDC polar stereographic EPSG:3411 NetCDF template
-    with xr.open_dataset(config['netcdf_template_file']) as ds:
-        template_ds = ds.load()
-
+    # load CDL file for NetCDF template
+    template_ds = util._load_cdl_as_dataset(config)
     
     # apply row-level filters per File1/File2 scene group
     df_all = util.filter_input_data(df_all, config)
@@ -917,8 +852,12 @@ def create_level_output(df_all, config):
    
     # create output: group by day, then by scene within each day
     start_days = {}
+    tqdm_desc = (
+        f"Processing days (PL: {config['level']}; EPSG: {config['epsg']})..."
+    )
     for day, df_day in tqdm(
-            df_all.groupby('date_range'), "Processing days...", unit='day'
+            df_all.groupby('date_range'), tqdm_desc,
+            unit=' day', unit_scale=False
         ):        
         
         logger.info(f"Processing day: {day}")
@@ -951,8 +890,7 @@ def create_level_output(df_all, config):
         if key not in start_days:
             start_days[key] = ''
         else:
-            print(f"Duplicate {key}")
-            exit()
+            util.error_msg(f"Duplicate {key}")
 
                 
         # combine all created daily files into one
@@ -973,14 +911,14 @@ def create_level_output(df_all, config):
             
             # formatted CSVs
             output_path = os.path.join(
-                config['formatted_data_dir'],
+                config['test_output_dir'],
                 f"{daily_start_date_str}_{daily_end_date_str}_raw.csv"
             )
             df_day.to_csv(output_path, index=False)
             
             
             output_path = os.path.join(
-                config['formatted_data_dir'],
+                config['test_output_dir'],
                 f"{daily_start_date_str}_{daily_end_date_str}_"
                 "processing_codes.csv"
             )
@@ -1015,8 +953,7 @@ def process_level_output(test=False):
            `.zip` archives, then initialise a fresh timestamped log file
            via `setup_logger()`.
         3. Glob-match all `.txt`|`.csv` input files from
-           `config['sar_drift_directory']` (batch mode) or use the single
-           file at `config['sar_drift_filename']` (single-file mode).
+           `config['sar_drift_directory']`.
         4. Read all input files in parallel into a single raw DataFrame
            (`combine_into_dataframe`). File reads use ProcessPoolExecutor
            across all available CPU cores. Processing halts immediately on
@@ -1063,6 +1000,7 @@ def process_level_output(test=False):
     import numpy as np
     import zipfile
     from glob import glob
+    from pyproj import Transformer
     
     
     run_start = datetime.utcnow()
@@ -1078,7 +1016,7 @@ def process_level_output(test=False):
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
             zf.write(log_file, os.path.basename(log_file))
         os.remove(log_file)
-    logger, log_path = setup_logger(config['log_dir'])
+    logger, log_path = setup_logger(config)
     logger.info(
         f"Process started | {run_start}"
     )
@@ -1091,15 +1029,12 @@ def process_level_output(test=False):
     # find files to process
     print("Gathering files to process...")
     files= []
-    if config['batch_process']:
-        all_files = glob(os.path.join(config['sar_drift_directory'], '*'))
-        for file in all_files:
-            if ('.txt' in file) or ('.csv' in file):
-                files.append(file)
-    else:
-        files = [config['sar_drift_filename']]
+    all_files = glob(os.path.join(config['sar_drift_directory'], '*'))
+    for file in all_files:
+        if ('.txt' in file) or ('.csv' in file):
+            files.append(file)
         
-    
+        
     logger.info(f"Input directory: {config['sar_drift_directory']}")
     logger.info(f"Found {len(files)} candidate files")
     
@@ -1125,6 +1060,9 @@ def process_level_output(test=False):
     epsg_list = [3413, 6931]
     if test:
         processing_levels = ['00']
+        config['test_output_dir'] = 'test_output'
+        if not os.path.exists(config['test_output_dir']):
+            os.makedirs(config['test_output_dir'], exist_ok=True)
     else:
         processing_levels = ['01', '02', '03']
     
@@ -1136,7 +1074,13 @@ def process_level_output(test=False):
         f'total days: {total_days}; total scenes: {total_scenes}'
     )
     
-    
+
+    # cache transformer for better performance
+    config['transformer_6931'] = Transformer.from_crs(
+        "EPSG:4326", "EPSG:6931", always_xy=True
+    )
+
+
     df_by_epsg = {}
     for epsg in epsg_list:
         df_by_epsg[epsg] = util._apply_projection(df_raw, epsg, config)
@@ -1148,10 +1092,7 @@ def process_level_output(test=False):
             if level in ['00', '03']:
                 config['start_date'] = df_raw['date_start'].dt.date.min()
                 config['end_date'] = df_raw['date_start'].dt.date.max()
-                config['buoy_drift'] = util._load_buoy_data(config)
-                util._update_interactive_html_files(config, epsg)
-            else:
-                config['buoy_drift'] = None
+                util._update_interactive_html_files(config)
             create_level_output(df_by_epsg[epsg], config)
 
 

@@ -1,8 +1,8 @@
 netcdf SAR_drift_data {
 dimensions:
 	time = UNLIMITED ; // (0 currently)
-	y = 361 ;
-	x = 361 ;
+	y = 1440 ;
+	x = 1440 ;
 	nv = 2 ;
 variables:
 	float sea_ice_speed(time, y, x) ;

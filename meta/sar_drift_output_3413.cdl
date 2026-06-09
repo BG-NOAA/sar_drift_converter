@@ -1,8 +1,8 @@
 netcdf SAR_drift_data {
 dimensions:
 	time = UNLIMITED ; // (0 currently)
-	y = 361 ;
-	x = 361 ;
+	y = 896 ;
+	x = 608 ;
 	nv = 2 ;
 variables:
 	float sea_ice_speed(time, y, x) ;
@@ -24,7 +24,7 @@ variables:
 		sea_ice_y_displacement:long_name = "v-velocity component" ;
 		sea_ice_y_displacement:standard_name = "movement_in_y_direction" ;
 		sea_ice_y_displacement:ioos_category = "sea-ice" ;
-		sea_ice_y_displacement:units = "m s -1" ;
+		sea_ice_y_displacement:units = "m s-1" ;
 		sea_ice_y_displacement:grid_mapping = "spatial_ref" ;
 	float direction_of_sea_ice_displacement(time, y, x) ;
 		direction_of_sea_ice_displacement:long_name = "Direction of the vector change in geospatial position of an object that has moved over time" ;
@@ -92,7 +92,7 @@ variables:
 		x:ioos_category = "Location" ;
 		x:units = "m" ;
 		x:axis = "X" ;
-		x:comment = "y values are the centers of the grid cells" ;
+		x:comment = "x values are the centers of the grid cells" ;
 	double y(y) ;
 		y:standard_name = "projection_y_coordinate" ;
 		y:long_name = "y coordinate of projection" ;
