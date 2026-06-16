@@ -44,19 +44,21 @@ Copyright notice
 
 import os
 import sys
+import platform
 import warnings
 from pathlib import Path
 
 
 # Derive paths from the active env rather than hard-coding
 env_prefix = Path(sys.prefix)
-proj_dir = env_prefix / "Library" / "share" / "proj"
-bin_dir = env_prefix / "Library" / "bin"
 
-# print("Using PROJ dir:", proj_dir)
-# print("Using bin dir:", bin_dir)
-
-os.add_dll_directory(str(bin_dir))
+if platform.system() == 'Windows':
+    proj_dir = env_prefix / "Library" / "share" / "proj"
+    bin_dir = env_prefix / "Library" / "bin"
+    os.add_dll_directory(str(bin_dir))
+else:
+    # Linux/Mac conda layout
+    proj_dir = env_prefix / "share" / "proj"
 
 # Set both env vars for PROJ
 os.environ["PROJ_DATA"] = str(proj_dir)

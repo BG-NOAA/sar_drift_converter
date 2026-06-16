@@ -112,9 +112,7 @@
         </section>
 
         <!-- Breadcrumb -->
-        <div class="breadcrumb-bar" id="breadcrumb">
-          <span class="current">Processing Level</span>
-        </div>
+        <div class="breadcrumb-bar" id="breadcrumb" style="display: none;"></div>
 
         <!-- LEVEL SELECTION -->
         <div class="level-section active" id="section-level">
@@ -229,23 +227,26 @@
 
     function updateBreadcrumb() {
       const bc = document.getElementById('breadcrumb');
+
+      if (!selectedLevel) {
+        bc.style.display = 'none';
+        bc.innerHTML = '';
+        return;
+      }
+
+      bc.style.display = 'flex';
       const parts = [];
 
       parts.push(`<span class="crumb" onclick="goToLevel()">Processing Level</span>`);
 
-      if (selectedLevel) {
-        if (selectedYear) {
-          parts.push(`<span class="sep">›</span>`);
-          parts.push(`<span class="crumb" onclick="goToYear()">${selectedLevel}</span>`);
-          parts.push(`<span class="sep">›</span>`);
-          parts.push(`<span class="current">${selectedYear}</span>`);
-        } else {
-          parts.push(`<span class="sep">›</span>`);
-          parts.push(`<span class="current">${selectedLevel}</span>`);
-        }
+      if (selectedYear) {
+        parts.push(`<span class="sep">›</span>`);
+        parts.push(`<span class="crumb" onclick="goToYear()">${selectedLevel}</span>`);
+        parts.push(`<span class="sep">›</span>`);
+        parts.push(`<span class="current">${selectedYear}</span>`);
       } else {
-        // overwrite first part as non-clickable current
-        parts[0] = `<span class="current">Processing Level</span>`;
+        parts.push(`<span class="sep">›</span>`);
+        parts.push(`<span class="current">${selectedLevel}</span>`);
       }
 
       bc.innerHTML = parts.join(' ');

@@ -3,8 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PolarWatch — Sea Ice Velocity</title>
+<title>Sea Ice Velocity</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<link rel="icon" type="image/png" href="../css/images/noaa_logo_circle_72x72.svg" />
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0b1a2e; color: #e0e0e0; }
@@ -82,8 +83,8 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0b1a2e; colo
 <body>
 
 <div class="header">
-  <h1> PolarWatch — Sea Ice Velocity (SAR)</h1>
-  <span class="subtitle">Daily Drift Vectors · 12 km · Northern Hemisphere</span>
+  <h1>Sea Ice Velocity (SAR)</h1>
+  <span class="subtitle">Daily Drift Vectors · 12.5 km · Northern Hemisphere</span>
 </div>
 
 <div class="main">
@@ -318,7 +319,7 @@ let buoyLayer = null;
 
 function drawArrows(vectors, scale, opacity) {
   if (arrowLayer) map.removeLayer(arrowLayer);
-  arrowLayer = L.layerGroup();
+  arrowLayer = L.featureGroup();
 
   vectors.forEach(v => {
     const [lon1, lat1, lon2, lat2, spdx100, oc] = v;
@@ -376,7 +377,7 @@ function updateDisplay() {
   // Layer order back to front: GMASI → coast → land → SAR → buoys → graticule
   if (gmasiLayer)  gmasiLayer.bringToFront();
   if (coastLayer)  coastLayer.bringToFront();
-  if (landLayer) landLayer.bringToFront();
+  if (landLayer)   landLayer.bringToFront();
   if (arrowLayer)  arrowLayer.bringToFront();
   if (buoyLayer)   buoyLayer.bringToFront();
   if (gratLayer)   gratLayer.bringToFront();
@@ -412,7 +413,7 @@ function drawGmasi(geojson) {
 // ── Buoy Layer ───────────────────────────────────────────────────────────────────
 function drawBuoys(vectors, scale, opacity) {
   if (buoyLayer) map.removeLayer(buoyLayer);
-  buoyLayer = L.layerGroup();
+  buoyLayer = L.featureGroup();
   vectors.forEach(v => {
     const [buoy_id, lon1, lat1, lon2, lat2] = v;
     const weight = Math.max(3.0, scale * 1.8);
