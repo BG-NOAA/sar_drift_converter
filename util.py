@@ -382,7 +382,7 @@ def _download_sar_drift_files(config):
         logger.info("No new gfilter files found to download")
         return
     
-    download_folder = config['sar_drift_directory']        
+    download_folder = config['sar_drift_download_directory']        
     tqdm_desc = "Downloading SAR drift gfilter files"
             
 
@@ -492,59 +492,58 @@ def _read_gfilter_file(args):
 
 def _check_existing_files(scene_output_stub, config):
     """
-    Check which expected daily output files already exist for a given day.
+    Determine which expected daily output files already exist for a given day.
 
     Returns a dictionary mapping each output type to a bool indicating
-    whether that file already exists on disk. This allows the processing
-    loop to skip only the specific outputs that are already present rather
-    than skipping the entire day, enabling partial-day resume after an
-    interrupted run.
+    whether that file already exists on disk, allowing the processing loop
+    to skip only the outputs already present rather than the entire day.
+    Days within the `reprocess_days` window (or any run with `overwrite`
+    True) are forced to regenerate by returning all-False flags for the
+    output types the level produces.
 
     Args:
-        scene_output_stub (dict): Lightweight dict containing date bounds
-            for the day being checked. Must contain:
+        scene_output_stub (dict): Lightweight dict of date bounds for the
+            day being checked. Must contain:
                 - `start_date` (pandas.Timestamp): Minimum date_start for
                   the day.
                 - `end_date`   (pandas.Timestamp): Maximum date_end for
                   the day.
         config (dict): Configuration dictionary. Must include:
-                - `file_server` (str): Root output path.
-                - `epsg` (int): Target projected CRS code.
+                - `file_server_3413` / `file_server_6931` (str): Root output
+                  path for the active EPSG.
+                - `viewer_dir` (str): Viewer subdirectory under the file
+                  server (used to locate existing vector JSON).
+                - `epsg` (int): Active projected CRS code.
                 - `level` (str): Processing level ('00'–'03').
                 - `version` (str): Version string for filename construction.
-                - `overwrite` (bool): If True, all values are returned as
-                  False regardless of file existence, except `json` which
-                  is returned as True for levels that do not produce JSON
-                  output ('01', '02').
+                - `overwrite` (bool): If True, force regeneration of all
+                  outputs the level produces.
+                - `reprocess_days` (int): Days back from today within which
+                  outputs are always regenerated.
 
     Returns:
-        dict: Keys are output type strings, values are bool indicating
-            whether the file exists on disk. Possible keys:
-                - `nc_scenes` (bool): Multi-layer scenes NetCDF.
-                - `nc_daily`  (bool): Single-layer daily NetCDF.
-                - `gpkg`      (bool): GeoPackage. Always True for levels
-                  that do not produce GeoPackage output ('01').
-                - `json`      (bool): Vector JSON data file. Always True
-                  for levels that do not produce JSON output ('01', '02').
-            If `config['overwrite']` is True, all values are False except
-            `json`, which is True for levels '01' and '02'.
+        dict: Keys `nc_scenes`, `nc_daily`, `gpkg`, `json`; values are bool
+            indicating whether the file exists (True) or needs writing
+            (False). Output types a level does not produce are reported as
+            True (treated as already satisfied) so callers can use
+            `all(exists.values())` to decide whether to skip a day entirely.
 
     Notes:
-        - The checked paths mirror exactly the paths written by
-          `create_daily_output` for the same level/EPSG/version combination.
-        - `gpkg` and `json` are set to True (treated as already existing)
-          for levels that never produce those outputs, so callers can check
-          `all(exists.values())` uniformly to decide whether to skip a day
-          entirely.
-        - GeoPackage is produced for levels '00', '02', and '03'. The
-          existence check uses the daily base filename with a `.gpkg`
-          extension under `<file_server>/<epsg>/<level>/<year>/gpkg/`.
-        - JSON is produced for levels '00' and '03' only. The existence
-          check looks for `si_velocity_<start>.json` under
-          `<file_server>/<epsg>/<level>/data/`.
-        - When `overwrite` is True, all values are False for levels that
-          produce that output type, causing those outputs to be regenerated
-          unconditionally.
+        - If `start_date` falls within `reprocess_days` of today, or
+          `overwrite` is True, the function returns immediately with the
+          per-level force-regenerate flag set (False for produced outputs,
+          True for unproduced ones).
+        - Checked paths mirror exactly the paths written by
+          `create_daily_output`:
+            - NetCDF (scenes/daily) and GeoPackage under
+              `<file_server_<epsg>>/<data_files_dir>/PL<level>/
+              <year>/{nc,gpkg}/`.
+            - Vector JSON under
+              `<file_server_<epsg>>/<viewer_dir>/SIVelocity_SAR/
+              si_velocity_<start>.json`.
+        - Output coverage by level: scenes NetCDF for '00'/'01'/'02';
+          daily NetCDF for all levels; GeoPackage for '00'/'02'/'03';
+          vector JSON for '00'/'03'.
     """
     
     import os
@@ -563,7 +562,7 @@ def _check_existing_files(scene_output_stub, config):
         overwrite = True
         logger = logging.getLogger('sar_drift_converter')
         logger.info(
-            f'Recreating output since {start_date} is within repcoess window '
+            f'Recreating output since {start_date} is within reprocess window '
             f'of {reprocess_days} days from run time'
         )
     
@@ -603,12 +602,18 @@ def _check_existing_files(scene_output_stub, config):
     start = scene_output_stub['start_date'].strftime('%Y%m%d')
     end   = scene_output_stub['end_date'].strftime('%Y%m%d')
     epsg  = str(config['epsg'])
-    lvl   = f"Processing Level - {config['level']} (PL{config['level']})"
+    lvl   = f"PL{config['level']}"
     yr    = start[:4]
     file_server = config[f"file_server_{epsg}"]
-    nc_dir   = os.path.join(file_server, 'data_files', lvl, yr, 'nc')
-    gpkg_dir = os.path.join(file_server, 'data_files', lvl, yr, 'gpkg')
-    data_dir = os.path.join(file_server, 'viewer', 'SIVelocity_SAR')
+    nc_dir   = os.path.join(
+        file_server, config['data_files_dir'], lvl, yr, 'nc'
+    )
+    gpkg_dir = os.path.join(
+        file_server, config['data_files_dir'], lvl, yr, 'gpkg'
+    )
+    json_dir = os.path.join(
+        file_server, config['viewer_dir'], 'SIVelocity_SAR'
+    )
 
 
     # check NetCDF scenes
@@ -642,7 +647,7 @@ def _check_existing_files(scene_output_stub, config):
     json_exists = True
     if config['level'] in ['00', '03']:
         json_exists = os.path.exists(
-            os.path.join(data_dir, f"si_velocity_{start}.json")
+            os.path.join(json_dir, f"si_velocity_{start}.json")
         )
 
    
@@ -1141,205 +1146,24 @@ def _get_layer_name(scene_id):
     return layer_name
 
 
-def _update_interactive_html_files(config):
+def _set_file_permissions(path, mode=0o664):
     """
-    Write or refresh the interactive HTML index and vector map viewer
-    files, and copy supporting web assets, for the given EPSG output
-    directory.
+    Set file permissions on an output file after writing.
 
-    Reads two HTML templates — the drill-down index and the interactive
-    Leaflet vector map viewer — applies EPSG-specific substitutions via
-    regex, and writes the results to the file server. Copies CSS, JS,
-    image, and webfont support folders from ``meta_dir`` to the file
-    server root, and copies GeoJSON reference files to the viewer's
-    ``maps/`` subdirectory.
-
-    This function is called once per EPSG for levels ``'00'`` and
-    ``'03'`` during ``process_level_output``, before the day loop begins.
+    On Linux/Mac, applies the specified octal mode (defaults to 0o664,
+    rw-rw-r--, per web server policy). On Windows, this call is skipped
+    since Unix permission bits are not supported.
 
     Args:
-        config (dict): Configuration dictionary. Must include:
-
-            - ``'epsg'`` (int): Target EPSG code (3413 or 6931).
-            - ``'file_server_<epsg>'`` (str): Root output path for the
-              given EPSG, e.g. ``'file_server_3413'``.
-            - ``'html_index_template'`` (str): Path to the ``index.html``
-              template file.
-            - ``'html_vector_template'`` (str): Path to the interactive
-              vector map HTML template.
-            - ``'webpage_folders'`` (list[str]): Folder names to copy
-              from ``meta_dir`` to the file server root
-              (e.g. ``['css', 'js', 'image', 'webfonts']``).
-            - ``'geojson_templates'`` (list[str]): GeoJSON filenames to
-              copy from ``meta_dir`` into ``viewer/maps/``.
-            - ``'meta_dir'`` (str): Directory containing web support
-              folders and template files.
-            - ``'start_date'`` (date): Minimum ``date_start`` across all
-              input data; used to derive the start year for the
-              ``AVAILABLE_YEARS`` constant.
-            - ``'end_date'`` (date): Maximum ``date_start`` across all
-              input data; used to derive the end year.
-
-    Returns:
-        None
-
-    Notes:
-        - The following JavaScript constants are updated in
-          ``index.html`` via regex: ``EPSG_LABEL``, ``EPSG_DESC``, and
-          ``AVAILABLE_YEARS``.
-        - The following are updated in the vector map viewer via regex:
-          ``proj4.defs``, ``L.Proj.CRS`` constructor, ``origin``, and
-          the CRS label in the sidebar info box.
-        - Web support folders at the destination are deleted and
-          re-copied on each call to ensure stale assets are replaced.
-        - GeoJSON files are only copied if they do not already exist at
-          the destination.
+        path (str): Path to the file.
+        mode (int): Octal permission mode. Defaults to 0o664.
     """
-
     import os
-    import shutil
-    import re
-    import json
-
-    epsg = config['epsg']
-
-    # template content per EPSG
-    _, imax, jmax, xmin, ymin = _grid_params(12.5, NORTH)
-    xmin_m = xmin * 1000
-    ymin_m = ymin * 1000
-    xmax_m = xmin_m + imax * 12500
-    ymax_m = ymin_m + jmax * 12500
-    proj_bounds = f'[[{ymin_m}, {xmin_m}], [{ymax_m}, {xmax_m}]]'
-    
-    EPSG_PROJ = {
-        3413: {
-            'proj4_name': 'EPSG:3413',
-            'proj4_def':  (
-                '+proj=stere +lat_0=90 +lat_ts=70 +lon_0=-45 +k=1 +x_0=0 '
-                '+y_0=0 +datum=WGS84 +units=m +no_defs'
-            ),
-            'desc':  'NSIDC Sea Ice Polar Stereographic North',
-            'origin': f'[{xmin_m}, {ymax_m}]',
-            'bounds': proj_bounds
-        },
-        6931: {
-            'proj4_name': 'EPSG:6931',
-            'proj4_def':  (
-                '+proj=laea +lat_0=90 +lon_0=0 +x_0=0 +y_0=0 '
-                '+datum=WGS84 +units=m +no_defs'
-            ),
-            'desc':  'NSIDC EASE-Grid 2.0 North',
-            'origin': '[-9000000, 9000000]',
-            'bounds': '[[-9000000, -9000000], [9000000, 9000000]]'
-        },
-    }
-
-    
-    proj = EPSG_PROJ[epsg]
-    file_server = config[f"file_server_{epsg}"]
-    view_directory = os.path.join(file_server, 'viewer')
-    os.makedirs(view_directory, exist_ok=True)
-
-    # update interactive vector map
-    with open(config['html_vector_template'], 'r') as f:
-        viewer_content = f.read()
-
-    # proj4.defs line
-    viewer_content = re.sub(
-        r"proj4\.defs\('EPSG:\d+',\s*'[^']*'\);",
-        lambda _: (
-            f"proj4.defs('{proj['proj4_name']}', '{proj['proj4_def']}');"
-        ),
-        viewer_content
-    )
-    # L.Proj.CRS constructor
-    viewer_content = re.sub(
-        r"new L\.Proj\.CRS\('EPSG:\d+',\s*'[^']*',",
-        lambda _: (
-            f"new L.Proj.CRS('{proj['proj4_name']}', '{proj['proj4_def']}',"
-        ),
-        viewer_content
-    )
-    # origin inside CRS options
-    viewer_content = re.sub(
-        r"origin:\s*\[-?\d+,\s*-?\d+\]",
-        lambda _: f"origin: {proj['origin']}",
-        viewer_content
-    )
-    # CRS label in the sidebar info box
-    viewer_content = re.sub(
-        r"CRS: EPSG:[\d?]+",
-        lambda _: f"CRS: {proj['proj4_name']}",
-        viewer_content
-    )
-
-    viewer_out_path = os.path.join(
-        view_directory, os.path.basename(config['html_vector_template'])
-    )
-    with open(viewer_out_path, 'w') as f:
-        f.write(viewer_content)
+    import platform
+    if platform.system() != 'Windows' and os.path.exists(path):
+        os.chmod(path, mode)
         
-
-    # update index.html
-    # derive year range from available_dates.json if it exists,
-    # otherwise fall back to config start/end dates
-    available_dates_path = os.path.join(
-        file_server, 'viewer', 'SIVelocity_SAR', 'available_dates.json'
-    )
-    if os.path.exists(available_dates_path):
-        with open(available_dates_path, 'r', encoding='utf-8') as f:
-            available_dates = json.load(f)
-        years = sorted({int(d[:4]) for d in available_dates if len(d) >= 4})
-    else:
-        start_year = config['start_date'].year
-        end_year   = config['end_date'].year
-        years = list(range(start_year, end_year + 1))
-    
-    years_js = '[' + ', '.join(str(y) for y in years) + ']'
-
-    with open(config['html_index_template'], 'r') as f:
-        index_content = f.read()
-
-    index_content = re.sub(
-        r"const EPSG_LABEL\s*=\s*'[^']*';",
-        lambda _: f"const EPSG_LABEL = '{proj['proj4_name']}';",
-        index_content
-    )
-    index_content = re.sub(
-        r"const EPSG_DESC\s*=\s*'[^']*';",
-        lambda _: f"const EPSG_DESC  = '{proj['desc']}';",
-        index_content
-    )
-    index_content = re.sub(
-        r"const AVAILABLE_YEARS\s*=\s*\[[^\]]*\];",
-        lambda _: f"const AVAILABLE_YEARS = {years_js};",
-        index_content
-    )
-
-    index_html_path = os.path.join(file_server, 'index.html')
-    with open(index_html_path, 'w') as f:
-        f.write(index_content)
         
-
-    # copy css/js support folders
-    for dir_name in config['webpage_folders']:
-        src = os.path.join(config['meta_dir'], dir_name)
-        dst = os.path.join(file_server, dir_name)
-        if os.path.isdir(src):
-            if os.path.exists(dst):
-                shutil.rmtree(dst)
-            shutil.copytree(src, dst)
-
-    # copy geojson files
-    maps_dir = os.path.join(view_directory, 'maps')
-    os.makedirs(maps_dir, exist_ok=True)
-    for template_name in config['geojson_templates']:
-        src_path  = os.path.join(config['meta_dir'], template_name)
-        dest_path = os.path.join(maps_dir, template_name)
-        if not os.path.exists(dest_path):
-            shutil.copy(src_path, dest_path)
-
-
 #=============
 # Calculations
 #=============
@@ -2358,35 +2182,6 @@ def filter_input_data(df_all, config):
     return df_all
 
 
-def _copy_to_gdrive(config):
-    import subprocess
-    import logging
-    logger = logging.getLogger('sar_drift_converter')
-
-    service_account = config.get('gdrive_service_account')
-    folder_id = config.get('gdrive_folder_id')
-    if not service_account or not folder_id:
-        return
-
-    logger.info('Copying output files to Google Drive...')
-    result = subprocess.run(
-        [
-            'rclone', 'copy',
-            config['file_server'],
-            f':drive,service_account_file={service_account},'
-            f'root_folder_id={folder_id}:',
-            '--transfers', '8'
-        ],
-        capture_output=True,
-        text=True
-    )
-    if result.returncode != 0:
-        logger.error(f'rclone copy failed: {result.stderr}')
-    else:
-        logger.info('Google Drive copy complete')
-        
-        
-
 ###############
 # Create Output
 ###############
@@ -2777,7 +2572,9 @@ def create_netcdf(df, nc_path, config, template_ds, multi_layered=False):
                 'spatial_ref': {'dtype': 'int32'}
             }
         )
-
+        
+        # set Linux/Mac permissions on file    
+        _set_file_permissions(nc_path)
     
         logger.info(f'Created NetCDF {nc_path}')
 
@@ -3056,102 +2853,83 @@ def create_shape_package(df, gpkg_path, config):
         # embed .qml outlier layer style
         _embed_qml_style(gpkg_path, 'drift_vectors', config)
         
+     
+    # set Linux/Mac permissions on file    
+    _set_file_permissions(gpkg_path)
+    
     # log activity
     logger.info(f'Created GeoPackage {gpkg_path}')
            
     
-def create_vector_html_and_json(df, html_path, data_dir, json_path,
-                                available_dates_path, config):
+def create_vector_json(df, json_path, available_dates_path, config):
     """
-    Serialize drift vector observations to a compact JSON file and write
-    an accompanying interactive HTML viewer.
+    Serialize grid-snapped inlier drift vectors to a compact JSON file for
+    the static web viewer.
 
-    Snaps all SAR drift observations to the nearest grid cell center for
-    the configured projection (EPSG:3413 or EPSG:6931), back-projects the
-    snapped origin and displaced endpoint to EPSG:4326, and writes a single
-    JSON object containing date metadata and a list of per-vector entries.
-    Produces a self-contained HTML file that loads the JSON from the `data/`
-    subdirectory and renders drift vectors on an interactive Leaflet polar
-    stereographic map. Only inlier vectors (outlier_category '00' or '01')
-    are retained; duplicate grid cell assignments are deduplicated keeping
-    the latest by `date_end`. 
+    Retains only inlier vectors (`outlier_category` '00' or '01'), snaps
+    each observation's start position to the nearest grid cell center for
+    the configured projection, adds the projected displacement to obtain the
+    snapped endpoint, and back-projects both to EPSG:4326. Writes a single
+    JSON object containing date metadata and a list of per-vector entries,
+    and updates an `available_dates.json` index.
 
     Args:
         df (pandas.DataFrame): Input SAR drift observations. Expected
             columns:
                 - 'longitude_1', 'latitude_1' (float): Start position
-                  (EPSG:4326, degrees); used to compute grid cell snap.
-                  Overwritten with back-projected snapped cell center
-                  before writing to JSON.
+                  (EPSG:4326, degrees); used to compute the grid-cell snap
+                  and overwritten with the back-projected snapped cell
+                  center before writing.
                 - 'longitude_2', 'latitude_2' (float): End position
-                  (EPSG:4326, degrees); overwritten with back-projected
-                  snapped origin plus displacement before writing to JSON.
-                - 'sea_ice_x_displacement' (float): X displacement in
-                  projected space (m); added to snapped X1 to compute
-                  the snapped endpoint before back-projection.
-                - 'sea_ice_y_displacement' (float): Y displacement in
-                  projected space (m); added to snapped Y1 to compute
-                  the snapped endpoint before back-projection.
+                  (EPSG:4326, degrees); overwritten with the back-projected
+                  snapped origin plus displacement before writing.
+                - 'sea_ice_x_displacement', 'sea_ice_y_displacement' (float):
+                  Projected displacement components (m); added to the snapped
+                  origin to compute the snapped endpoint.
                 - 'sea_ice_speed_kmdy' (float): Drift speed (km day⁻¹);
-                  written directly to the vectors list.
+                  written directly to each vector entry.
                 - 'direction_of_sea_ice_displacement' (float): Forward
-                  azimuth (degrees); written directly to the vectors list.
-                - 'date_start' (datetime-like): Start timestamp; the
-                  minimum value across retained rows is written as `date1`
-                  (format: 'YYYY-MM-DD').
+                  azimuth (degrees); written directly to each vector entry.
+                - 'date_start' (datetime-like): Start timestamp; minimum
+                  across retained rows is written as `date1`.
                 - 'date_end' (datetime-like): End timestamp; used for
-                  duplicate resolution (latest kept) and the maximum value
-                  across retained rows is written as `date2`
-                  (format: 'YYYY-MM-DD').
+                  duplicate resolution (latest kept) and maximum across
+                  retained rows is written as `date2`.
                 - 'outlier_category' (str): Two-digit outlier code; only
-                  rows with values '00' or '01' are retained.
-        html_path (str): Full path for the output HTML viewer file. The
-                         HTML file references the JSON using only the
-                         basename of `si_json_path` under a `data/`
-                         prefix, so the JSON must be placed in a `data/`
-                         subdirectory relative to the HTML file's location.
-        data_dir (str): Directory where reference GeoJSON template files
-                        (land, coastline, graticule) are confirmed to exist
-                        via `_add_json_templates`. Must be the `data/`
-                        subdirectory served alongside the HTML file.
-        json_path (str): Full path for the output SAR drift JSON file.
-                         Parent directory must already exist.
-        available_dates_path (str): Full path to the JSON file tracking
-                                    all available processed dates. Created
-                                    if it does not exist; `date1` is added
-                                    if not already present.
+                  rows with '00' or '01' are retained.
+        json_path (str): Full path for the output vector JSON file. Parent
+                         directory must already exist.
+        available_dates_path (str): Full path to the JSON index tracking all
+                                     processed dates. Created if absent;
+                                     `date1` is appended (in `YYYYMMDD` form)
+                                     if not already present.
         config (dict): Configuration dictionary. Must include:
-                - 'epsg' (int): EPSG code controlling the grid snap
-                                function. Supported values: 3413
-                                (_polar_lonlat_to_ij, _grid_params) and
-                                6931 (_ease2_lonlat_to_ij).
-                - 'html_vector_template' (str): Path to the HTML template
-                  file copied to `html_path`.
+                - 'epsg' (int): EPSG code controlling the grid-snap
+                                function. Supported: 3413
+                                (`_polar_lonlat_to_ij`, `_grid_params`) and
+                                6931 (`_ease2_lonlat_to_ij`).
 
     Returns:
-        None. Returns early without writing JSON if no rows survive the
-        inlier filter.
+        None. Returns early without writing if no rows survive the inlier
+        filter.
 
     Notes:
-        - SAR vector lon1/lat1 and lon2/lat2 in the JSON are the
-          back-projected EPSG:4326 positions of the snapped grid cell
-          center and snapped endpoint respectively, not the raw observation
-          coordinates. This ensures consistency with NetCDF and GeoPackage
-          outputs.
-        - Each entry in the SAR `vectors` list follows the format:
+        - The lon1/lat1 and lon2/lat2 written to the JSON are the
+          back-projected EPSG:4326 positions of the snapped grid cell center
+          and snapped endpoint, not the raw observation coordinates. This
+          keeps the JSON consistent with the NetCDF and GeoPackage outputs.
+        - Each entry in the `vectors` list has the format:
           `[lon1, lat1, lon2, lat2, speed_kmdy, bearing]`.
-        - Rows are sorted by `date_end` ascending before deduplication so
-          that the latest observation wins when two vectors map to the same
-          grid cell.
+        - Rows are sorted by `date_end` ascending before deduplication so the
+          latest observation wins when two vectors map to the same grid cell.
         - `_grid_i` and `_grid_j` are internal columns used only for
-          deduplication and are not written to any output.
-        - `date1` is added to `available_dates_path` in `YYYYMMDD` format
-          (hyphens stripped) if not already present.
-        - The JSON is written without indentation for compact output.
+          deduplication and are not written to output.
+        - The JSON is written without indentation for compact output, and
+          file permissions are set to 0o664 on Linux/Mac via
+          `_set_file_permissions`.
     """
 
     import os
-    import shutil
     import numpy as np
     import json
     import logging
@@ -3161,7 +2939,7 @@ def create_vector_html_and_json(df, html_path, data_dir, json_path,
     
     df_local = df.copy()
     
-    # For HTML output, retain only inlier vectors (outlier_category 00 or 01),
+    # retain only inlier vectors (outlier_category 00 or 01),
     outlier_filter = df_local['outlier_category'].isin(['00', '01'])
     df_local = df_local[outlier_filter].copy()
 
@@ -3251,6 +3029,10 @@ def create_vector_html_and_json(df, html_path, data_dir, json_path,
     with open(json_path, 'w', encoding='utf-8') as f:
         json.dump(payload, f, separators=(',', ':'))                
 
+
+    # set Linux/Mac permissions on file    
+    _set_file_permissions(json_path)
+    
     logger.info(f'Created JSON {json_path}')
     
     
@@ -3265,3 +3047,6 @@ def create_vector_html_and_json(df, html_path, data_dir, json_path,
         available_dates.add(date1.replace('-', ''))
         with open(available_dates_path, 'w', encoding='utf-8') as f:
             json.dump(sorted(available_dates), f, separators=(',', ':'))
+            
+        # set Linux/Mac permissions on file    
+        _set_file_permissions(available_dates_path)

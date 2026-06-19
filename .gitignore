@@ -16,6 +16,8 @@ __pycache__
 # Ignored folders
 buoys
 input
+input_historical
+input_manual
 layer_to_gpkg
 level_output
 log
