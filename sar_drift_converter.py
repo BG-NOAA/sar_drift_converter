@@ -119,15 +119,13 @@ def read_json_config():
                                                  cleared by the script. Always
                                                  processed regardless of
                                                  `reprocess_days`.
-        - "viewer_dir"                  (str):   Directory where the JSON
-                                                 directories files are located.
-        - "data_files_dir"              (str):   Root directory where the NC
-                                                 and GPKG files will be
-                                                 written.
         - "file_server_3413"            (list):  Path components for the
                                                  EPSG:3413 root output path.
         - "file_server_6931"            (list):  Path components for the
                                                  EPSG:6931 root output path.
+        - "json_dir"                    (list):  Directory where the JSON
+                                                 directories files are located.
+                                                 written.                                                 
         - "sar_drift_data_url"          (str):   URL hosting SAR drift gfilter
                                                  txt files.
         - "netcdf_cdl_file_3413"        (str):   Path to the CDL file used for
@@ -238,8 +236,8 @@ def read_json_config():
 
     required_json_keys = {
             'sar_drift_download_directory', 'sar_drift_manual_directory',
-            'file_server_3413', 'file_server_6931', 'viewer_dir',
-            'data_files_dir', 'sar_drift_data_url', 'netcdf_cdl_file_3413',
+            'file_server_3413', 'file_server_6931', 'json_dir',
+            'sar_drift_data_url', 'netcdf_cdl_file_3413',
             'netcdf_cdl_file_6931', 'outlier_qml_file', 'graduated_qml_file',
             'log_dir', 'meta_dir', 'overwrite', 'reprocess_days', 'delimiter',
             'verbose', 'version'
@@ -300,12 +298,11 @@ def read_json_config():
     # Build final config — output_dir is set by create_level_output()
     config = {
         **resolved_paths,
-        'viewer_dir':              config['viewer_dir'],
-        'data_files_dir':          config['data_files_dir'],
         'meta_dir':                config['meta_dir'],
         'log_dir':                 config['log_dir'],
         'file_server_3413':        os.path.join(*config['file_server_3413']),
         'file_server_6931':        os.path.join(*config['file_server_6931']),
+        'json_dir':                os.path.join(*config['json_dir']),
         'sar_drift_data_url':      config['sar_drift_data_url'],
         'overwrite':               config['overwrite'],
         'reprocess_days':          config['reprocess_days'],
@@ -330,10 +327,9 @@ def read_json_config():
         labels = {
             'sar_drift_download_directory': 'sar drift download directory',
             'sar_drift_manual_directory':   'sar drift manual directory',
-            'viewer_dir':                   'viewer directory',
-            'data_files_dir':               'data files directory',
             'file_server_3413':             'file server (EPSG:3413)',
             'file_server_6931':             'file server (EPSG:6931)',
+            'json_dir':                     'JSON files directory',
             'sar_drift_data_url':           'SAR drift data URL',
             'netcdf_cdl_file_3413':         'NetCDF CDL file (EPSG:3413)',
             'netcdf_cdl_file_6931':         'NetCDF CDL file (EPSG:6931)',
@@ -601,10 +597,12 @@ def create_daily_output(scene_output, config, template_ds, exists):
     # multiple-layered netcdf
     if not exists['nc_scenes']:
         output_dir = os.path.join(
-            config[f'file_server_{epsg}'], config['data_files_dir'],
-            lvl, yr, 'nc'
+            config[f'file_server_{epsg}'], lvl, yr, 'nc'
         )
         os.makedirs(output_dir, exist_ok=True)
+        # set Linux/Mac permissions on directory
+        util._set_linux_permissions(output_dir, mode=0o775)
+        
         scenes_nc_path = os.path.join(
             output_dir,
             f"SIVelocity_SAR_{daily_start_date_str}_{daily_end_date_str}"
@@ -623,10 +621,12 @@ def create_daily_output(scene_output, config, template_ds, exists):
     # single-layer netcdf
     if not exists['nc_daily']:
         output_dir = os.path.join(
-            config[f'file_server_{epsg}'], config['data_files_dir'],
-            lvl, yr, 'nc'
+            config[f'file_server_{epsg}'], lvl, yr, 'nc'
         )
         os.makedirs(output_dir, exist_ok=True)
+        # set Linux/Mac permissions on directory
+        util._set_linux_permissions(output_dir, mode=0o775)
+        
         daily_nc_path = os.path.join(
             output_dir,
             f"SIVelocity_SAR_{daily_start_date_str}_{daily_end_date_str}"
@@ -645,10 +645,12 @@ def create_daily_output(scene_output, config, template_ds, exists):
     # GeoPackage
     if not exists['gpkg']:
         output_dir = os.path.join(
-            config[f'file_server_{epsg}'], config['data_files_dir'],
-            lvl, yr, 'gpkg'
+            config[f'file_server_{epsg}'], lvl, yr, 'gpkg'
         )
         os.makedirs(output_dir, exist_ok=True)
+        # set Linux/Mac permissions on directory
+        util._set_linux_permissions(output_dir, mode=0o775)
+        
         gpkg_path = os.path.join(
             output_dir,
             f"SIVelocity_SAR_{daily_start_date_str}_{daily_end_date_str}"
@@ -664,18 +666,19 @@ def create_daily_output(scene_output, config, template_ds, exists):
 
     # JSON vectors and HTML viewer
     if not exists['json']:
-        output_dir = os.path.join(
-            config[f'file_server_{epsg}'], config['viewer_dir']
-        )
-        data_dir = os.path.join(output_dir, 'SIVelocity_SAR')
-        os.makedirs(output_dir, exist_ok=True)
-        os.makedirs(data_dir, exist_ok=True)
+        os.makedirs(config['json_dir'], exist_ok=True)
+        # set Linux/Mac permissions on directory
+        util._set_linux_permissions(config['json_dir'], mode=0o775)
                
         json_path = os.path.join(
-            data_dir, f"si_velocity_{daily_start_date_str}.json"
+            config['json_dir'],
+            f"SIVelocity_SAR_{daily_start_date_str}_{daily_end_date_str}"
+            f"_daily_12km_NH_{config['epsg']}_PL{config['level']}"
+            f"_v{config['version']}.json"
         )
         available_dates_path = os.path.join(
-            data_dir, 'available_dates.json'
+            config['json_dir'],
+            'available_dates.json'
         )
         
         util.create_vector_json(
@@ -810,7 +813,8 @@ def create_level_output(df_all, config):
     )
     for day, df_day in tqdm(
             df_all.groupby('date_range'), tqdm_desc,
-            unit=' day', unit_scale=False
+            unit=' day', unit_scale=False,
+            colour='green'
         ):        
         
         logger.info(f"Processing day: {day}")
@@ -849,9 +853,6 @@ def create_level_output(df_all, config):
         # combine all created daily files into one
         create_daily_output(scene_output, config, template_ds, exists)
         
-
-        gc.collect()
-        
         
         # write out raw daily data
         if config['level'] == '00':
@@ -878,6 +879,12 @@ def create_level_output(df_all, config):
             scene_output['df_scenes'].to_csv(output_path, index=False)
 
 
+        # release the day's large objects before the next iteration
+        scene_output['df_scenes'] = None
+        del scene_output, df_day
+        gc.collect()
+
+        
     # final log entry
     run_end = datetime.utcnow() 
     elapsed = run_end - run_start
@@ -1067,6 +1074,11 @@ def process_level_output(test=False):
                 config['end_date'] = df_raw['date_start'].dt.date.max()
             create_level_output(df_by_epsg[epsg], config)
 
+
+
+    # clean up downloaded files
+    util._clear_download_dir(config)
+    
     
     # final log entry
     run_end = datetime.utcnow() 

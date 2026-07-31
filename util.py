@@ -405,7 +405,8 @@ def _download_sar_drift_files(config):
     with requests.Session() as session:
         session.mount('https://', TLSAdapter())
         
-        for file_url in tqdm(download_links, desc=tqdm_desc, unit=' file'):
+        for file_url in tqdm(
+                download_links, desc=tqdm_desc, unit=' file', colour='green'):
             filename = os.path.basename(file_url)
             local_path = os.path.join(download_folder, filename)
             try:
@@ -605,15 +606,8 @@ def _check_existing_files(scene_output_stub, config):
     lvl   = f"PL{config['level']}"
     yr    = start[:4]
     file_server = config[f"file_server_{epsg}"]
-    nc_dir   = os.path.join(
-        file_server, config['data_files_dir'], lvl, yr, 'nc'
-    )
-    gpkg_dir = os.path.join(
-        file_server, config['data_files_dir'], lvl, yr, 'gpkg'
-    )
-    json_dir = os.path.join(
-        file_server, config['viewer_dir'], 'SIVelocity_SAR'
-    )
+    nc_dir   = os.path.join(file_server, lvl, yr, 'nc')
+    gpkg_dir = os.path.join(file_server,  lvl, yr, 'gpkg')
 
 
     # check NetCDF scenes
@@ -647,7 +641,11 @@ def _check_existing_files(scene_output_stub, config):
     json_exists = True
     if config['level'] in ['00', '03']:
         json_exists = os.path.exists(
-            os.path.join(json_dir, f"si_velocity_{start}.json")
+            os.path.join(
+                config['json_dir'],
+                f"SIVelocity_SAR_{start}_{end}_daily_12km_NH_{epsg}"
+                f"_PL{config['level']}_v{config['version']}.json"
+            )
         )
 
    
@@ -1146,7 +1144,7 @@ def _get_layer_name(scene_id):
     return layer_name
 
 
-def _set_file_permissions(path, mode=0o664):
+def _set_linux_permissions(path, mode=0o664):
     """
     Set file permissions on an output file after writing.
 
@@ -1161,7 +1159,51 @@ def _set_file_permissions(path, mode=0o664):
     import os
     import platform
     if platform.system() != 'Windows' and os.path.exists(path):
-        os.chmod(path, mode)
+        try:
+            os.chmod(path, mode)
+        except PermissionError:
+            # safely pass directories where there is no permission allowed
+            pass
+        
+        
+def _clear_download_dir(config):
+    """
+    Remove all downloaded gfilter files from the local download directory.
+
+    Called at the end of each pipeline run to reclaim disk space after
+    output has been written.
+
+    Args:
+        config (dict): Configuration dictionary. Required keys:
+            - 'sar_drift_download_directory' (str): Directory containing
+            downloaded gfilter files.
+
+    Returns:
+        int: Number of files deleted.
+
+    Side Effects:
+        - Deletes downaloded files from config['sar_drift_download_directory'].
+        - Logs the count of files deleted at INFO level.
+    """
+    
+    import os
+    import logging
+
+    logger  = logging.getLogger('ascat_ice_classification_converter')
+    deleted = 0
+
+    for filename in os.listdir(config['sar_drift_download_directory']):
+        file_path = os.path.join(
+            config['sar_drift_download_directory'], filename
+        )
+        os.remove(file_path)
+        deleted += 1
+
+    logger.info(
+        f'Cleared {deleted} NetCDF files from '
+        f'{config["sar_drift_download_directory"]}'
+    )
+    return deleted        
         
         
 #=============
@@ -1968,7 +2010,8 @@ def combine_into_dataframe(files, config):
             desc='Reading gfilter files...',
             unit=' file',
             file=sys.stdout,
-            dynamic_ncols=True
+            dynamic_ncols=True,
+            colour='green', miniters=1000, mininterval=0
         ))
 
     all_dfs = [r for r in results if r is not None]
@@ -1992,6 +2035,7 @@ def combine_into_dataframe(files, config):
         f"Combined: {df_all.shape[0]} rows from {len(all_dfs)} files "
         f"({failed} failed)"
     )
+
 
     return df_all
     
@@ -2086,7 +2130,8 @@ def filter_input_data(df_all, config):
                 total=total_scenes,
                 miniters=chunks,
                 mininterval=0,
-                unit=' scene'
+                unit=' scene',
+                colour='green'
             ):
             scene_id = f"{file1}_{file2}"
             use_75km = df_scene['_use_75km'].iloc[0]
@@ -2194,16 +2239,17 @@ def create_netcdf(df, nc_path, config, template_ds, multi_layered=False):
 
     Maps input drift vectors onto the target projection grid using the
     EPSG code in config, populates a NetCDF dataset using attributes from
-    a pre-built template dataset, crops the output to the spatial extent
-    of all valid observations with padding, and writes the result to disk
-    with compression.
+    a pre-built template dataset, and writes the result to disk with
+    compression. The output grid is allocated pre-cropped to the spatial
+    extent of all observations (with padding) so the full NSIDC grid is
+    never held in memory.
 
     For single-scene output (`multi_layered=False`), the DataFrame is
     treated as one scene and written as a single time layer. For daily
     output (`multi_layered=True`), the DataFrame is grouped by `scene_id`
     and each group is written as a separate time layer on the shared grid.
-    In both cases the output is cropped to the bounding box of all finite
-    `sea_ice_speed` values across the full DataFrame.
+    In both cases the output is cropped to the bounding box of all
+    observations across the full DataFrame.
 
     Args:
         df (pandas.DataFrame): Input drift observations. For scene output,
@@ -2256,15 +2302,17 @@ def create_netcdf(df, nc_path, config, template_ds, multi_layered=False):
           `_polar_lonlat_to_ij` with 0-360 normalized longitudes;
           EPSG:6931 uses `_ease2_lonlat_to_ij` with standard -180-180
           longitudes. An unsupported EPSG raises ValueError.
+        - The grid is allocated pre-cropped: the (i, j) bounding box of
+          all observations is computed up front with a 4-cell pad, the
+          grid is allocated only at that size, and grid indices are
+          shifted into the cropped frame before the populate loop. This
+          avoids allocating the full NSIDC grid per time layer.
         - `time` coordinate uses minimum `date_start` per layer in
-          seconds since 2000-01-01 12:00:00 UTC.
+          seconds since 2000-01-01.
         - `time_bnds` spans [min(date_start), max(date_end)] per time
           layer.
         - `layer_id` is set to the formatted scene_id for each time
           layer.
-        - The bounding box crop uses all finite `sea_ice_speed` values
-          collapsed across all time layers. A 4-cell pad is applied on
-          each side.
         - If two observations map to the same (i, j) within a time layer,
           the last one written wins (numpy fancy-index behavior).
         - All int16 flag variables use -9 as `_FillValue`.
@@ -2276,7 +2324,7 @@ def create_netcdf(df, nc_path, config, template_ds, multi_layered=False):
           per scene group using that group's `_use_75km` value, since
           scenes within a day may differ.
         - `bearing_error` is set to 1 if `direction_of_sea_ice_
-          displacement == 0` or `sea_ice_speed <= 0`, else 0.
+          displacement == 0` and `sea_ice_speed <= 0`, else 0.
     """
 
     import numpy as np
@@ -2292,7 +2340,7 @@ def create_netcdf(df, nc_path, config, template_ds, multi_layered=False):
     df_copy = df.copy()
     df_copy['date_start'] = pd.to_datetime(df_copy['date_start'])
     df_copy['date_end'] = pd.to_datetime(df_copy['date_end'])
-    
+
 
 
     # for level 03, retain only inlier vectors and recode outlier_category
@@ -2320,7 +2368,7 @@ def create_netcdf(df, nc_path, config, template_ds, multi_layered=False):
         df_copy['measurement_error'] = (
             df_copy['Maxcorr1'] > df_copy['Maxcorr2']
         ).astype(int)
-        
+
     else:
         # for levels 2 and 3, the bad vectors have already been removed
         df_copy['bearing_error'] = 0
@@ -2338,7 +2386,7 @@ def create_netcdf(df, nc_path, config, template_ds, multi_layered=False):
         i_all, j_all = _polar_lonlat_to_ij(
             lons_normalized, lats, grid_size=12.5, hemisphere="north"
         )
-        
+
         # xmin/ymin from _grid_params are already cell centers (km),
         # converted to metres here. y flipped to top-down (row 0 = north)
         # to match the j-flip inside _polar_lonlat_to_ij.
@@ -2347,23 +2395,44 @@ def create_netcdf(df, nc_path, config, template_ds, multi_layered=False):
         x_coords = (xmin * 1000) + RES * np.arange(imax)
         y_coords = (ymin * 1000) + RES * np.arange(jmax)
         y_coords = y_coords[::-1]  # flip y-coordinates
-        
+
     elif config['epsg'] == 6931:
         i_all, j_all = _ease2_lonlat_to_ij(lons, lats, config)
-        
+
         # Cell centers computed from EASE-Grid 2.0 North origin constants.
         RES = 12_500.0
         x_coords = -9_000_000.0 + RES * np.arange(1440) + RES / 2
         y_coords =  9_000_000.0 - RES * np.arange(1440) - RES / 2
-        
-        
-    # assign EPSG-specfic i,j values to data frame copy    
+
+
+    # assign EPSG-specfic i,j values to data frame copy
     i_all = np.asarray(i_all, dtype=np.int64)
     j_all = np.asarray(j_all, dtype=np.int64)
     df_copy = df_copy.reset_index(drop=True)
     df_copy['grid_i'] = i_all
     df_copy['grid_j'] = j_all
-    
+
+
+    # determine the bounding box across all observations up front so the
+    # grid is allocated at cropped size rather than the full NSIDC extent.
+    # this is the key memory reduction: a day whose scenes touch only a
+    # small region no longer allocates the entire polar grid per layer.
+    pad_cells = 4
+    full_y = template_ds.sizes['y']
+    full_x = template_ds.sizes['x']
+    y_start = max(0, int(j_all.min()) - pad_cells)
+    y_end   = min(full_y - 1, int(j_all.max()) + pad_cells)
+    x_start = max(0, int(i_all.min()) - pad_cells)
+    x_end   = min(full_x - 1, int(i_all.max()) + pad_cells)
+
+    # shift indices into the cropped frame
+    df_copy['grid_i'] = df_copy['grid_i'] - x_start
+    df_copy['grid_j'] = df_copy['grid_j'] - y_start
+
+    # slice coordinate arrays to the cropped extent
+    x_coords = x_coords[x_start:x_end + 1]
+    y_coords = y_coords[y_start:y_end + 1]
+
 
     # determine scene groups and time layer count
     epoch = pd.Timestamp('2000-01-01')
@@ -2378,7 +2447,11 @@ def create_netcdf(df, nc_path, config, template_ds, multi_layered=False):
 
     n_time = len(scene_groups)
 
-    grid_shape = (n_time, template_ds.sizes['y'], template_ds.sizes['x'])
+    grid_shape = (
+        n_time,
+        y_end - y_start + 1,
+        x_end - x_start + 1
+    )
 
     # build time arrays across all scene groups
     time_array = np.zeros(n_time, dtype='float64')
@@ -2516,26 +2589,6 @@ def create_netcdf(df, nc_path, config, template_ds, multi_layered=False):
                 grp['measurement_error'].to_numpy(dtype=np.int16))
 
 
-        # crop to bounding box of all finite speed values across all layers
-        data_mask = np.any(
-            np.isfinite(netcdf_grid["sea_ice_speed"].values), axis=0
-        )
-        if np.any(data_mask):
-            filled_y, filled_x = np.where(data_mask)
-            pad_cells = 4
-            y_start = max(0, int(filled_y.min()) - pad_cells)
-            y_end   = min(
-                netcdf_grid.sizes["y"] - 1, int(filled_y.max()) + pad_cells
-            )
-            x_start = max(0, int(filled_x.min()) - pad_cells)
-            x_end   = min(
-                netcdf_grid.sizes["x"] - 1, int(filled_x.max()) + pad_cells
-            )
-            netcdf_grid = netcdf_grid.isel(
-                y=slice(y_start, y_end + 1),
-                x=slice(x_start, x_end + 1)
-            )
-
         # save to NetCDF
         netcdf_grid.to_netcdf(
             nc_path, mode='w',
@@ -2572,10 +2625,10 @@ def create_netcdf(df, nc_path, config, template_ds, multi_layered=False):
                 'spatial_ref': {'dtype': 'int32'}
             }
         )
-        
-        # set Linux/Mac permissions on file    
-        _set_file_permissions(nc_path)
-    
+
+        # set Linux/Mac permissions on file
+        _set_linux_permissions(nc_path)
+
         logger.info(f'Created NetCDF {nc_path}')
 
     finally:
@@ -2855,7 +2908,7 @@ def create_shape_package(df, gpkg_path, config):
         
      
     # set Linux/Mac permissions on file    
-    _set_file_permissions(gpkg_path)
+    _set_linux_permissions(gpkg_path)
     
     # log activity
     logger.info(f'Created GeoPackage {gpkg_path}')
@@ -3009,12 +3062,15 @@ def create_vector_json(df, json_path, available_dates_path, config):
     
     vectors = [
         [
-            float(row.longitude_1),
-            float(row.latitude_1),
-            float(row.longitude_2),
-            float(row.latitude_2),
-            float(row.sea_ice_speed_kmdy),
-            float(row.direction_of_sea_ice_displacement)
+            float(np.round(row.longitude_1, config['coordinate_precision'])),
+            float(np.round(row.latitude_1,config['coordinate_precision'])),
+            float(np.round(row.longitude_2, config['coordinate_precision'])),
+            float(np.round(row.latitude_2, config['coordinate_precision'])),
+            float(np.round(row.sea_ice_speed_kmdy, config['speed_precision'])),
+            float(np.round(
+                row.direction_of_sea_ice_displacement,
+                config['bearing_precision']
+            ))
         ]
         for row in df_local.itertuples(index=False)
     ]
@@ -3031,22 +3087,31 @@ def create_vector_json(df, json_path, available_dates_path, config):
 
 
     # set Linux/Mac permissions on file    
-    _set_file_permissions(json_path)
+    _set_linux_permissions(json_path)
     
     logger.info(f'Created JSON {json_path}')
     
     
     # update available dates
+    date1_key = date1.replace('-', '')  # "YYYYMMDD"
+    date2_key = date2.replace('-', '')  # "YYYYMMDD"
+    
     if os.path.exists(available_dates_path):
         with open(available_dates_path, 'r', encoding='utf-8') as f:
-            available_dates = set(json.load(f))
+            available_dates = json.load(f)
+        if not isinstance(available_dates, dict):
+            available_dates = {}
     else:
-        available_dates = set()
+        available_dates = {}
     
-    if date1 not in available_dates:
-        available_dates.add(date1.replace('-', ''))
+    if available_dates.get(date1_key) != date2_key:
+        available_dates[date1_key] = date2_key
         with open(available_dates_path, 'w', encoding='utf-8') as f:
-            json.dump(sorted(available_dates), f, separators=(',', ':'))
-            
-        # set Linux/Mac permissions on file    
-        _set_file_permissions(available_dates_path)
+            json.dump(
+                dict(sorted(available_dates.items())),
+                f,
+                separators=(',', ':')
+            )
+    
+        # set Linux/Mac permissions on file
+        _set_linux_permissions(available_dates_path)
