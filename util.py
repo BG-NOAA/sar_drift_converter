@@ -287,59 +287,68 @@ def error_msg(msg):
 def _download_sar_drift_files(config):
     """
     Download Arctic-wide SAR ice drift gfilter text files from a
-    configured web directory.
+    configured web directory, limited to the reprocess window.
 
     Scrapes the HTML directory listing at the URL specified in
     `config['sar_drift_data_url']`, filters for matching gfilter
-    filenames, and downloads any files not already present in the
-    local SAR drift directory.
+    filenames dated within `config['reprocess_days']` of today, and
+    downloads them into the local download directory.
 
     Args:
         config (dict): Configuration dictionary. Must include:
                 - 'sar_drift_data_url' (str): URL of the directory
                   listing page hosting SAR drift gfilter text files.
-                - 'sar_drift_directory' (str): Local directory path
-                  where downloaded files are saved.
+                - 'sar_drift_download_directory' (str): Local directory
+                  path where downloaded files are saved.
+                - 'reprocess_days' (int): Number of days back from today
+                  to download. Files whose embedded date is older than
+                  this window are skipped.
 
     Workflow:
         1. Send a GET request to `config['sar_drift_data_url']` and
            parse the HTML directory listing using BeautifulSoup.
         2. Filter all `<a>` href links for filenames matching the
-           gfilter pattern: `SARIceDrift_EG125_*.txt`.
+           gfilter pattern `SARIceDrift_EG125_*T0000_*T2359_gfilter1.txt`.
         3. Skip links beginning with `?` or `/` (navigation and
            parent directory entries).
-        4. For each matched file, skip download if the file already
-           exists in `config['sar_drift_directory']`.
-        5. Download new files via streaming GET requests in 1 MB
-           chunks, logging each download URL.
+        4. Parse the YYYYDDD (year + day-of-year) date token from each
+           matched filename and keep only files dated on or after
+           (today - reprocess_days).
+        5. Download each remaining file, logging each download.
         6. Log and return early if no matching files are found.
 
     Returns:
         None
 
     Raises:
-        requests.HTTPError: If the directory listing request or any
-            individual file download returns a non-2xx status code,
-            via `raise_for_status()`.
-        requests.RequestException: If a network error occurs during
-            any GET request.
+        requests.HTTPError: If the directory listing request returns a
+            non-2xx status code, via `raise_for_status()`.
+        requests.RequestException: If a network error occurs during the
+            directory listing request. Individual file download errors
+            are caught and logged rather than raised.
 
     Notes:
         - SSL verification is disabled for all requests via
           `verify=False`. InsecureRequestWarning is suppressed via
           `urllib3.disable_warnings()`.
-        - Files already present in `config['sar_drift_directory']`
-          are skipped silently, making repeated calls safe for
-          incremental updates.
+        - The date window mirrors the `reprocess_days` logic in
+          `_check_existing_files`, so the set of days downloaded matches
+          the set of days whose output is force-regenerated.
+        - The download directory is expected to have been cleared by
+          `_clear_download_dir` before this function runs, so files are
+          re-downloaded fresh each run within the window.
         - `base_url` is normalized to end with `/` before constructing
           absolute download links via `urljoin`, preventing the final
           path component from being dropped.
+        - A per-filename date-parse failure logs a warning and skips that
+          file rather than aborting the run.
         - Download progress is displayed via a `tqdm` progress bar.
     """
-    
+
     import logging
     from tqdm import tqdm
     import os
+    import pandas as pd
     import requests
     from bs4 import BeautifulSoup
     from urllib.parse import urljoin
@@ -348,43 +357,60 @@ def _download_sar_drift_files(config):
     from requests.adapters import HTTPAdapter
     from urllib3.util.ssl_ import create_urllib3_context
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    
+
     # log activity
     logger = logging.getLogger('sar_drift_converter')
 
-    
+
     # download SAR drift data files
     base_url = config['sar_drift_data_url'].rstrip('/') + '/'
-    
+
     # Get the HTML page content
     response = requests.get(base_url, verify=False)
     response.raise_for_status()
     soup = BeautifulSoup(response.text, 'html.parser')
-    
+
     # Extract all <a> tag hrefs
     links = []
     for a in soup.find_all('a', href=True):
         if not a['href'].startswith('?') and not a['href'].startswith('/'):
             links.append(a['href'])
-    
-    
-    # Filter for Arctic-wide gfilter.txt files
+
+
+    # cutoff date for how far back to download, based on reprocess_days
+    reprocess_days = config['reprocess_days']
+    cutoff = (
+        pd.Timestamp.now().normalize() - pd.Timedelta(days=reprocess_days)
+    )
+
+    # Filter for Arctic-wide gfilter.txt files within the reprocess window
     download_links = []
     for link in links:
         if link.startswith('SARIceDrift_EG125_') and \
            link.endswith('T2359_gfilter1.txt') and \
            'T0000_' in link:
-               download_links.append(urljoin(base_url, link))
-    
-    
-    # Download each file                
+            # date token is YYYYDDD (year + day-of-year) after the prefix,
+            # e.g. 'SARIceDrift_EG125_2025350T0000_...' -> '2025350'
+            date_token = link.split('_')[2][:7]
+            try:
+                file_date = pd.to_datetime(date_token, format='%Y%j')
+            except ValueError:
+                logger.warning(
+                    f"Could not parse date from {link}; skipping"
+                )
+                continue
+            if file_date >= cutoff:
+                download_links.append(urljoin(base_url, link))
+
+
+    # Download each file
     if len(download_links) == 0:
         logger.info("No new gfilter files found to download")
         return
-    
-    download_folder = config['sar_drift_download_directory']        
+
+    download_folder = config['sar_drift_download_directory']
     tqdm_desc = "Downloading SAR drift gfilter files"
-            
+
 
     class TLSAdapter(HTTPAdapter):
         """
@@ -401,10 +427,10 @@ def _download_sar_drift_files(config):
             ctx.verify_mode = ssl.CERT_NONE
             kwargs['ssl_context'] = ctx
             return super().init_poolmanager(*args, **kwargs)
-    
+
     with requests.Session() as session:
         session.mount('https://', TLSAdapter())
-        
+
         for file_url in tqdm(
                 download_links, desc=tqdm_desc, unit=' file', colour='green'):
             filename = os.path.basename(file_url)
@@ -416,7 +442,7 @@ def _download_sar_drift_files(config):
                     f.write(r.text)
                 logger.info(f"Downloaded {filename}")
             except requests.exceptions.RequestException as e:
-                logger.warning(f"Skipping {filename}: {e}")            
+                logger.warning(f"Skipping {filename}: {e}")        
  
 
 def _read_gfilter_file(args):
