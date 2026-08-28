@@ -230,7 +230,7 @@ def read_json_config():
     with open(config_file, 'r') as f:
         config = json.load(f)
 
-    # Key validation — strip comment keys before comparison
+    # Key validation (strip comment keys before comparison)
     comment_keys = {k for k in config.keys() if k.startswith('_comment')}
     config_keys_no_comments = set(config.keys()) - comment_keys
 
@@ -295,7 +295,7 @@ def read_json_config():
     # Delimiter decode (\t etc.)
     delimiter = config['delimiter'].encode().decode('unicode_escape')
 
-    # Build final config — output_dir is set by create_level_output()
+    # Build final config (output_dir is set by create_level_output())
     config = {
         **resolved_paths,
         'meta_dir':                config['meta_dir'],

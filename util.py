@@ -2,7 +2,7 @@
 """
 ******************************************************************************
 
- Project:     SAR Drift COnverter
+ Project:     SAR Drift Converter
  Purpose:     Converter SAR drift data into visually interactive output
  Author:      Brendon Gory, brendon.gory@noaa.gov
                             brendon.gory@colostate.edu
