@@ -1,0 +1,25 @@
+name: sar_drift_converter
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - beautifulsoup4
+  - cartopy
+  - geopandas
+  - matplotlib
+  - netCDF4=1.7.2 
+  - numpy=2.0.2
+  - pandas
+  - pip
+  - pip:
+      - nc-time-axis  
+  - pyproj=3.6.1
+  - python=3.10
+  - rasterio>=1.3.0
+  - requests
+  - scikit-learn=1.6.1
+  - scipy=1.13.1
+  - shapely
+  - tqdm
+  - urllib3
+  - xarray=2024.7.0

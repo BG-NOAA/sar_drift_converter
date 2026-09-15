@@ -7,7 +7,7 @@ dependencies:
   - cartopy
   - geopandas
   - matplotlib
-  - netCDF4  
+  - netCDF4
   - numpy
   - pandas
   - pip
@@ -17,8 +17,8 @@ dependencies:
   - python=3.10
   - rasterio>=1.3.0
   - requests
-  - scipy
   - scikit-learn
+  - scipy
   - shapely
   - tqdm
   - urllib3
