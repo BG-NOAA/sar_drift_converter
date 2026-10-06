@@ -347,6 +347,7 @@ def _download_sar_drift_files(config):
 
     import logging
     from tqdm import tqdm
+    import verbosity as v
     import os
     import pandas as pd
     import requests
@@ -432,7 +433,8 @@ def _download_sar_drift_files(config):
         session.mount('https://', TLSAdapter())
 
         for file_url in tqdm(
-                download_links, desc=tqdm_desc, unit=' file', colour='green'):
+                download_links, desc=tqdm_desc, unit=' file',
+                colour='green', disable=not v.progress_enabled()):
             filename = os.path.basename(file_url)
             local_path = os.path.join(download_folder, filename)
             try:
@@ -2006,6 +2008,7 @@ def combine_into_dataframe(files, config):
     import logging
     import pandas as pd
     from tqdm import tqdm
+    import verbosity as v
     from concurrent.futures import ProcessPoolExecutor
 
     logger = logging.getLogger('sar_drift_converter')
@@ -2033,11 +2036,12 @@ def combine_into_dataframe(files, config):
         results = list(tqdm(
             executor.map(_read_gfilter_file, args),
             total=len(args),
-            desc='Reading gfilter files...',
+            desc='Reading gfilter files',
             unit=' file',
             file=sys.stdout,
             dynamic_ncols=True,
-            colour='green', miniters=1000, mininterval=0
+            colour='green', miniters=1000, mininterval=0,
+            disable=not v.progress_enabled()
         ))
 
     all_dfs = [r for r in results if r is not None]
@@ -2047,7 +2051,7 @@ def combine_into_dataframe(files, config):
         logger.warning(f"{failed} file(s) failed to read and were skipped")
         
 
-    print('Combining all files into one Data Frame...')
+    v.echo(1, 'Combining all files into one Data Frame')
     df_all = pd.concat(all_dfs, ignore_index=True)
 
     df_all['date_start'] = pd.to_datetime(
@@ -2141,6 +2145,7 @@ def filter_input_data(df_all, config):
     import logging
     import pandas as pd
     from tqdm import tqdm
+    import verbosity as v
 
     # log activity
     logger = logging.getLogger('sar_drift_converter')
@@ -2152,12 +2157,13 @@ def filter_input_data(df_all, config):
         total_scenes = len(scenes)
         chunks = max(1, total_scenes // 20)
         for (file1, file2), df_scene in tqdm(
-                scenes, desc='Filtering scenes...',
+                scenes, desc='Filtering scenes',
                 total=total_scenes,
                 miniters=chunks,
                 mininterval=0,
                 unit=' scene',
-                colour='green'
+                colour='green',
+                disable=not v.progress_enabled()
             ):
             scene_id = f"{file1}_{file2}"
             use_75km = df_scene['_use_75km'].iloc[0]
@@ -2224,7 +2230,7 @@ def filter_input_data(df_all, config):
             accepted.append(df_scene)
             
     
-        print('Updating Data Frame with filtered data...')
+        v.echo(1, 'Updating Data Frame with filtered data')
         df_all = pd.concat(accepted, ignore_index=True)
         df_all['date_start'] = pd.to_datetime(
             df_all['date_start'],
@@ -2242,7 +2248,7 @@ def filter_input_data(df_all, config):
     
     # save filtered combined CSV
     if config['level'] == "00":
-        print('Saving combined Data Frame...')
+        v.echo(1, 'Saving combined Data Frame')
         df_all.to_csv(
             os.path.join(
                 config['test_output_dir'], 'filtered_combined.csv'

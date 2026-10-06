@@ -760,6 +760,7 @@ def create_level_output(df_all, config):
     import logging
     import pandas as pd
     import gc
+    import verbosity as v
 
     
     run_start = datetime.utcnow()
@@ -800,7 +801,7 @@ def create_level_output(df_all, config):
 
     
     # create date range groups for daily/scene output
-    print('Creating groups based on start day...')
+    v.echo(1, 'Creating groups based on start day')
     df_all['date_range'] = (
         pd.to_datetime(df_all['date_start']).dt.strftime('%Y%m%d')
     )
@@ -809,12 +810,13 @@ def create_level_output(df_all, config):
     # create output: group by day, then by scene within each day
     start_days = {}
     tqdm_desc = (
-        f"Processing days (PL: {config['level']}; EPSG: {config['epsg']})..."
+        f"Processing days (PL: {config['level']}; EPSG: {config['epsg']})"
     )
     for day, df_day in tqdm(
-            df_all.groupby('date_range'), tqdm_desc,
+            df_all.groupby('date_range'), desc=tqdm_desc,
             unit=' day', unit_scale=False,
-            colour='green'
+            colour='green',
+            disable=not v.progress_enabled()
         ):        
         
         logger.info(f"Processing day: {day}")
@@ -967,12 +969,16 @@ def process_level_output(test=False):
     
     # parse user arguments
     config = read_json_config()
-    
+
+    # set console verbosity from config
+    import verbosity as v
+    v.set_level(1 if config['verbose'] else 0)
+
     # initialize logger
     os.makedirs(config['log_dir'], exist_ok=True)
     for log_file in glob(os.path.join(config['log_dir'], '*.log')):        
         zip_path = log_file.replace('.log', '.zip')
-        print(f'Compressing {log_file}')
+        v.echo(0, f'Compressing {log_file}')
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
             zf.write(log_file, os.path.basename(log_file))
         os.remove(log_file)
@@ -995,7 +1001,7 @@ def process_level_output(test=False):
     
     
     # find files to process
-    print("Gathering files to process (download and manual directories)...")
+    v.echo(1, 'Gathering files to process (download and manual directories)')
     files= []
     download_count = 0
     all_files = glob(os.path.join(config['sar_drift_download_directory'], '*'))
